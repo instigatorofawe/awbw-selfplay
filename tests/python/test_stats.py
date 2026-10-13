@@ -13,6 +13,7 @@ def standard(**overrides) -> ReplaySummary:
         width=20,
         height=18,
         end_action="Resign",
+        days=14,
     )
     for k, v in overrides.items():
         setattr(s, k, v)
@@ -39,7 +40,12 @@ def test_standard_game_is_in_scope():
         ({"width": 41}, "map too large"),
         ({"end_action": None}, "no game-over in log"),
         ({"turns_without_actions": 1}, "turns missing actions"),
+        ({"days": 5}, "under 6 days"),
     ],
 )
 def test_out_of_scope(overrides, reason):
     assert v1_rejection(standard(**overrides)) == reason
+
+
+def test_minimum_length_is_inclusive():
+    assert v1_rejection(standard(days=6)) is None

@@ -307,10 +307,11 @@ static_assert(std::is_trivially_copyable_v<GameState>);
    Rate-limited (1 request/s by default) and polite.
    - Cached so far: the 2,000 most recent 2p GL std games (to 2026-10-12),
      all with clear weather, no fog, powers on, 1000 funds per property.
-     1,699 pass the v1 filter; 299 have no `GameOver` (timeouts and cancelled
-     games); 2 miss a mid-game turn in the log. They end by resignation
-     (1,589), capture (105), rout (7) and deletion (1). 41 have turns cut off
-     at the max turn length.
+     1,653 pass the v1 filter; 299 have no `GameOver` (timeouts and cancelled
+     games); 46 end before day 6 (all resignations, 14 on day 1); 2 miss a
+     mid-game turn in the log. Of the games with a `GameOver`, 1,589 end by
+     resignation, 105 by capture, 7 by rout and 1 by deletion; median length
+     is 14 days. 41 have turns cut off at the max turn length.
      Extending to 10,000 games (`cache/index/2p_global_league_std_10k.jsonl`).
 3. **Parse** into a `Replay` object: settings, players, map id, per-turn
    snapshots, per-turn actions, result. Uses our own bytes-based PHP
@@ -320,8 +321,8 @@ static_assert(std::is_trivially_copyable_v<GameState>);
      1000 funds per property, no starting funds, map ≤ `MAX_W × MAX_H`
    - keep: a `GameOver` in the log (this drops timeout losses and cancelled
      games), and every turn logged
-   - proposed, not yet applied: a minimum game length of 6 days. Of 1,699
-     accepted games (median 14 days), 46 end by resignation within 5 days.
+   - keep: games that reach day 6 (`MIN_DAYS`). Earlier resignations say
+     little about who was winning. Provisional; a later cutoff may suit better.
 5. **Convert** each snapshot to a `GameState` (C++ `from_snapshot`) and run
    invariant checks.
 6. **Validate** (once the engine runs): apply the logged actions with forced

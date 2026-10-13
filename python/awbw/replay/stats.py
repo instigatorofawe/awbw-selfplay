@@ -70,6 +70,9 @@ def summarize(path: str | Path) -> ReplaySummary:
 
 
 STANDARD_FUNDS_PER_PROPERTY = 1000
+# Shorter games are early resignations, which say little about who was winning.
+# Provisional: a later cutoff may suit better.
+MIN_DAYS = 6
 
 
 def v1_rejection(s: ReplaySummary) -> str | None:
@@ -78,7 +81,8 @@ def v1_rejection(s: ReplaySummary) -> str | None:
     v1 is standard 2-player games: no tag, no fog, clear weather, powers on,
     1000 funds per property (no high income) and no starting funds. Capture
     limits vary per map in standard play, so any limit is accepted. The map
-    must be cached (states can't be built without it) and fit the engine.
+    must be cached (states can't be built without it) and fit the engine, and
+    the game must reach day MIN_DAYS.
     """
     if s.error:
         return "parse error"
@@ -108,4 +112,6 @@ def v1_rejection(s: ReplaySummary) -> str | None:
         return "no game-over in log"
     if s.turns_without_actions:
         return "turns missing actions"
+    if s.days < MIN_DAYS:
+        return f"under {MIN_DAYS} days"
     return None
