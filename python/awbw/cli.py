@@ -9,6 +9,7 @@ from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
+from .league import fetch_rotation, load_rotation
 from .maps import fetch_map
 from .net import Http, cache_dir
 from .replay import load_replay
@@ -44,6 +45,10 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("map_ids", nargs="*", type=int)
     m.add_argument("--index", type=Path, help="also fetch every map in this JSONL index")
 
+    lg = sub.add_parser("league", help="snapshot the Global League map rotation and settings")
+    lg.add_argument("--mode", choices=["std", "fog", "hf"], default="std")
+    lg.add_argument("--fetch-maps", action="store_true", help="also download terrain for the listed maps")
+
     i = sub.add_parser("inspect", help="print a summary of one replay")
     i.add_argument("replay", help="path to a replay zip, or a cached game id")
 
@@ -53,9 +58,15 @@ def main(argv: list[str] | None = None) -> int:
 
     args = p.parse_args(argv)
     http = Http(min_interval=args.rate)
-    return {"index": _index, "fetch": _fetch, "fetch-map": _fetch_map, "inspect": _inspect, "stats": _stats}[args.cmd](
-        args, http
-    )
+    commands = {
+        "index": _index,
+        "fetch": _fetch,
+        "fetch-map": _fetch_map,
+        "league": _league,
+        "inspect": _inspect,
+        "stats": _stats,
+    }
+    return commands[args.cmd](args, http)
 
 
 def _index(args, http: Http) -> int:
@@ -99,6 +110,22 @@ def _fetch_map(args, http: Http) -> int:
         ids += [e.map_id for e in read_index(args.index)]
     for map_id in dict.fromkeys(ids):
         print(fetch_map(map_id, http))
+    return 0
+
+
+def _league(args, http: Http) -> int:
+    path = fetch_rotation(http)
+    rotation = load_rotation(path)
+    maps = rotation.mode(args.mode)
+    print(f"{len(maps)} {args.mode} maps in the rotation of {rotation.date} ({path})")
+    for m in maps:
+        tiers = ",".join(t.name for t in m.tiers if t.enabled)
+        bans = ", ".join(m.unit_bans) or "none"
+        print(f"  {m.id:7d}  {m.name:28s} cap={m.cap_limit:<3d} units={m.unit_limit:<3d} tiers={tiers:12s} bans={bans}")
+    if args.fetch_maps:
+        for m in maps:
+            fetch_map(m.id, http)
+        print(f"fetched {len(maps)} maps")
     return 0
 
 
@@ -156,6 +183,7 @@ def _stats(args, http: Http) -> int:
     show("days", Counter(min(s.days // 5 * 5, 40) for s in ok), top=20)
     show("map size", Counter(f"{s.width}x{s.height}" if s.width else "not cached" for s in ok), top=20)
     show("action kinds", sum((s.actions for s in ok), Counter()), top=30)
+    show("turns cut off at max turn length (no End)", Counter(min(s.turns_without_end, 3) for s in ok))
     rejections = Counter(v1_rejection(s) or "ACCEPTED" for s in summaries)
     show("v1 filter", rejections)
     return 0

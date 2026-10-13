@@ -198,6 +198,18 @@ static_assert(std::is_trivially_copyable_v<GameState>);
   logged-in session (`logincheck.php`, `PHPSESSID` cookie). The map API
   `api/map/map_info.php?maps_id=N` is public JSON; its terrain grid is
   column-major (`[x][y]`).
+- **Global League rotation** (`awbw league`): `api/league/maps.php` with
+  `{"method": "listMaps"}` (the read-only call the public GL maps page makes).
+  - Per map: mode (std/fog/hf), unit limit, capture limit, enabled CO tiers
+    with their COs, and unit bans.
+  - Also returns AWBW's unit-id and CO-id name tables, which the M1 rules
+    tables should key on.
+  - **Replays don't record unit bans or the unit limit**, so for league games
+    these settings come from here. Snapshots are dated (`cache/league/`)
+    because the rotation changes; the current snapshot only covers current
+    maps. As of 2026-10-12, std has 14 maps, all banning Black Bomb and
+    Stealth, with a unit limit of 50. Capture limits matched `capture_win` in
+    all 172 cached replays on those maps.
 - **Reference implementation:**
   [DeamonHunter/AWBW-Replay-Player](https://github.com/DeamonHunter/AWBW-Replay-Player)
   (C#, MIT). It also has an XML parser for an older replay format, which we
@@ -220,6 +232,15 @@ static_assert(std::is_trivially_copyable_v<GameState>);
   turn-start repairs, funds and weather (`End.updatedInfo`).
 - The result is in a `GameOver` object (`winners`, `losers`) nested in the
   game-ending action.
+- **Timeouts in 2p games:**
+  - **Max turn length:** a turn cut off by the server ends with no `End`
+    action (the player's clock drops by exactly `timers_max_turn`, 7 days),
+    and the game continues. The engine treats the next snapshot as an
+    implicit end of turn. Policy extraction must not treat it as a decision.
+  - **Timeout loss:** the final turn has no log entry and there is no
+    `GameOver`. mooo marks the player whose turn it was as the loser (30 of 30
+    checked). The result doesn't reflect the position, so these are excluded.
+  - Games cancelled on day 1-2 also have no `GameOver`, and no loser on mooo.
 - Multiplayer logs have gaps (timed-out turns get no entry) and mid-game
   resignations; tag games end turns with `Tag`. Both are out of scope.
 
@@ -235,8 +256,9 @@ static_assert(std::is_trivially_copyable_v<GameState>);
 4. **Filter** (`awbw.replay.stats.v1_rejection`):
    - keep: 2 players, no tag/team, no fog, clear weather, powers on,
      1000 funds per property, no starting funds, map ≤ `MAX_W × MAX_H`
-   - keep: a `GameOver` in the log, and every turn logged
-   - drop: booted/timeout games, very short games (still to be measured)
+   - keep: a `GameOver` in the log (this drops timeout losses and cancelled
+     games), and every turn logged
+   - still to decide: a minimum game length
 5. **Convert** each snapshot to a `GameState` (C++ `from_snapshot`) and run
    invariant checks.
 6. **Validate** (once the engine runs): apply the logged actions with forced

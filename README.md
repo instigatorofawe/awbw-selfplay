@@ -33,6 +33,7 @@ uv run awbw fetch --index cache/index/2p_global_league_std_nodraw.jsonl --limit 
 uv run awbw inspect 1745964   # summarize one cached replay
 uv run awbw stats             # settings, endings and v1-filter counts over the cache
 uv run awbw fetch-map 176376  # map terrain from AWBW's public map API
+uv run awbw league --fetch-maps   # snapshot the Global League std rotation + settings
 ```
 
 Requests are rate-limited (`--rate`, default one per second). Please keep it

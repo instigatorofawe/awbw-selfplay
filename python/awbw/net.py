@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -50,6 +51,11 @@ class Http:
     def post(self, url: str, form: dict[str, str]) -> tuple[bytes, Message]:
         body = urllib.parse.urlencode(form).encode()
         return self._request(urllib.request.Request(url, data=body, method="POST"))
+
+    def post_json(self, url: str, payload: object) -> bytes:
+        req = urllib.request.Request(url, data=json.dumps(payload).encode(), method="POST")
+        req.add_header("Content-Type", "application/json")
+        return self._request(req)[0]
 
     def _wait_turn(self) -> None:
         with self._lock:

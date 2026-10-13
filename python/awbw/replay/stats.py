@@ -32,6 +32,7 @@ class ReplaySummary:
     days: int = 0
     turns: int = 0
     turns_without_actions: int = 0
+    turns_without_end: int = 0  # cut off by the max turn length; no End in the log
     actions: Counter = field(default_factory=Counter)
     end_action: str | None = None
     co_ids: list[int] = field(default_factory=list)
@@ -57,6 +58,10 @@ def summarize(path: str | Path) -> ReplaySummary:
     s.tag = any(p.tags_co_id for p in first.players)
     s.days, s.turns = r.days, len(r.turns)
     s.turns_without_actions = sum(t.actions is None for t in r.turns)
+    s.turns_without_end = sum(
+        bool(t.actions is not None and (not t.actions or t.actions[-1].get("action") not in ("End", "Tag")))
+        for t in r.turns[:-1]
+    )
     s.actions = Counter(a.get("action", "?") for t in r.turns for a in t.actions or [])
     over = r.game_over()
     s.end_action = over.end_action if over else None
@@ -98,6 +103,8 @@ def v1_rejection(s: ReplaySummary) -> str | None:
     if s.width > MAX_WIDTH or s.height > MAX_HEIGHT:
         return "map too large"
     if s.end_action is None:
+        # Timeout losses (the player on turn ran out of clock) and cancelled games:
+        # the result doesn't reflect the position.
         return "no game-over in log"
     if s.turns_without_actions:
         return "turns missing actions"
