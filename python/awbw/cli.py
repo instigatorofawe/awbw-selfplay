@@ -122,6 +122,12 @@ def main(argv: list[str] | None = None) -> int:
     va.add_argument("replay", help="path to a replay zip, or a cached game id")
     va.add_argument("--device", default="auto")
 
+    lv = sub.add_parser("live", help="a saved critic's view of a game in progress on awbw.amarriner.com")
+    lv.add_argument("checkpoint", type=Path)
+    lv.add_argument("game", help="game id or game page URL")
+    lv.add_argument("--history", action="store_true", help="every turn so far, not just the current one")
+    lv.add_argument("--device", default="auto")
+
     args = p.parse_args(argv)
     http = Http(min_interval=args.rate)
     commands = {
@@ -139,6 +145,7 @@ def main(argv: list[str] | None = None) -> int:
         "train-critic": _train_critic,
         "eval-critic": _eval_critic,
         "value": _value,
+        "live": _live,
     }
     return commands[args.cmd](args, http)
 
@@ -483,7 +490,6 @@ def _value(args, http: Http) -> int:
 
     from . import engine
     from .nn.critic import Critic
-    from .nn.model import LOSS, WIN
     from .rules import load as load_rules
 
     path = Path(args.replay)
@@ -508,8 +514,72 @@ def _value(args, http: Http) -> int:
         won = sorted(f"P{order[p] + 1}" for p in over.winners if p in order)
         result = f"{' and '.join(won) or 'nobody'} won ({over.end_action}, day {over.day})"
     print(f"game {r.game.id} on map {r.game.map_id}: {names[0]} vs {names[1]}; {result}")
-    print("  day  to move              P1 wins")
+    _print_values(names, prob, movers, days)
+    return 0
+
+
+def _print_values(names: list[str], prob, movers: list[int], days: list[int]) -> None:
+    """P1's win chance turn by turn, from (loss, draw, win) for each turn's player to move."""
+    from .nn.model import LOSS, WIN
+
+    width = max(len(n) for n in names)
+    print(f"  day  {'to move':{width}s}  P1 wins")
     for p, mover, day in zip(prob, movers, days, strict=True):
         p1 = float(p[WIN] if mover == 0 else p[LOSS])
-        print(f"  {day:3d}  {names[mover]:18s}  {p1:6.1%}  {'#' * round(p1 * 40)}")
+        print(f"  {day:3d}  {names[mover]:{width}s}  {p1:6.1%}  {'#' * round(p1 * 40)}")
+
+
+def _live(args, http: Http) -> int:
+    import numpy as np
+
+    from . import live
+    from .nn.critic import Critic
+    from .nn.model import DRAW, LOSS, WIN
+    from .rules import load as load_rules
+
+    try:
+        game, turns = live.fetch(live.game_id_from(args.game), http, history=args.history)
+        states = [live.state(game, t) for t in turns]
+    except (live.LiveUnavailable, live.Unsupported, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    critic = Critic.load(args.checkpoint, args.device)
+    prob = critic.wdl(np.stack([np.frombuffer(s.to_bytes(), np.uint8) for s in states]))
+    cos = load_rules().cos
+    first = turns[0].turn.players
+    co = {p.id: cos[p.co_id].name for p in first}
+    names = [f"P{i + 1} {co[pid]} ({game.names[pid]})" for i, pid in enumerate(game.order)]
+    g = game.game
+    print(f"game {g.id} {g.name!r} on map {g.map_id}: {names[0]} vs {names[1]}" + ("; over" if game.ended else ""))
+
+    def limit(n: int) -> str:
+        return str(n) if n else "off"
+
+    cap = limit(g.capture_win if g.capture_win < 1000 else 0)
+    print(
+        f"  funds {g.funds_per_property}, weather {g.weather_type.lower()}, powers {'on' if g.use_powers else 'off'}, "
+        f"capture limit {cap}, day limit {limit(game.day_limit)}, unit limit {limit(game.unit_limit)}"
+    )
+    movers = [s.active for s in states]
+    if args.history:
+        _print_values(names, prob, movers, [s.day for s in states])
+    now, p, mover = turns[-1], prob[-1], movers[-1]
+    p1, p2 = (p[WIN], p[LOSS]) if mover == 0 else (p[LOSS], p[WIN])
+    print(
+        f"  day {now.turn.day}, {names[mover]} to move, at the start of the turn: "
+        f"P1 wins {p1:.1%}, draw {p[DRAW]:.1%}, P2 wins {p2:.1%}"
+    )
+    who = {pid: f"P{i + 1}" for i, pid in enumerate(game.order)}
+    if game.acted and now.turn.player_id == game.to_move:
+        print(f"  note: {game.acted} of {who[game.to_move]}'s units have acted since; the critic values turn starts")
+    if now.estimated_hp:
+        print(f"  note: {now.estimated_hp} damaged units show whole HP only; their exact HP is estimated")
+    if now.unknown_hp:
+        print(f"  note: {now.unknown_hp} units hide their HP (Sonja); counted as full")
+    for u in now.put_back:
+        owner, mover_id = who[u.players_id], now.turn.player_id
+        where = "on its own board at a guessed tile" if u.players_id == mover_id else f"out of {who[mover_id]}'s sight"
+        print(f"  note: the site hides {owner}'s {u.name} from spectators; put back {where}")
+    for (pid, name), n in now.unplaced.items():
+        print(f"  note: {n} {name} of {who[pid]}'s missing from the page and left out")
     return 0

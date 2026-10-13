@@ -346,6 +346,24 @@ static_assert(std::is_trivially_copyable_v<GameState>);
   logged-in session (`logincheck.php`, `PHPSESSID` cookie). The map API
   `api/map/map_info.php?maps_id=N` is public JSON; its terrain grid is
   column-major (`[x][y]`).
+- **Games in progress** (`awbw live CKPT GAME`, `awbw.live`), no login:
+  - `game.php?games_id=N` embeds the settings (funds, fog, powers, tags, capture,
+    day and unit limits, bans) and the live state as one-line JS values
+    (`playersInfo`, `unitsInfo`, `currentTurn`, ...).
+  - The page's replay viewer, `api/game/load_replay.php` (POST JSON `gameId`,
+    `turn`, `initial`), returns the state at the start of any turn so far, in
+    the same format; `initial` adds `daySelector`, one entry per turn. Fields
+    match the replay snapshots' once their `units_`, `players_` and
+    `buildings_` prefixes go, so live turns go through `state_from_turn`.
+  - A spectator sees less than a replay: HP is the displayed 1–10 (Sonja's
+    is "?"), and hidden Subs and Stealths are left out unless the other player
+    can see them, though `players_units_count` still counts them and their
+    displayed-HP value. `awbw.live` estimates HP as 10d − 4 (the average exact
+    HP behind a display of d in replays; 100 for a 10) and puts each left-out
+    unit back, hidden and out of the other player's sight, with the HP its
+    army value implies. On 1,342 validation games that reproduced the
+    replay's encoding in all 45 positions with an unseen enemy unit. Ended
+    turns are cached in `cache/live/<game>/`.
 - **Global League rotation** (`awbw league`): `api/league/maps.php` with
   `{"method": "listMaps"}` (the read-only call the public GL maps page makes).
   - Per map: mode (std/fog/hf), unit limit, capture limit, enabled CO tiers
@@ -597,6 +615,16 @@ knows what a player who watched every turn knows:
   - Positions near the end are easy because the loser resigns soon after.
     The early game is close to a coin flip for any model: who wins is
     decided by play still to come.
+  - **It ignores the board** (found 2026-10-13). On validation positions,
+    removing every unit from the planes moves P(win) by 0.0002 on average,
+    and halving every unit's HP by less than that, while halving
+    `me.army_value` moves it by 0.21. The trunk's activations grow about
+    tenfold per block from the third (RMS 1.2 after the embedding, 8,400
+    after block 6), so the head reads the globals instead. So v0 is in effect
+    a model of the globals, which is why it barely beats the logistic
+    baseline. Spectator HP rounding costs nothing for the same reason (loss
+    0.5466 either way). Next: normalize the trunk (or scale the residual
+    branches) and retrain.
 
 ### Later
 

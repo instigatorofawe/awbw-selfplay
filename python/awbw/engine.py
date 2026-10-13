@@ -37,8 +37,10 @@ def turn_order(replay: Replay) -> dict[int, int]:
     return {pid: i for i, pid in enumerate(replay.player_ids)}
 
 
-def state_from_turn(replay: Replay, turn: Turn, md: _core.MapData | None = None) -> _core.GameState:
-    """The engine state at the start of one turn of a replay."""
+def state_from_turn(
+    replay: Replay, turn: Turn, md: _core.MapData | None = None, settings: _core.Settings | None = None
+) -> _core.GameState:
+    """The engine state at the start of one turn of a replay (``settings`` defaults to the game's)."""
     if md is None:
         md = map_data(replay.game.map_id)
     r = rules.load()
@@ -71,7 +73,7 @@ def state_from_turn(replay: Replay, turn: Turn, md: _core.MapData | None = None)
     units = np.array(rows, dtype=np.int64).reshape(-1, 11)
     return _core.load_snapshot(
         md,
-        settings_for(replay.game),
+        settings if settings is not None else settings_for(replay.game),
         turn.day,
         index[turn.player_id],
         players,
