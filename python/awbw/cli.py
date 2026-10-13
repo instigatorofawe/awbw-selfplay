@@ -41,7 +41,8 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--source", choices=["mooo", "awbw"], default="mooo")
 
     m = sub.add_parser("fetch-map", help="download maps into the cache")
-    m.add_argument("map_ids", nargs="+", type=int)
+    m.add_argument("map_ids", nargs="*", type=int)
+    m.add_argument("--index", type=Path, help="also fetch every map in this JSONL index")
 
     i = sub.add_parser("inspect", help="print a summary of one replay")
     i.add_argument("replay", help="path to a replay zip, or a cached game id")
@@ -93,7 +94,10 @@ def _fetch(args, http: Http) -> int:
 
 
 def _fetch_map(args, http: Http) -> int:
-    for map_id in args.map_ids:
+    ids = list(args.map_ids)
+    if args.index:
+        ids += [e.map_id for e in read_index(args.index)]
+    for map_id in dict.fromkeys(ids):
         print(fetch_map(map_id, http))
     return 0
 
@@ -150,6 +154,7 @@ def _stats(args, http: Http) -> int:
     show("game type", Counter(s.type for s in ok))
     show("ended by", Counter(s.end_action for s in ok))
     show("days", Counter(min(s.days // 5 * 5, 40) for s in ok), top=20)
+    show("map size", Counter(f"{s.width}x{s.height}" if s.width else "not cached" for s in ok), top=20)
     show("action kinds", sum((s.actions for s in ok), Counter()), top=30)
     rejections = Counter(v1_rejection(s) or "ACCEPTED" for s in summaries)
     show("v1 filter", rejections)

@@ -10,6 +10,8 @@ def standard(**overrides) -> ReplaySummary:
         weather_type="Clear",
         funds_per_property=1000,
         capture_win=26,
+        width=20,
+        height=18,
         end_action="Resign",
     )
     for k, v in overrides.items():
@@ -33,6 +35,8 @@ def test_standard_game_is_in_scope():
         ({"use_powers": False}, "powers off"),
         ({"funds_per_property": 2000}, "funds/property 2000"),
         ({"starting_funds": 5000}, "starting funds"),
+        ({"width": 0, "height": 0}, "map not cached"),
+        ({"width": 41}, "map too large"),
         ({"end_action": None}, "no game-over in log"),
         ({"turns_without_actions": 1}, "turns missing actions"),
     ],

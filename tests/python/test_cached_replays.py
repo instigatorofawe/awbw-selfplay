@@ -34,8 +34,11 @@ def test_replay_invariants(path):
         carried = {u.id for u in turn.units if u.carried}
         assert carried == {c for u in turn.units for c in u.cargo}
 
+    # Games cancelled early (day 1-2, no loser on mooo) log no GameOver at all.
     over = r.game_over()
-    assert over is not None and over.winners and over.losers
+    if over is not None:
+        assert set(over.winners) | set(over.losers) <= set(order)
+        assert not set(over.winners) & set(over.losers)
     # Multiplayer logs have gaps (timed-out turns, mid-game resignations), so only
     # 2-player games must log every turn and end it explicitly.
     if len(order) == 2:

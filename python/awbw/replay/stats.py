@@ -6,6 +6,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .._core import MAX_HEIGHT, MAX_WIDTH
+from ..maps import load_map, map_path
 from .parse import ReplayFormatError, load_replay
 
 
@@ -25,6 +27,8 @@ class ReplaySummary:
     team: bool = False
     tag: bool = False
     map_id: int = 0
+    width: int = 0  # 0 when the map is not in the cache
+    height: int = 0
     days: int = 0
     turns: int = 0
     turns_without_actions: int = 0
@@ -47,6 +51,9 @@ def summarize(path: str | Path) -> ReplaySummary:
     s.fog, s.weather_type, s.use_powers = g.fog, g.weather_type, g.use_powers
     s.funds_per_property, s.starting_funds, s.capture_win = g.funds_per_property, g.starting_funds, g.capture_win
     s.type, s.team, s.map_id = g.type, g.team, g.map_id
+    if map_path(g.map_id).exists():
+        m = load_map(g.map_id)
+        s.width, s.height = m.width, m.height
     s.tag = any(p.tags_co_id for p in first.players)
     s.days, s.turns = r.days, len(r.turns)
     s.turns_without_actions = sum(t.actions is None for t in r.turns)
@@ -65,7 +72,8 @@ def v1_rejection(s: ReplaySummary) -> str | None:
 
     v1 is standard 2-player games: no tag, no fog, clear weather, powers on,
     1000 funds per property (no high income) and no starting funds. Capture
-    limits vary per map in standard play, so any limit is accepted.
+    limits vary per map in standard play, so any limit is accepted. The map
+    must be cached (states can't be built without it) and fit the engine.
     """
     if s.error:
         return "parse error"
@@ -85,6 +93,10 @@ def v1_rejection(s: ReplaySummary) -> str | None:
         return f"funds/property {s.funds_per_property}"
     if s.starting_funds:
         return "starting funds"
+    if not s.width:
+        return "map not cached"
+    if s.width > MAX_WIDTH or s.height > MAX_HEIGHT:
+        return "map too large"
     if s.end_action is None:
         return "no game-over in log"
     if s.turns_without_actions:
