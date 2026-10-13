@@ -1,0 +1,145 @@
+#include "core/encode.h"
+
+#include <algorithm>
+#include <cstring>
+
+#include "core/combat.h"
+#include "core/movegen.h"
+
+namespace awbw {
+
+std::string global_name(int i) {
+  static const char* const kSide[kGCo] = {
+      "funds",   "income",     "cop_charge", "scop_charge", "cop_cost", "scop_cost", "cop_on",
+      "scop_on", "power_uses", "props",      "comtowers",   "units",    "army_value"};
+  static const char* const kWeatherNames[kNumWeathers] = {"clear", "rain", "snow"};
+  if (i < 0 || i >= kNumGlobals) return "";
+  if (i < 2 * kSideGlobals) {
+    const std::string who = i < kSideGlobals ? "me." : "opp.";
+    const int j = i % kSideGlobals;
+    if (j < kGCo) return who + kSide[j];
+    const int co = j - kGCo;
+    return who + "co." + (kCos[co].valid ? kCos[co].name : std::to_string(co));
+  }
+  if (i >= kGWeather && i < kGWeather + kNumWeathers)
+    return std::string("weather.") + kWeatherNames[i - kGWeather];
+  switch (i) {
+    case kGDay:
+      return "day";
+    case kGWeatherMine:
+      return "weather_mine";
+    case kGWeatherTheirs:
+      return "weather_theirs";
+    case kGCaptureWinOn:
+      return "capture_win_on";
+    case kGCaptureWin:
+      return "capture_win";
+    case kGFundsPerProperty:
+      return "funds_per_property";
+    case kGMovedFirst:
+      return "moved_first";
+    default:
+      return "";
+  }
+}
+
+namespace {
+
+uint8_t clamp_u8(int v, int hi) { return static_cast<uint8_t>(std::clamp(v, 0, hi)); }
+
+}  // namespace
+
+void encode(const MapData& m, const GameState& s, uint8_t* planes, int h, int w, float* g) {
+  std::memset(planes, 0, sizeof(uint8_t) * kNumPlanes * h * w);
+  std::fill(g, g + kNumGlobals, 0.0f);
+  const int me = s.active;
+  const int opp = 1 - me;
+  auto cell = [&](int plane, int tile) -> uint8_t& {
+    return planes[(static_cast<size_t>(plane) * h + m.y_of(tile)) * w + m.x_of(tile)];
+  };
+  auto side_of = [&](int owner) { return owner == me ? 0 : owner == opp ? 1 : -1; };
+
+  // Board.
+  int props[2] = {}, towers[2] = {}, paying[2] = {};
+  for (int t = 0; t < m.n_tiles; ++t) {
+    const int prop = m.prop[t];
+    int side = -1;
+    if (prop != kNoProp) {
+      const int kind = m.prop_kind[prop];
+      if (is_capturable(kind)) {
+        side = side_of(s.prop_owner[prop]);
+        cell(kPlanePoints, t) = clamp_u8(s.prop_points[prop], kPlanes[kPlanePoints].values - 1);
+        if (side >= 0) {
+          ++props[side];
+          towers[side] += kind == kComtower;
+          paying[side] += pays_income(kind);
+        }
+      } else if (kind == kSeam) {
+        cell(kPlanePoints, t) = clamp_u8(s.prop_points[prop], kPlanes[kPlanePoints].values - 1);
+      }
+    }
+    cell(kPlaneTerrain, t) =
+        static_cast<uint8_t>(1 + terrain_kind(m, s, t) + kNumTerrainKinds * (side + 1));
+  }
+
+  // Units in sight of me; cargo shows when its transport does.
+  int units[2] = {};
+  int64_t value[2] = {};
+  for (int i = 0; i < kMaxUnits; ++i) {
+    const Unit& u = s.units[i];
+    if (!u.alive()) continue;
+    const bool carried = u.has(kCarried);
+    if (!visible_to(m, s, carried ? u.carrier : i, me)) continue;
+    const int side = side_of(u.owner);
+    ++units[side];
+    value[side] += int64_t{kUnits[u.type].cost} * displayed_hp(u.hp) / 10;
+    if (carried) continue;
+    cell(kPlaneUnit, u.tile) = static_cast<uint8_t>(1 + u.type + kNumUnitTypes * side);
+    cell(kPlaneHp, u.tile) = u.hp;
+    cell(kPlaneFuel, u.tile) = clamp_u8(u.fuel, kPlanes[kPlaneFuel].values - 1);
+    cell(kPlaneAmmo, u.tile) = clamp_u8(u.ammo, kPlanes[kPlaneAmmo].values - 1);
+    cell(kPlaneFlags, u.tile) =
+        static_cast<uint8_t>(u.flags & (kMoved | kHidden | kStunned | kCapturing));
+    for (int c = 0; c < 2; ++c) {
+      if (u.cargo[c] == kNoUnit) continue;
+      const Unit& k = s.units[u.cargo[c]];
+      cell(kPlaneCargo1 + c, u.tile) = static_cast<uint8_t>(1 + k.type);
+      cell(kPlaneCargo1Hp + c, u.tile) = k.hp;
+    }
+  }
+
+  // Per-player globals.
+  for (int side = 0; side < 2; ++side) {
+    const Player& p = s.players[side == 0 ? me : opp];
+    float* f = g + side * kSideGlobals;
+    f[kGFunds] = p.funds / 10000.0f;
+    // Powers are over by the time income is paid.
+    f[kGIncome] = paying[side] *
+                  (s.settings.funds_per_property + kCos[p.co].state[0].income_bonus) / 10000.0f;
+    f[kGCopCharge] = p.cop_cost > 0 ? static_cast<float>(p.power) / p.cop_cost : 0.0f;
+    f[kGScopCharge] = p.scop_cost > 0 ? static_cast<float>(p.power) / p.scop_cost : 0.0f;
+    f[kGCopCost] = p.cop_cost / 100000.0f;
+    f[kGScopCost] = p.scop_cost / 100000.0f;
+    f[kGCopOn] = p.power_on == 1;
+    f[kGScopOn] = p.power_on == 2;
+    f[kGPowerUses] = p.power_uses / 10.0f;
+    f[kGProps] = props[side] / 30.0f;
+    f[kGComtowers] = towers[side] / 10.0f;
+    f[kGUnits] = units[side] / 50.0f;
+    f[kGArmyValue] = static_cast<float>(value[side]) / 100000.0f;
+    f[kGCo + p.co] = 1.0f;
+  }
+
+  // Shared globals.
+  g[kGDay] = s.day / 30.0f;
+  g[kGWeather + s.weather] = 1.0f;
+  g[kGWeatherMine] = s.weather_owner == me;
+  g[kGWeatherTheirs] = s.weather_owner == opp;
+  const bool capture_win = s.settings.capture_win < 1000;
+  g[kGCaptureWinOn] = capture_win;
+  g[kGCaptureWin] = capture_win ? s.settings.capture_win / 50.0f : 0.0f;
+  g[kGFundsPerProperty] = s.settings.funds_per_property / 1000.0f;
+  g[kGMovedFirst] = me == 0;
+}
+
+}  // namespace awbw

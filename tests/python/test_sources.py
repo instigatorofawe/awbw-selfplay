@@ -1,3 +1,5 @@
+from awbw.net import Http
+from awbw.replay import sources
 from awbw.replay.sources import IndexEntry, parse_search_page
 
 # One result row as served by awbw.mooo.com (including its stray </a> in rating cells).
@@ -34,3 +36,32 @@ def test_header_and_empty_pages():
 def test_index_entry_json_roundtrip():
     [e] = parse_search_page(PAGE)
     assert IndexEntry.from_json(e.to_json()) == e
+
+
+def _entry(game_id: int, date: str) -> IndexEntry:
+    return IndexEntry(game_id=game_id, name="", map_id=1, map_name="", days=10, date=date)
+
+
+def test_search_stops_when_mooo_repeats_its_last_page(monkeypatch):
+    monkeypatch.setattr(sources, "MOOO_PAGE_SIZE", 2)
+    pages = [[1, 2], [3, 4]]  # every later offset serves the last page again
+
+    class FakeHttp(Http):
+        calls = 0
+
+        def get(self, url: str) -> bytes:
+            page = pages[min(self.calls, len(pages) - 1)]
+            self.calls += 1
+            return f"<tbody>{''.join(ROW.replace('1745964', str(g)) for g in page)}</tbody>".encode()
+
+    http = FakeHttp()
+    assert [e.game_id for e in sources.search_mooo("2p", http)] == [1, 2, 3, 4]
+    assert http.calls == 3
+
+
+def test_next_slice_repeats_the_oldest_day_of_a_full_slice():
+    full = [_entry(i, "2026-04-25" if i < 10 else "2026-05-01") for i in range(sources.MOOO_MAX_RESULTS)]
+    assert sources.next_slice_before(full, "2026-07-17") == "2026-04-26"
+    one_day = [_entry(i, "2026-04-25") for i in range(sources.MOOO_MAX_RESULTS)]
+    assert sources.next_slice_before(one_day, "2026-04-26") == "2026-04-25"
+    assert sources.next_slice_before(full[:9000], "2026-07-17") is None

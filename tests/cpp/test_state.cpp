@@ -84,6 +84,21 @@ TEST_F(StateTest, CheckStateFindsCorruption) {
   bad = s;
   bad.units[a].fuel = 100;
   EXPECT_NE(check_state(m, bad), "");
+  bad = s;
+  bad.unit_at[m.tile(2, 1)] = kMaxUnits;  // past the unit table
+  EXPECT_NE(check_state(m, bad), "");
+  bad = s;
+  bad.active = 2;
+  EXPECT_NE(check_state(m, bad), "");
+  bad = s;
+  bad.weather = kNumWeathers;
+  EXPECT_NE(check_state(m, bad), "");
+  bad = s;
+  bad.players[1].co = 4;  // no AWBW CO has id 4
+  EXPECT_NE(check_state(m, bad), "");
+  bad = s;
+  bad.players[0].power_on = 3;
+  EXPECT_NE(check_state(m, bad), "");
 }
 
 TEST_F(StateTest, CopiesAreBytes) {

@@ -15,6 +15,7 @@
 #include "core/actions.h"
 #include "core/combat.h"
 #include "core/config.h"
+#include "core/encode.h"
 #include "core/map.h"
 #include "core/movegen.h"
 #include "core/snapshot.h"
@@ -128,6 +129,48 @@ awbw::GameState load_snapshot(const awbw::MapData& m, const awbw::Settings& sett
   return s;
 }
 
+using StateRows = nb::ndarray<const uint8_t, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
+using PlaneOut = nb::ndarray<uint8_t, nb::ndim<4>, nb::c_contig, nb::device::cpu>;
+using GlobalOut = nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
+
+void encode_batch(StateRows states, PlaneOut planes, GlobalOut globals) {
+  const size_t n = states.shape(0);
+  if (states.shape(1) != sizeof(awbw::GameState))
+    throw nb::value_error(
+        ("states must have STATE_BYTES = " + std::to_string(sizeof(awbw::GameState)) + " columns")
+            .c_str());
+  if (planes.shape(0) != n || planes.shape(1) != awbw::kNumPlanes)
+    throw nb::value_error("planes must be [N, NUM_PLANES, H, W]");
+  if (globals.shape(0) != n || globals.shape(1) != awbw::kNumGlobals)
+    throw nb::value_error("globals must be [N, NUM_GLOBALS]");
+  const int h = static_cast<int>(planes.shape(2)), w = static_cast<int>(planes.shape(3));
+  const size_t plane_stride = size_t{awbw::kNumPlanes} * h * w;
+  std::string error;
+  {
+    nb::gil_scoped_release release;
+    awbw::GameState s;
+    const awbw::MapData* md = nullptr;
+    for (size_t i = 0; i < n && error.empty(); ++i) {
+      std::memcpy(&s, states.data() + i * sizeof s, sizeof s);  // rows needn't be aligned
+      if (!md || md->id != s.map_id) md = awbw::find_map(s.map_id);
+      if (!md) {
+        error = "map " + std::to_string(s.map_id) + " is not registered";
+      } else if (md->height > h || md->width > w) {
+        error = "map " + std::to_string(s.map_id) + " is " + std::to_string(md->width) + "x" +
+                std::to_string(md->height) + ", larger than the planes";
+      } else if (std::string bad = awbw::check_state(*md, s); !bad.empty()) {
+        error = bad;
+      } else {
+        awbw::encode(*md, s, planes.data() + i * plane_stride, h, w,
+                     globals.data() + i * awbw::kNumGlobals);
+        continue;
+      }
+      error = "state " + std::to_string(i) + ": " + error;
+    }
+  }
+  if (!error.empty()) throw nb::value_error(error.c_str());
+}
+
 }  // namespace
 
 NB_MODULE(_core, m) {
@@ -160,6 +203,24 @@ NB_MODULE(_core, m) {
     for (int k = 0; k < awbw::kNumActionKinds; ++k) kinds[names[k]] = k;
     m.attr("ACTIONS") = kinds;
   }
+  m.attr("ENCODE_VERSION") = awbw::kEncodeVersion;
+  m.attr("NUM_PLANES") = static_cast<int>(awbw::kNumPlanes);
+  m.attr("NUM_GLOBALS") = static_cast<int>(awbw::kNumGlobals);
+  {
+    nb::list planes, globals;
+    for (const awbw::PlaneSpec& p : awbw::kPlanes)
+      planes.append(nb::make_tuple(p.name, p.values, p.categorical));
+    for (int i = 0; i < awbw::kNumGlobals; ++i) globals.append(awbw::global_name(i));
+    m.attr("PLANES") = nb::tuple(planes);
+    m.attr("GLOBAL_NAMES") = nb::tuple(globals);
+  }
+  m.def("encode_batch", &encode_batch, "states"_a, "planes"_a, "globals"_a,
+        "Encode raw states [N, STATE_BYTES] for the network, each from its player to move's\n"
+        "side, into planes [N, NUM_PLANES, H, W] (uint8) and globals [N, NUM_GLOBALS]\n"
+        "(float32). Each board sits at the top-left of its H x W window, the rest 0. Every\n"
+        "state's map must be registered and fit; states are checked before encoding.\n"
+        "PLANES lists each plane's (name, number of values, categorical).");
+
   m.attr("OK") = static_cast<int>(awbw::kOk);
   m.attr("TRAPPED") = static_cast<int>(awbw::kTrapped);
   m.def(

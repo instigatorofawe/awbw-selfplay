@@ -44,6 +44,8 @@ gitignored.
 # index standard 2p league games (mooo search syntax), then download some
 uv run awbw index "2p global league std nodraw" --max-pages 1
 uv run awbw fetch --index cache/index/2p_global_league_std_nodraw.jsonl --limit 100
+# or walk back through the archive, 10,000 games per date slice, up to a size cap
+uv run awbw crawl "2p global league std" --before 2026-04-26 --max-gb 10
 
 uv run awbw inspect 1745964   # summarize one cached replay
 uv run awbw stats             # settings, endings and v1-filter counts over the cache
@@ -52,7 +54,11 @@ uv run awbw league --fetch-maps   # snapshot the Global League std rotation + se
 uv run awbw check-combat      # every logged attack vs the engine's damage formula
 uv run awbw check-moves       # load every snapshot into the engine; check logged moves
 uv run awbw check-turns       # replay every turn with the engine; compare with the next snapshot
+uv run awbw dataset           # v0 critic dataset (turn-start states + results) -> cache/datasets/v0
 ```
+
+Datasets store raw engine states; `awbw.data.loader.batches` encodes them
+for the network (`awbw._core.encode_batch`) as it reads.
 
 Requests are rate-limited (`--rate`, default one per second). Please keep it
 that way: both sites are community-run.
@@ -67,7 +73,7 @@ with `username=` and `password=` lines.
 ```
 src/core/        C++ engine (no Python dependency); tables.h is generated
 src/bindings/    nanobind module awbw._core
-python/awbw/     Python package: replay parsing, sources, maps, engine glue, CLI
+python/awbw/     Python package: replay parsing, sources, maps, engine glue, datasets, CLI
 python/awbw/rules/  rules tables (JSON): units, terrain, damage, COs
 tools/           gen_tables.py: rules JSON -> src/core/tables.h
 tests/cpp/       googletest unit tests for the engine core

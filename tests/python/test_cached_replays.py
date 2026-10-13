@@ -12,7 +12,8 @@ from awbw.replay.combat_check import check_file
 from awbw.replay.move_check import check_replay as check_moves
 from awbw.replay.step_check import check_file as check_turns
 
-PATHS = sorted((cache_dir() / "replays").glob("*.zip"))[:200]
+# The 200 newest games: the cache grows back in time, so these stay put.
+PATHS = sorted((cache_dir() / "replays").glob("*.zip"), key=lambda p: int(p.stem) if p.stem.isdigit() else 0)[-200:]
 
 
 @pytest.mark.skipif(not PATHS, reason="no cached replays")
@@ -80,9 +81,11 @@ KNOWN_ODDITIES = {
     "1671326 day 9",
     "1674937 day 11",
     "1724707 day 15",
+    "1631097 day 17",
     "1636466 day 13",  # a city's capture points drop to 0 with no capture logged; it is taken next turn
     "1695038 day 12",  # too many fight-result choices for the search budget
     "1728785 day 15",  # needs 508k fight-result tries, over the search budget
+    "1628095 day 16",  # too many fight-result choices for the search budget
 }
 
 # Lash's terrain-star attack bonus is missing in every mismatched fight of a

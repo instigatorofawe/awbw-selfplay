@@ -24,7 +24,7 @@ int move_points(const GameState& s, const Unit& u);
 int move_budget(const GameState& s, const Unit& u);
 // Whether `viewer` can see the unit in slot `slot`. Dived Subs and hidden
 // Stealths are invisible to the enemy, even without fog, unless next to one of
-// the enemy's units.
+// the enemy's units or on one of the enemy's properties.
 bool visible_to(const MapData& m, const GameState& s, int slot, int viewer);
 
 // Cost of entering `tile` for the unit, 0 if it can't: terrain cost (1 under

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import re
@@ -20,6 +21,7 @@ from ..net import Http, HttpError, cache_dir, write_atomic
 
 MOOO = "http://awbw.mooo.com"
 MOOO_PAGE_SIZE = 500
+MOOO_MAX_RESULTS = 10_000  # per query; slice by date to go further back
 AWBW = "https://awbw.amarriner.com"
 CREDENTIALS_FILE = Path.home() / ".config" / "awbw-selfplay" / "credentials"
 
@@ -95,12 +97,31 @@ def search_mooo(query: str, http: Http, *, max_pages: int | None = None) -> list
             params["offset"] = str(1 + page * MOOO_PAGE_SIZE)
         html = http.get(f"{MOOO}/search?{urllib.parse.urlencode(params)}").decode("utf-8", "replace")
         rows = parse_search_page(html)
+        before = len(entries)
         for row in rows:
             entries.setdefault(row.game_id, row)
-        if len(rows) < MOOO_PAGE_SIZE:
+        # Past MOOO_MAX_RESULTS, mooo repeats its last page instead of ending.
+        if len(rows) < MOOO_PAGE_SIZE or len(entries) == before:
             break
         page += 1
     return list(entries.values())
+
+
+def next_slice_before(entries: list[IndexEntry], before: str) -> str | None:
+    """The ``before`` date for the slice after one whose results are ``entries``.
+
+    mooo's ``before YYYY-MM-DD`` is strict and results run newest first, so a
+    slice cut off by MOOO_MAX_RESULTS may hold only part of its oldest day. The
+    next slice starts the day after it and repeats that day; fetching skips the
+    replays already cached. Returns None when the slice reached the archive's
+    start, which shows as a short last page.
+    """
+    if len(entries) <= MOOO_MAX_RESULTS - MOOO_PAGE_SIZE:
+        return None
+    oldest = min(e.date for e in entries)
+    after = (datetime.date.fromisoformat(oldest) + datetime.timedelta(days=1)).isoformat()
+    # A whole slice inside one day would repeat forever; skip past that day instead.
+    return after if after < before else oldest
 
 
 def parse_search_page(html: str) -> list[IndexEntry]:

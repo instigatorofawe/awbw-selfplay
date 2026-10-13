@@ -41,6 +41,25 @@ WEATHERS: tuple = ('clear', 'rain', 'snow')
 
 ACTIONS: dict = ...
 
+ENCODE_VERSION: int = 1
+
+NUM_PLANES: int = 11
+
+NUM_GLOBALS: int = 98
+
+PLANES: tuple = ...
+
+GLOBAL_NAMES: tuple = ...
+
+def encode_batch(states: Annotated[NDArray[numpy.uint8], dict(shape=(None, None), order='C', device='cpu', writable=False)], planes: Annotated[NDArray[numpy.uint8], dict(shape=(None, None, None, None), order='C', device='cpu')], globals: Annotated[NDArray[numpy.float32], dict(shape=(None, None), order='C', device='cpu')]) -> None:
+    """
+    Encode raw states [N, STATE_BYTES] for the network, each from its player to move's
+    side, into planes [N, NUM_PLANES, H, W] (uint8) and globals [N, NUM_GLOBALS]
+    (float32). Each board sits at the top-left of its H x W window, the rest 0. Every
+    state's map must be registered and fit; states are checked before encoding.
+    PLANES lists each plane's (name, number of values, categorical).
+    """
+
 OK: int = 0
 
 TRAPPED: int = 1

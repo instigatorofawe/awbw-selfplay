@@ -14,7 +14,7 @@ nanobind, for:
 | Players | 2 (no team or tag games) |
 | Settings | Standard only: 1000 funds per property (no high income), no starting funds, powers on; any capture limit |
 | Fog | Off (games with fog are filtered out of datasets) |
-| Hidden units | Dived Subs and hidden Stealths stay hidden from the opponent even without fog (AWBW's rule), so the game has hidden information. A move that runs into an unseen one stops short ("trapped") |
+| Hidden units | Dived Subs and hidden Stealths stay hidden from the opponent even without fog (AWBW's rule), so the game has hidden information. They are seen when next to an enemy unit or on an enemy property (wiki). A move that runs into an unseen one stops short ("trapped") |
 | Weather | Clear, plus the rain and snow CO powers bring (Drake, Olaf); random weather comes later |
 | Search | Gumbel AlphaZero-style MCTS, exact simulator, explicit chance nodes |
 | First model | Critic trained on positions parsed from human replays |
@@ -29,8 +29,8 @@ awbw-selfplay/
   tools/gen_tables.py         # rules JSON -> src/core/tables.h (pre-commit checks it is current)
   src/core/                   # C++20, no Python dependency
     tables.h                  # generated constexpr tables
-    map  state  snapshot  movegen  combat  actions   # done (.h/.cpp each); rng.h
-    cos  hash  encode                               # to come
+    map  state  snapshot  movegen  combat  actions  encode   # done (.h/.cpp each); rng.h
+    hash                                                     # to come
     search/                   # batched Gumbel MCTS
   src/bindings/module.cpp     # thin nanobind layer
   python/awbw/
@@ -65,7 +65,7 @@ C++ releases the GIL for all heavy work.
 
 ### Dynamic: `GameState`, POD with no pointers
 
-`src/core/state.h`; 3,996 bytes.
+`src/core/state.h`; 4,000 bytes.
 
 ```cpp
 struct Unit {                 // 16 bytes
@@ -398,15 +398,21 @@ static_assert(std::is_trivially_copyable_v<GameState>);
    `cache/index/`.
 2. **Download** to `cache/replays/<id>.zip` (`awbw fetch`), never re-fetched.
    Rate-limited (1 request/s by default) and polite.
-   - Cached so far: the 2,000 most recent 2p GL std games (to 2026-10-12),
-     all with clear weather, no fog, powers on, 1000 funds per property.
-     1,653 pass the v1 filter; 299 have no `GameOver` (timeouts and cancelled
-     games); 46 end before day 6 (all resignations, 14 on day 1); 2 miss a
-     mid-game turn in the log. Of the games with a `GameOver`, 1,589 end by
-     resignation, 105 by capture, 7 by rout and 1 by deletion; median length
-     is 14 days. 41 have turns cut off at the max turn length.
-     Extending to 10,000 games (`cache/index/2p_global_league_std_10k.jsonl`).
-3. **Parse** into a `Replay` object: settings, players, map id, per-turn
+   - **Crawling back in time** (`awbw crawl QUERY --before DATE --max-gb N`):
+     a mooo search returns at most 10,000 games (later pages repeat the
+     last one), so the crawl walks back in date slices (`before YYYY-MM-DD`,
+     strict), saving each slice's index, fetching its maps and replays, and
+     stopping at the size cap. Reruns resume.
+   - **Size:** replays average 111 KB (about 9 KB per day of play; game
+     lengths are the same back to 2022). The archive holds about 215,000
+     2p GL std games back to 2022-08-30, so all of them would take about
+     24 GB. Replays from 2022, 2024 and 2025 parse and replay exactly.
+   - **Cached:** the 20,000 most recent games (2026-04-25 to 2026-10-13),
+     all with clear weather, no fog, powers on, 1000 funds per property;
+     crawling further back to a 10 GB cap (about 90,000 games, to roughly
+     mid-2024). Of the 20,000, 2,642 have no `GameOver` (timeouts and
+     cancelled games) and 810 end before day 6; the median game is 14 days.
+3. **Parse** into a `Replay` object3. **Parse** into a `Replay` object: settings, players, map id, per-turn
    snapshots, per-turn actions, result. Uses our own bytes-based PHP
    unserializer, since PHP string lengths count bytes.
 4. **Filter** (`awbw.replay.stats.v1_rejection`):
@@ -429,27 +435,40 @@ static_assert(std::is_trivially_copyable_v<GameState>);
      snapshot, with conflict-directed backjumping (each unit's HP records the
      fight choices it depends on).
    - The divergence report *is* the rules bug tracker.
-   - **Result on the cache (19,925 replays, 547,143 turns): 544,623 of
-     544,719 checked turns match exactly (9.69M actions).** 2,424 turns are
-     skipped: 2,423 with no log, and one whose next snapshot is missing (the
-     opponent's turn was never recorded). The 96 mismatches are known
+   - **Result on the cache (20,945 replays, 574,141 turns): 571,454 of
+     571,552 checked turns match exactly (10.16M actions).** 2,589 turns
+     are skipped, nearly all with no log. The 98 mismatches are known
      oddities in `tests/python/test_cached_replays.py`:
      - 83 turns of Lash games in that window (her missing terrain bonus);
-     - 10 Black Boat repairs that leave a 9.x HP unit as it was;
+     - 11 Black Boat repairs that leave a 9.x HP unit as it was;
      - a city whose capture points drop to 0 with no capture logged;
-     - two turns whose fight results take more tries than the search budget.
-7. **Extract samples:**
-   - **v0 (needs only `from_snapshot`, not the full engine):** turn-start
-     states + game outcome. The critic can start training before the engine
-     is finished.
+     - three turns whose fight results take more tries than the search budget.
+7. **Extract samples** (`awbw.replay.extract`):
+   - **v0 (`awbw dataset`; needs only snapshots, not engine stepping):**
+     the state at the start of every turn, labelled with the result for
+     the player to move. On the 20,576 replays cached on 2026-10-13: 17,108
+     games pass the filter, giving 520,297 samples (124 MB, built in 70 s on
+     12 cores). No game is a draw; the first mover wins 49%.
+   - Ratings come from the mooo index, which lists players in turn order:
+     its loser matched the replay's `GameOver` in all 17,108 games.
    - **v1 (verified replays only):** every idle-phase state + outcome, plus
      micro-step action labels (from `enumerate_full_actions` decomposition)
      for a policy prior.
-8. **Store** shards of fixed-size records:
-   - fields: `{state_bytes, to_play, outcome, game_id, day, ply, ratings, flags}`
-   - zstd-compressed; maps live in a separate table
-   - *Raw state is stored, never encoded features.* The dataloader calls the
-     C++ `encode_batch`, so changing features never requires re-extraction.
+8. **Store** (`awbw.data.shards`): a directory of `numpy` `.npz` shards of
+   whole games (1,000 per shard), plus `maps.npz` (terrain of every map
+   used, so a dataset needs no replay cache) and `meta.json`.
+   - Per sample: `state` (raw `GameState` bytes), `game`, `turn`, `day`,
+     `to_play`, `z`. Per game: id, map, winner, how it ended, days, both
+     COs and both ratings.
+   - zlib (`savez_compressed`) shrinks a state from 4,000 bytes to about
+     240 and decompresses at about 3 GB/s; zstd would save 15% more, not
+     worth a dependency.
+   - *Raw state is stored, never encoded features.* The loader
+     (`awbw.data.loader.batches`) calls the C++ `encode_batch`, so changing
+     features never requires re-extraction. It pads boards to square
+     buckets (16/24/32/40) so a batch has one shape, splits off validation
+     games by a fixed hash of the game id (5%), and takes a `keep` mask for
+     rating or map filters. About 66k samples/s in one process.
 
 ### Critic training notes
 
@@ -477,22 +496,40 @@ static_assert(std::is_trivially_copyable_v<GameState>);
 Shipping C×H×W float32 one-hots per leaf is too heavy: about 600 KB per leaf
 at 40×40, around 600 MB per batch of 1024. Instead:
 
-- **Compact `uint8` index planes `[K, H, W]`**, about 12–16 planes, ~25 KB per
-  leaf:
-  - terrain class
-  - property type, property owner (relative: me / enemy / neutral)
-  - unit type, unit owner (relative)
-  - HP, fuel bucket, ammo, flags, capture points
-  - cargo types
-  - pending-selection and reachable/attackable masks
-  - on-map mask
-- **Global vector:** funds, income, day, power meters and thresholds, power
-  active, CO ids, settings, and whether the to-play player moved first.
-  Starting positions are deliberately unbalanced to compensate for moving
-  first, so the critic needs to know which side it is evaluating.
-- **Network input:** the first layer is embedding lookups summed per tile, on
-  the GPU.
-- **Map sizes:** pad to size buckets (e.g. 24/32/40) and batch by bucket.
+`src/core/encode.h` (version 1), `encode_batch` in Python. Everything is
+from the side of the player to move ("me"): owners are relative, and enemy
+units `me` can't see (hidden Subs and Stealths that are neither next to one
+of my units nor on my property) are left out of planes and counts alike.
+
+- **11 `uint8` planes `[11, H, W]`** (11 KB per state at 32×32). `PLANES`
+  gives each one's name, number of values and whether it is an index to
+  embed or a quantity:
+  - `terrain` (index): 0 off the board, else the terrain kind now (broken
+    seams, fired silos) joined with the property's owner (none, me, enemy),
+    67 values
+  - `points` (quantity): capture points left (20 untouched), pipe seam HP
+  - `unit` (index): type joined with owner, 51 values
+  - `hp` (internal 1..100), `fuel`, `ammo` (quantities); `flags` (index:
+    moved, hidden, stunned, capturing)
+  - `cargo1`, `cargo2` (index: type), `cargo1_hp`, `cargo2_hp`
+  - To come with the policy: the pending selection and reachable /
+    attackable masks.
+- **98 globals (`float32`)**, named in `GLOBAL_NAMES`: for me, then the
+  opponent, funds, income, power meter as a share of each power's cost, the
+  costs, which power is on, power uses, properties, comtowers, unit count
+  and army value (both of units in sight), and the CO one-hot; then the day,
+  weather and whose power set it, the capture limit, funds per property, and
+  whether `me` moves first. Starting positions are deliberately unbalanced
+  to make up for moving first, so the critic needs to know which side it is
+  evaluating.
+  - Left out for now: unit bans, the unit limit and the day limit. Replays
+    don't record the first two, and no cached game has a day limit, so the
+    critic would only ever see them at 0.
+- **Cost:** about 2 µs per state, including `check_state` on the raw bytes.
+- **Network input:** the first layer is embedding lookups summed per tile
+  (index planes) plus scaled quantities, on the GPU.
+- **Map sizes:** boards sit at the top-left of a square bucket (16/24/32/40);
+  batches hold one bucket.
 
 ## 7. Networks
 
@@ -570,9 +607,9 @@ while training:
 ## 10. Testing & benchmarks
 
 - **C++ (googletest, `tests/cpp/`):** maps, state bookkeeping, snapshots,
-  movement, damage, every action kind and the turn start (68 tests); every
-  CO power to come. CI runs them on
-  Linux and macOS, in Release and under ASan/UBSan.
+  movement, damage, every action kind, the turn start, CO powers and the
+  network encoding (95 tests). CI runs them on Linux and macOS, in Release
+  and under ASan/UBSan.
 - **Damage formula across all logged attacks:** every logged combat result
   must be in `outcomes()`. This checks the formula over the whole replay
   archive.
@@ -591,7 +628,7 @@ while training:
   - `damage` (3.5 ns), `combat_outcomes` (0.7 µs for tank vs tank)
   - copy + `apply`: a move (0.5 µs), a fight with rolled luck (0.2 µs), end
     of turn on a 30×30 board with ~50 units (0.3 µs)
-  - `encode_batch` (µs per state)
+  - `encode` (1.7 µs for that board in a 32×32 window)
   - MCTS simulations/sec, with a dummy net and with the real net
 
 ## 11. Milestones
@@ -599,7 +636,7 @@ while training:
 | # | Milestone | Exit criteria |
 |---|---|---|
 | M0 | Replay ingestion (Python): download + cache, parser, rules JSON | Thousands of replays parsed; settings/filter stats known |
-| M1 | C++ core + bindings: state, `from_snapshot`, movegen, all actions except CO powers, `outcomes`, turn start, `encode_batch` | Every logged attack in `outcomes()` (**done**); state, snapshots, movegen (**done**); apply and turn start, every checkable turn replayed exactly (**done**); `encode_batch`; v0 dataset → **critic v0** |
+| M1 | C++ core + bindings: state, `from_snapshot`, movegen, all actions except CO powers, `outcomes`, turn start, `encode_batch` | Every logged attack in `outcomes()` (**done**); state, snapshots, movegen (**done**); apply and turn start, every checkable turn replayed exactly (**done**); `encode_batch`, v0 dataset (**done**) → **critic v0** |
 | M2 | Exact match: full replay stepping, all COs/powers, edge cases | CO powers' effects, missile aim, rain and snow (**done**); ≥ 99% of filtered replays fully verified; benchmarks in CI |
 | M3 | v1 datasets: all idle-phase states + action labels | **Critic v1** + policy prior (behavior cloning); baselines: random, greedy, critic-greedy 1-ply |
 | M4 | Batched Gumbel MCTS with chance nodes, `collect`/`submit` | Search + critic beats critic-greedy; sims/sec measured |

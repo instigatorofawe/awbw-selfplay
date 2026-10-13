@@ -139,9 +139,22 @@ std::string check_state(const MapData& m, const GameState& s) {
     return "unit slot " + std::to_string(slot) + ": " + what;
   };
   if (s.map_id != m.id) return "state is for map " + std::to_string(s.map_id);
+  if (s.active >= kMaxPlayers) return "bad active player";
+  if (s.weather >= kNumWeathers) return "bad weather";
+  if (s.weather_owner >= kMaxPlayers && s.weather_owner != kNoOwner) return "bad weather owner";
+  for (int p = 0; p < kMaxPlayers; ++p) {
+    const Player& pl = s.players[p];
+    if (pl.co > kMaxCoId || !kCos[pl.co].valid) return "player " + std::to_string(p) + ": bad CO";
+    if (pl.power_on > 2) return "player " + std::to_string(p) + ": bad power state";
+  }
+  for (int i = 0; i < m.n_props; ++i) {
+    if (s.prop_owner[i] >= kMaxPlayers && s.prop_owner[i] != kNoOwner)
+      return "property " + std::to_string(i) + ": bad owner";
+  }
   for (int t = 0; t < m.n_tiles; ++t) {
     const int slot = s.unit_at[t];
     if (slot == kNoUnit) continue;
+    if (slot >= kMaxUnits) return "tile " + std::to_string(t) + " points past the unit table";
     const Unit& u = s.units[slot];
     if (!u.alive() || u.tile != t || u.has(kCarried))
       return "tile " + std::to_string(t) + " points at a unit that is not there";

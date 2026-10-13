@@ -11,6 +11,7 @@
 
 #include "core/actions.h"
 #include "core/combat.h"
+#include "core/encode.h"
 #include "core/movegen.h"
 #include "test_util.h"
 
@@ -181,6 +182,19 @@ void BM_EndTurn(benchmark::State& st) {
   }
 }
 BENCHMARK(BM_EndTurn);
+
+// Encode the board into a 32x32 window: network planes and globals.
+void BM_Encode(benchmark::State& st) {
+  const Board& b = board();
+  std::vector<uint8_t> planes(size_t{kNumPlanes} * 32 * 32);
+  std::vector<float> globals(kNumGlobals);
+  for (auto _ : st) {
+    encode(b.map, b.state, planes.data(), 32, 32, globals.data());
+    benchmark::DoNotOptimize(planes.data());
+    benchmark::ClobberMemory();
+  }
+}
+BENCHMARK(BM_Encode);
 
 }  // namespace
 }  // namespace awbw

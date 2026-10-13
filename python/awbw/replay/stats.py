@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .._core import MAX_HEIGHT, MAX_WIDTH
 from ..maps import load_map, map_path
+from .model import Replay
 from .parse import ReplayFormatError, load_replay
 
 
@@ -39,12 +40,15 @@ class ReplaySummary:
 
 
 def summarize(path: str | Path) -> ReplaySummary:
-    s = ReplaySummary(path=str(path))
     try:
         r = load_replay(path)
     except (ReplayFormatError, OSError) as e:
-        s.error = f"{type(e).__name__}: {e}"
-        return s
+        return ReplaySummary(path=str(path), error=f"{type(e).__name__}: {e}")
+    return summarize_replay(r, path)
+
+
+def summarize_replay(r: Replay, path: str | Path = "") -> ReplaySummary:
+    s = ReplaySummary(path=str(path))
     g = r.game
     first = r.turns[0]
     s.game_id = g.id

@@ -3,29 +3,33 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import re
 import sys
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
+from .data.shards import UNKNOWN_RATING, ShardWriter
 from .league import fetch_rotation, load_rotation
 from .maps import fetch_map
-from .net import Http, cache_dir
+from .net import Http, HttpError, cache_dir
 from .replay import load_replay
 from .replay.combat_check import check_file
+from .replay.extract import DRAW, extract_v0
 from .replay.move_check import MoveReport
 from .replay.move_check import check_replay as check_moves
 from .replay.sources import (
     AwbwSession,
     ReplayUnavailable,
     fetch_replay,
+    next_slice_before,
     read_index,
     replay_path,
     search_mooo,
     write_index,
 )
-from .replay.stats import summarize, v1_rejection
+from .replay.stats import MIN_DAYS, summarize, v1_rejection
 from .replay.step_check import StepReport
 from .replay.step_check import check_file as check_turns
 
@@ -45,6 +49,11 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--index", type=Path, help="JSONL index from `awbw index`")
     f.add_argument("--limit", type=int)
     f.add_argument("--source", choices=["mooo", "awbw"], default="mooo")
+
+    cr = sub.add_parser("crawl", help="index and fetch a mooo search back in time, slice by slice, up to a size cap")
+    cr.add_argument("query", help='mooo search without a date, e.g. "2p global league std"')
+    cr.add_argument("--before", required=True, help="start from games strictly before this date (YYYY-MM-DD)")
+    cr.add_argument("--max-gb", type=float, required=True, help="stop once the replay cache holds this many GB")
 
     m = sub.add_parser("fetch-map", help="download maps into the cache")
     m.add_argument("map_ids", nargs="*", type=int)
@@ -71,6 +80,13 @@ def main(argv: list[str] | None = None) -> int:
     mv.add_argument("--workers", type=int)
     mv.add_argument("--show", type=int, default=10, help="print this many failures (default 10)")
 
+    ds = sub.add_parser("dataset", help="build the v0 critic dataset (turn-start states + results) from replays")
+    ds.add_argument("dir", nargs="?", type=Path, help="replay directory (default: the cache)")
+    ds.add_argument("--out", type=Path, help="dataset directory (default: cache/datasets/v0)")
+    ds.add_argument("--workers", type=int)
+    ds.add_argument("--games-per-shard", type=int, default=1000)
+    ds.add_argument("--overwrite", action="store_true", help="replace a dataset already in --out")
+
     tc = sub.add_parser("check-turns", help="replay every turn with the engine and compare it with the next snapshot")
     tc.add_argument("dir", nargs="?", type=Path)
     tc.add_argument("--workers", type=int)
@@ -82,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
     commands = {
         "index": _index,
         "fetch": _fetch,
+        "crawl": _crawl,
         "fetch-map": _fetch_map,
         "league": _league,
         "inspect": _inspect,
@@ -89,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
         "check-combat": _check_combat,
         "check-moves": _check_moves,
         "check-turns": _check_turns,
+        "dataset": _dataset,
     }
     return commands[args.cmd](args, http)
 
@@ -126,6 +144,50 @@ def _fetch(args, http: Http) -> int:
             print(f"[{n}/{len(ids)}] fetched={fetched} cached={cached} failed={failed}", file=sys.stderr)
     print(f"fetched={fetched} cached={cached} failed={failed}")
     return 0 if not failed else 1
+
+
+def _crawl(args, http: Http) -> int:
+    """Walk ``query`` back through date slices, fetching each slice's maps and replays.
+
+    Each slice's index is saved as it is searched, so a rerun resumes without
+    searching again, and cached replays are never fetched twice.
+    """
+    replays = cache_dir() / "replays"
+    cap = int(args.max_gb * 1e9)
+    used = sum(p.stat().st_size for p in replays.glob("*.zip"))
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", args.query).strip("_").lower()
+    before: str | None = args.before
+    fetched = failed = 0
+    while before is not None and used < cap:
+        out = cache_dir() / "index" / f"{slug}_before_{before.replace('-', '')}.jsonl"
+        if out.exists():
+            entries = read_index(out)
+        else:
+            entries = search_mooo(f"{args.query} before {before}", http)
+            write_index(out, entries)
+        dates = sorted(e.date for e in entries)
+        print(f"slice before {before}: {len(entries)} games {dates[:1]}..{dates[-1:]} -> {out}", file=sys.stderr)
+        for map_id in dict.fromkeys(e.map_id for e in entries):
+            try:
+                fetch_map(map_id, http)
+            except (HttpError, ValueError) as e:
+                print(f"map {map_id}: {e}", file=sys.stderr)
+        for e in entries:
+            if used >= cap:
+                break
+            if replay_path(e.game_id).exists():
+                continue
+            try:
+                used += fetch_replay(e.game_id, http).stat().st_size
+                fetched += 1
+            except ReplayUnavailable as err:
+                failed += 1
+                print(err, file=sys.stderr)
+            if (fetched + failed) % 100 == 0:
+                print(f"fetched={fetched} failed={failed} cache={used / 1e9:.2f} GB", file=sys.stderr)
+        before = next_slice_before(entries, before)
+    print(f"fetched={fetched} failed={failed} cache={used / 1e9:.2f} GB; next slice: {before or 'none'}")
+    return 0
 
 
 def _fetch_map(args, http: Http) -> int:
@@ -282,3 +344,60 @@ def _check_turns(args, http: Http) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def _ratings_by_game() -> dict[int, tuple[tuple[int, int], tuple[bool, bool]]]:
+    """Game id -> (ratings, lost flags) from every cached index; mooo lists players in turn order."""
+    out = {}
+    for path in sorted((cache_dir() / "index").glob("*.jsonl")):
+        for e in read_index(path):
+            if len(e.players) == 2:
+                r0, r1 = (UNKNOWN_RATING if p.rating is None else p.rating for p in e.players)
+                out[e.game_id] = ((r0, r1), (e.players[0].lost, e.players[1].lost))
+    return out
+
+
+def _dataset(args, http: Http) -> int:
+    root = args.dir or cache_dir() / "replays"
+    out = args.out or cache_dir() / "datasets" / "v0"
+    paths = sorted(root.glob("*.zip"), key=lambda p: int(p.stem) if p.stem.isdigit() else 0)
+    if args.overwrite:
+        for old in [*out.glob("shard-*.npz"), out / "maps.npz", out / "meta.json"]:
+            old.unlink(missing_ok=True)
+    writer = ShardWriter(out, games_per_shard=args.games_per_shard)
+    index = _ratings_by_game()
+    rejected: Counter = Counter()
+    ratings_seen: Counter = Counter()
+    ends: Counter = Counter()
+    with ProcessPoolExecutor(args.workers) as pool:
+        for n, g in enumerate(pool.map(extract_v0, paths, chunksize=16), 1):
+            if isinstance(g, str):
+                rejected[g] += 1
+            else:
+                ratings = (UNKNOWN_RATING, UNKNOWN_RATING)
+                if (entry := index.get(g.game_id)) is None:
+                    ratings_seen["not in an index"] += 1
+                elif g.winner != DRAW and entry[1] != (g.winner != 0, g.winner != 1):
+                    ratings_seen["index result disagrees; dropped"] += 1
+                else:
+                    ratings, _ = entry
+                    ratings_seen["known"] += 1
+                ends[g.end_action] += 1
+                writer.add(g, ratings)
+            if n % 2000 == 0:
+                print(f"[{n}/{len(paths)}] kept {n - rejected.total()}", file=sys.stderr)
+    meta = writer.close(
+        kind="v0: the state at the start of every turn, labelled with the result",
+        built=datetime.date.today().isoformat(),
+        replays=len(paths),
+        min_days=MIN_DAYS,
+        rejected=dict(rejected.most_common()),
+        ratings=dict(ratings_seen),
+        ended_by=dict(ends.most_common()),
+    )
+    size = sum(f.stat().st_size for f in out.glob("*.npz"))
+    shards = len(meta["shards"])
+    print(f"{meta['games']} games, {meta['samples']} samples in {shards} shards ({size / 1e6:.0f} MB) -> {out}")
+    print(f"rejected: {meta['rejected']}")
+    print(f"ratings: {meta['ratings']}; ended by: {meta['ended_by']}")
+    return 0

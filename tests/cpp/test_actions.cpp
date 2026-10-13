@@ -97,6 +97,16 @@ TEST(Actions, AnUnseenHiddenEnemyTrapsTheMover) {
   EXPECT_TRUE(visible_to(m, s, stealth, 0));  // now adjacent
 }
 
+TEST(Actions, AHiddenEnemyOnYourPropertyIsSeenAndBlocks) {
+  const MapData m = make_map({"==C==="});
+  GameState s = make_state(m);  // Orange Star (player 0) owns the city
+  const int recon = put(s, m, kRecon, 0, 0, 0);
+  const int stealth = put(s, m, kStealth, 1, 2, 0);
+  s.units[stealth].flags |= kHidden;
+  EXPECT_TRUE(visible_to(m, s, stealth, 0));
+  EXPECT_EQ(apply(m, s, act(kActWait, recon, m.tile(5, 0))), kErrUnreachable);
+}
+
 TEST(Actions, AVisibleEnemyBlocks) {
   const MapData m = make_map({"======"});
   GameState s = make_state(m);

@@ -20,6 +20,8 @@ int move_budget(const GameState& s, const Unit& u) {
 bool visible_to(const MapData& m, const GameState& s, int slot, int viewer) {
   const Unit& u = s.units[slot];
   if (u.owner == viewer || !u.has(kHidden)) return true;
+  const int prop = m.prop[u.tile];
+  if (prop != kNoProp && s.prop_owner[prop] == viewer) return true;
   for (int d = 0; d < kNumDirs; ++d) {
     const int nb = m.neighbor[u.tile][d];
     if (nb != kOffMap && s.unit_at[nb] != kNoUnit && s.units[s.unit_at[nb]].owner == viewer)
