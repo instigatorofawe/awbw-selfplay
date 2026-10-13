@@ -11,11 +11,17 @@ namespace awbw {
 
 // Network input for one position, seen by the player to move ("me"): uint8
 // planes over the board plus a float vector of global features. Owners are
-// relative (me / opponent), and enemy units that `me` can't see (hidden Subs
-// and Stealths, see visible_to) are left out of both.
+// relative (me / opponent).
+//
+// What `me` knows is what a player who watched every turn knows. Enemy units
+// `me` can't see (hidden Subs and Stealths, see visible_to) are left off the
+// board, since where they went is unknown, but the unit count and army value
+// include them, as AWBW's game page does: both players saw them built. Cargo
+// shows with its transport: AWBW hides an enemy transport's cargo, but every
+// load happened in plain sight.
 //
 // Bump kEncodeVersion whenever a plane or global changes meaning.
-inline constexpr int kEncodeVersion = 1;
+inline constexpr int kEncodeVersion = 2;
 
 enum Plane : uint8_t {
   kPlaneTerrain,  // 0 off the board; else 1 + terrain kind now + kNumTerrainKinds * side,
@@ -64,12 +70,15 @@ enum SideGlobal : uint8_t {
   kGScopCost,
   kGCopOn,
   kGScopOn,
-  kGPowerUses,  // / 10
-  kGProps,      // capturable properties owned, / 30
-  kGComtowers,  // / 10
-  kGUnits,      // units in sight, carried ones included, / 50
-  kGArmyValue,  // cost x displayed HP / 10 of those units, / 100,000
-  kGCo,         // one-hot AWBW CO id, kMaxCoId + 1 entries
+  kGPowerUses,       // / 10
+  kGProps,           // capturable properties owned, / 30
+  kGComtowers,       // / 10
+  kGUnits,           // all units, hidden and carried ones included, / 50
+  kGArmyValue,       // cost x displayed HP / 10 of those units, / 100,000
+  kGHiddenSubs,      // Subs the other player can't see, / 10
+  kGHiddenStealths,  // Stealths the other player can't see, / 10
+  kGHiddenValue,     // army value of the units the other player can't see, / 100,000
+  kGCo,              // one-hot AWBW CO id, kMaxCoId + 1 entries
   kSideGlobals = kGCo + kMaxCoId + 1
 };
 

@@ -38,7 +38,7 @@ def rows(*states):
 def test_tables_line_up():
     assert len(_core.PLANES) == _core.NUM_PLANES
     assert len(_core.GLOBAL_NAMES) == _core.NUM_GLOBALS == len(set(_core.GLOBAL_NAMES))
-    assert {"me.funds", "opp.co.Max", "weather.clear", "moved_first"} <= set(_core.GLOBAL_NAMES)
+    assert {"me.funds", "opp.hidden_value", "opp.co.Max", "weather.clear", "moved_first"} <= set(_core.GLOBAL_NAMES)
 
 
 def test_planes_and_globals_from_each_side(md):

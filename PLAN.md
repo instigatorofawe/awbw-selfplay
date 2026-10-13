@@ -496,10 +496,16 @@ static_assert(std::is_trivially_copyable_v<GameState>);
 Shipping C×H×W float32 one-hots per leaf is too heavy: about 600 KB per leaf
 at 40×40, around 600 MB per batch of 1024. Instead:
 
-`src/core/encode.h` (version 1), `encode_batch` in Python. Everything is
-from the side of the player to move ("me"): owners are relative, and enemy
-units `me` can't see (hidden Subs and Stealths that are neither next to one
-of my units nor on my property) are left out of planes and counts alike.
+`src/core/encode.h` (version 2), `encode_batch` in Python. Everything is
+from the side of the player to move ("me"), with owners relative, and `me`
+knows what a player who watched every turn knows:
+
+- Enemy units `me` can't see (hidden Subs and Stealths that are neither
+  next to one of my units nor on my property) are left off the board, since
+  where they went is unknown. The unit count and army value include them,
+  as AWBW's game page does: both players saw them built.
+- Cargo shows with its transport. AWBW doesn't show what's in an enemy
+  transport, but every load happened in plain sight.
 
 - **11 `uint8` planes `[11, H, W]`** (11 KB per state at 32×32). `PLANES`
   gives each one's name, number of values and whether it is an index to
@@ -514,10 +520,11 @@ of my units nor on my property) are left out of planes and counts alike.
   - `cargo1`, `cargo2` (index: type), `cargo1_hp`, `cargo2_hp`
   - To come with the policy: the pending selection and reachable /
     attackable masks.
-- **98 globals (`float32`)**, named in `GLOBAL_NAMES`: for me, then the
+- **104 globals (`float32`)**, named in `GLOBAL_NAMES`: for me, then the
   opponent, funds, income, power meter as a share of each power's cost, the
   costs, which power is on, power uses, properties, comtowers, unit count
-  and army value (both of units in sight), and the CO one-hot; then the day,
+  and army value (all units), the Subs, Stealths and army value the other
+  player can't see, and the CO one-hot; then the day,
   weather and whose power set it, the capture limit, funds per property, and
   whether `me` moves first. Starting positions are deliberately unbalanced
   to make up for moving first, so the critic needs to know which side it is
@@ -574,12 +581,15 @@ of my units nor on my property) are left out of planes and counts alike.
   | | all | days 1–3 | 4–6 | 7–9 | 10–12 | 13–15 | 16–20 | 21+ |
   |---|---|---|---|---|---|---|---|---|
   | coin flip | 0.693 | | | | | | | |
-  | logistic regression on the 98 globals | 0.550 | 0.690 | 0.682 | 0.632 | 0.500 | 0.345 | 0.269 | 0.215 |
-  | critic, 2 epochs (default) | **0.543** | 0.691 | 0.683 | 0.628 | 0.483 | 0.324 | 0.257 | 0.206 |
+  | logistic regression on the 104 globals | 0.550 | 0.690 | 0.682 | 0.632 | 0.500 | 0.344 | 0.269 | 0.212 |
+  | critic, 2 epochs (default) | **0.542** | 0.691 | 0.683 | 0.628 | 0.482 | 0.321 | 0.255 | 0.203 |
 
-  - Accuracy 68.1% (53% on days 1–3, 78% on days 10–12, 91% after day
-    20), Brier 0.188, calibration error 0.022. Slightly under-confident at
-    the extremes (predicted 15% wins 8%; predicted 75% wins 83%).
+  - Accuracy 68.3% (54% on days 1–3, 78% on days 10–12, 91% after day
+    20), Brier 0.187, calibration error 0.022. Slightly under-confident at
+    the extremes (predicted 15% wins 9%; predicted 75% wins 82%).
+  - Encoder v2 (hidden units in the totals, 104 globals) changed little:
+    0.542 against 0.543 on v1. Only 0.1% of positions have a hidden enemy
+    unit.
   - **Overfits with more epochs:** on an 8-epoch schedule, validation loss
     was 0.550 after epoch 1 and 0.554 after epoch 2, with days 1–6 worse
     than a coin flip (0.705). Every position of a game shares its label, so

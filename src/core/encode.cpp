@@ -10,8 +10,9 @@ namespace awbw {
 
 std::string global_name(int i) {
   static const char* const kSide[kGCo] = {
-      "funds",   "income",     "cop_charge", "scop_charge", "cop_cost", "scop_cost", "cop_on",
-      "scop_on", "power_uses", "props",      "comtowers",   "units",    "army_value"};
+      "funds",      "income",      "cop_charge",      "scop_charge", "cop_cost",  "scop_cost",
+      "cop_on",     "scop_on",     "power_uses",      "props",       "comtowers", "units",
+      "army_value", "hidden_subs", "hidden_stealths", "hidden_value"};
   static const char* const kWeatherNames[kNumWeathers] = {"clear", "rain", "snow"};
   if (i < 0 || i >= kNumGlobals) return "";
   if (i < 2 * kSideGlobals) {
@@ -82,18 +83,25 @@ void encode(const MapData& m, const GameState& s, uint8_t* planes, int h, int w,
         static_cast<uint8_t>(1 + terrain_kind(m, s, t) + kNumTerrainKinds * (side + 1));
   }
 
-  // Units in sight of me; cargo shows when its transport does.
-  int units[2] = {};
-  int64_t value[2] = {};
+  // Units. The board shows mine and the opponent's that I can see, cargo with
+  // its transport; the totals count every unit.
+  int units[2] = {}, hidden_subs[2] = {}, hidden_stealths[2] = {};
+  int64_t value[2] = {}, hidden_value[2] = {};
   for (int i = 0; i < kMaxUnits; ++i) {
     const Unit& u = s.units[i];
     if (!u.alive()) continue;
     const bool carried = u.has(kCarried);
-    if (!visible_to(m, s, carried ? u.carrier : i, me)) continue;
     const int side = side_of(u.owner);
+    const int64_t worth = int64_t{kUnits[u.type].cost} * displayed_hp(u.hp) / 10;
     ++units[side];
-    value[side] += int64_t{kUnits[u.type].cost} * displayed_hp(u.hp) / 10;
-    if (carried) continue;
+    value[side] += worth;
+    const bool seen = visible_to(m, s, carried ? u.carrier : i, 1 - u.owner);
+    if (!seen) {
+      hidden_subs[side] += u.type == kSub;
+      hidden_stealths[side] += u.type == kStealth;
+      hidden_value[side] += worth;
+    }
+    if (carried || (!seen && side == 1)) continue;
     cell(kPlaneUnit, u.tile) = static_cast<uint8_t>(1 + u.type + kNumUnitTypes * side);
     cell(kPlaneHp, u.tile) = u.hp;
     cell(kPlaneFuel, u.tile) = clamp_u8(u.fuel, kPlanes[kPlaneFuel].values - 1);
@@ -127,6 +135,9 @@ void encode(const MapData& m, const GameState& s, uint8_t* planes, int h, int w,
     f[kGComtowers] = towers[side] / 10.0f;
     f[kGUnits] = units[side] / 50.0f;
     f[kGArmyValue] = static_cast<float>(value[side]) / 100000.0f;
+    f[kGHiddenSubs] = hidden_subs[side] / 10.0f;
+    f[kGHiddenStealths] = hidden_stealths[side] / 10.0f;
+    f[kGHiddenValue] = static_cast<float>(hidden_value[side]) / 100000.0f;
     f[kGCo + p.co] = 1.0f;
   }
 

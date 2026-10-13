@@ -41,11 +41,11 @@ WEATHERS: tuple = ('clear', 'rain', 'snow')
 
 ACTIONS: dict = ...
 
-ENCODE_VERSION: int = 1
+ENCODE_VERSION: int = 2
 
 NUM_PLANES: int = 11
 
-NUM_GLOBALS: int = 98
+NUM_GLOBALS: int = 104
 
 PLANES: tuple = ...
 

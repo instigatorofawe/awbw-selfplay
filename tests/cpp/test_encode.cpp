@@ -109,22 +109,34 @@ TEST_F(EncodeTest, UnitsAndCargo) {
   EXPECT_EQ(flipped.at(kPlaneUnit, 1, 2), 1 + kApc);
 }
 
-TEST_F(EncodeTest, HiddenEnemiesShowOnlyWhenSeen) {
-  const int sub = put(s, m, kSub, 1, 4, 0);
+TEST_F(EncodeTest, HiddenEnemiesStayOffTheBoardButCount) {
+  const int sub = put(s, m, kSub, 1, 4, 0, 55);
   s.units[sub].flags |= kHidden;
   const int mine = put(s, m, kStealth, 0, 1, 2);
   s.units[mine].flags |= kHidden;
   const Encoded e(m, s);
   EXPECT_EQ(e.at(kPlaneUnit, 4, 0), 0);
   EXPECT_EQ(e.at(kPlaneHp, 4, 0), 0);
-  EXPECT_FLOAT_EQ(e.opp(kGUnits), 0.0f);
   EXPECT_EQ(e.at(kPlaneUnit, 1, 2), 1 + kStealth);  // my own hidden unit
   EXPECT_EQ(e.at(kPlaneFlags, 1, 2), kHidden);
+  // The totals count both, as the game page does.
+  const float sub_value = kUnits[kSub].cost * 6 / 10 / 100000.0f;
+  EXPECT_FLOAT_EQ(e.opp(kGUnits), 1 / 50.0f);
+  EXPECT_FLOAT_EQ(e.opp(kGArmyValue), sub_value);
+  EXPECT_FLOAT_EQ(e.opp(kGHiddenSubs), 1 / 10.0f);
+  EXPECT_FLOAT_EQ(e.opp(kGHiddenStealths), 0.0f);
+  EXPECT_FLOAT_EQ(e.opp(kGHiddenValue), sub_value);
+  EXPECT_FLOAT_EQ(e.me(kGUnits), 1 / 50.0f);
+  EXPECT_FLOAT_EQ(e.me(kGHiddenStealths), 1 / 10.0f);  // hidden from the opponent
+  EXPECT_FLOAT_EQ(e.me(kGHiddenValue), kUnits[kStealth].cost / 100000.0f);
 
   put(s, m, kCruiser, 0, 3, 0);  // next to the sub
   const Encoded seen(m, s);
   EXPECT_EQ(seen.at(kPlaneUnit, 4, 0), 1 + kNumUnitTypes + kSub);
   EXPECT_EQ(seen.at(kPlaneFlags, 4, 0), kHidden);
+  EXPECT_FLOAT_EQ(seen.opp(kGHiddenSubs), 0.0f);
+  EXPECT_FLOAT_EQ(seen.opp(kGHiddenValue), 0.0f);
+  EXPECT_FLOAT_EQ(seen.opp(kGArmyValue), sub_value);
 }
 
 TEST_F(EncodeTest, PlayerGlobals) {
