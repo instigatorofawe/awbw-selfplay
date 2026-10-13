@@ -59,6 +59,11 @@ def _shown(hp: int) -> int:
     return (hp + 9) // 10
 
 
+def _logged_hp(value: Any) -> int | None:
+    """A logged displayed HP, or None where the viewer isn't shown it ("?", Sonja's)."""
+    return None if value == "?" else int(value)
+
+
 class Diverged(Exception):
     """The engine and the replay disagree."""
 
@@ -168,6 +173,16 @@ def _own_path(mv: dict, player_id: int) -> list[tuple[int, int]]:
 
 
 class _TurnStepper:
+    # What the end-of-turn check compares of each unit: (name, index into unit_rows).
+    _END_FIELDS: tuple[tuple[str, Any], ...] = (
+        ("type", 1),
+        ("owner", 2),
+        ("position", slice(3, 5)),
+        ("hp", 5),
+        ("fuel", 6),
+        ("ammo", 7),
+    )
+
     def __init__(self, replay: Replay, md: _core.MapData, turn: Turn, nxt: Turn | None):
         self.replay = replay
         self.md = md
@@ -186,6 +201,11 @@ class _TurnStepper:
         self.aims: dict[int, tuple[str, int, int]] = {}
         # Each unit's (internal HP, HP belief) at the end of a turn that matched, by AWBW id.
         self.end_beliefs: dict[int, Beliefs] | None = None
+        self.unchecked: frozenset[int] = frozenset()  # units (AWBW ids) left out of the end-of-turn check
+
+    def _hp_seen(self, uid: int, hp: int) -> int | None:
+        """What the end-of-turn check compares of a unit's HP."""
+        return hp
 
     # -- log -> steps ------------------------------------------------------
 
@@ -247,7 +267,8 @@ class _TurnStepper:
                 b = a["Capt"]["buildingInfo"]
                 step.target = (int(b["buildings_x"]), int(b["buildings_y"]))
             elif name in ("Supply", "Repair", "Hide", "Unhide") and not step.uid:
-                step.uid = unit_id(a[name]["unit"])
+                if _view(a[name].get("unit")) is not None:
+                    step.uid = unit_id(a[name]["unit"])
             elif name == "AttackSeam":
                 sa = a["AttackSeam"]
                 info = _view(sa["unit"])["combatInfo"]
@@ -291,7 +312,16 @@ class _TurnStepper:
         self._expect(
             f"move position: {name}", (x, y), (int(step.moved["units_x"]), int(step.moved["units_y"])), step.index
         )
-        self._expect(f"move fuel: {name}", u.fuel, int(step.moved["units_fuel"]), step.index)
+        self._check_supplies(state, slot, int(step.moved["units_fuel"]), None, "move", step.index)
+
+    def _check_supplies(self, state, slot: int, fuel: int | None, ammo: int | None, what: str, index: int) -> None:
+        """Check a unit's fuel and ammo (None: not logged) against the log."""
+        u = state.unit(slot)
+        name = self.r.units[u.type].name
+        if fuel is not None:
+            self._expect(f"{what} fuel: {name}", u.fuel, fuel, index)
+        if ammo is not None:
+            self._expect(f"{what} ammo: {name}", u.ammo, ammo, index)
 
     def md_xy(self, tile: int) -> tuple[int, int]:
         return tile % self.md.width, tile // self.md.width
@@ -318,20 +348,20 @@ class _TurnStepper:
             if len(cands) == 1:
                 if pre:
                     deps = {**deps, step.uid: pre, step.other: pre}
-                self._fire(state, alias, step, *cands[0])
+                self._apply_fight(state, alias, step, cands[0])
                 i += 1
                 continue
             here = pre | {i}
             conflict: set[int] = set()
             worst: Diverged | None = None
-            for att_hp, def_hp in cands:
+            for cand in cands:
                 ctx.nodes += 1
                 if ctx.nodes > _SEARCH_BUDGET:
                     raise Diverged("search budget", "too many internal-HP choices", step.index)
                 s2, a2 = state.copy(), dict(alias)
                 d2 = {**deps, step.uid: here, step.other: here}
                 try:
-                    self._fire(s2, a2, step, att_hp, def_hp)
+                    self._apply_fight(s2, a2, step, cand)
                     self._run(i + 1, s2, a2, d2, ctx)
                     return
                 except Diverged as e:
@@ -346,7 +376,8 @@ class _TurnStepper:
 
     # -- fights ------------------------------------------------------------
 
-    def _fire_candidates(self, state, alias, step: _Step, pre: frozenset[int]) -> list[tuple[int, int]]:
+    def _fire_candidates(self, state, alias, step: _Step, pre: frozenset[int]) -> list[tuple[int, ...]]:
+        """Arguments for ``_fire`` that give the logged result, most likely first."""
         info = _view(step.log["Fire"]["combatInfoVision"])["combatInfo"]
         want = (int(info["attacker"]["units_hit_points"]), int(info["defender"]["units_hit_points"]))
         slot = self._slot(state, alias, step.uid, step.index)
@@ -382,6 +413,10 @@ class _TurnStepper:
         cands.sort(key=score)
         return [(a, d) for a, d, _ in cands]
 
+    def _apply_fight(self, state, alias, step: _Step, cand: tuple[int, ...]) -> None:
+        """Apply a fight as one of ``_fire_candidates``."""
+        self._fire(state, alias, step, *cand)
+
     def _fire(self, state, alias, step: _Step, att_hp: int, def_hp: int) -> None:
         slot = self._slot(state, alias, step.uid, step.index)
         dslot = self._slot(state, alias, step.other, step.index)
@@ -404,10 +439,8 @@ class _TurnStepper:
             s = state.find_unit(alias.get(uid, uid))
             logged_ammo = info[side].get("units_ammo")
             if s >= 0 and logged_ammo is not None:
-                u = state.unit(s)
                 # AWBW can log negative ammo for a unit that fired with none left.
-                want = max(0, int(logged_ammo))
-                self._expect(f"fire ammo: {self.r.units[u.type].name}", u.ammo, want, step.index)
+                self._check_supplies(state, s, None, max(0, int(logged_ammo)), "fire", step.index)
         cv = fire.get("copValues") or {}
         players = state.players
         for side, player in (("attacker", att_player), ("defender", def_player)):
@@ -472,11 +505,12 @@ class _TurnStepper:
             g = _view(j["unit"])
             into = self._slot(state, alias, int(g["units_id"]), i)
             u = state.unit(into)
-            self._expect("join hp", _shown(u.hp), int(g["units_hit_points"]), i)
+            if (shown := _logged_hp(g["units_hit_points"])) is not None:
+                self._expect("join hp", _shown(u.hp), shown, i)
             self._expect("join fuel", u.fuel, int(g["units_fuel"]), i)
             self._expect("join ammo", u.ammo, int(g["units_ammo"]), i)
         elif name == "Supply":
-            slot = self._slot(state, alias, step.uid, i)
+            slot = self._slot(state, alias, step.uid, i) if step.uid else self._supplier(state, alias, step)
             self._apply(state, i, "Supply", unit=slot, to=to, path=step.path)
             self._check_moved(state, alias, step)
         elif name == "Repair":
@@ -487,7 +521,8 @@ class _TurnStepper:
             rep = a["Repair"]
             self._expect("repair funds", state.players[state.active].funds, int(_view(rep["funds"])), i)
             got = state.unit(self._slot(state, alias, step.other, i))
-            self._expect("repair hp", _shown(got.hp), int(_view(rep["repaired"])["units_hit_points"]), i)
+            if (shown := _logged_hp(_view(rep["repaired"])["units_hit_points"])) is not None:
+                self._expect("repair hp", _shown(got.hp), shown, i)
         elif name in ("Hide", "Unhide"):
             slot = self._slot(state, alias, step.uid, i)
             self._apply(state, i, name, unit=slot, to=to, path=step.path)
@@ -567,7 +602,7 @@ class _TurnStepper:
             u = state.unit(slot)
             name = self.r.units[u.type].name
             # Sonja hides HP from her opponent: the log shows 0 (powers never kill).
-            if "units_hit_points" in row and int(row["units_hit_points"]) > 0:
+            if "units_hit_points" in row and (_logged_hp(row["units_hit_points"]) or 0) > 0:
                 self._expect(f"{what}: hp of {name}", _shown(u.hp), int(row["units_hit_points"]), i)
             if "units_fuel" in row:
                 self._expect(f"{what}: fuel of {name}", u.fuel, int(row["units_fuel"]), i)
@@ -586,6 +621,24 @@ class _TurnStepper:
                 self._expect(f"{what}: power meter", state.players[pi].power, int(row["players_co_power"]), i)
             if "players_funds" in row:
                 self._expect(f"{what}: funds", state.players[pi].funds, int(row["players_funds"]), i)
+
+    def _supplier(self, state, alias: dict[int, int], step: _Step) -> int:
+        """The unit that supplied where it stood: the active player's unmoved APC next
+        to every unit supplied."""
+        rows = [int(r) for r in step.log["Supply"].get("rows") or []]
+        tiles = [state.unit(self._slot(state, alias, uid, step.index)).tile for uid in rows]
+        apc = self.unit_type["APC"]
+        found = []
+        for slot in state.unit_slots():
+            u = state.unit(slot)
+            if u.owner != state.active or u.type != apc or u.flags & _core.UNIT_MOVED:
+                continue
+            x, y = self.md_xy(u.tile)
+            if all(abs(x - tx) + abs(y - ty) == 1 for tx, ty in map(self.md_xy, tiles)):
+                found.append(slot)
+        if len(found) != 1:
+            raise Diverged("supply: supplier", f"{len(found)} APCs could have supplied {rows}", step.index)
+        return found[0]
 
     def _prop_at(self, x: int, y: int) -> int:
         for p, (px, py, _, _) in enumerate(self.md.props()):
@@ -617,6 +670,9 @@ class _TurnStepper:
             self._expect("property points", (xy, state.prop_points(p)), (xy, exp.prop_points(p)), n)
         mine = {awbw_id.get(r[0], r[0]): r for r in state.unit_rows()}
         theirs = {r[0]: r for r in exp.unit_rows()}
+        for uid in self.unchecked:
+            mine.pop(uid, None)
+            theirs.pop(uid, None)
         for uid in sorted(mine.keys() | theirs.keys()):
             if uid not in theirs:
                 name = self.r.units[mine[uid][1]].name
@@ -636,10 +692,10 @@ class _TurnStepper:
                 )
             g, w = mine[uid], theirs[uid]
             name = self.r.units[w[1]].name
-            fields = (("type", 1), ("owner", 2), ("position", slice(3, 5)), ("hp", 5), ("fuel", 6), ("ammo", 7))
-            for f, k in fields:
+            for f, k in self._END_FIELDS:
+                got, want = (self._hp_seen(uid, g[k]), self._hp_seen(uid, w[k])) if f == "hp" else (g[k], w[k])
                 self._expect(
-                    f"unit {f}: {name}", (uid, g[k]), (uid, w[k]), n, deps.get(uid, _NONE) if f == "hp" else _NONE
+                    f"unit {f}: {name}", (uid, got), (uid, want), n, deps.get(uid, _NONE) if f == "hp" else _NONE
                 )
             self._expect(f"unit flags: {name}", (uid, g[8] & _FLAGS), (uid, w[8] & _FLAGS), n)
             cargo = tuple(awbw_id.get(c, c) for c in g[9:11])
@@ -648,6 +704,223 @@ class _TurnStepper:
             awbw_id.get(r[0], r[0]): (r[5], state.hp_belief(slot), state.hidden_belief(slot))
             for r, slot in zip(state.unit_rows(), state.unit_slots(), strict=True)
         }
+
+
+class _SpectatorStepper(_TurnStepper):
+    """A turn as a spectator of a live game sees it (``step_spectator_turn``): units'
+    displayed HP only, and none at all for Sonja's.
+
+    Internal HPs are unknown, so a fight is tried from every pair of internal
+    HPs the two units' beliefs allow (for a Sonja unit whose display her
+    opponent doesn't know, every display her hidden belief allows). Beliefs
+    only read what both players see, so any choice that gives the logged
+    result, power meters and funds updates them the same; the most likely goes
+    first. A capture or the repairs at a turn's start show a Sonja unit's
+    display through capture points and funds, so those choose it too.
+
+    The page's log for a game in progress leaves out supplies, so a unit's
+    fuel and ammo are taken from the log and the end-of-turn check skips them.
+    """
+
+    _END_FIELDS = tuple(f for f in _TurnStepper._END_FIELDS if f[0] not in ("fuel", "ammo"))
+    _MAX_REPAIR_CHOICES = 1000
+
+    def __init__(
+        self,
+        replay: Replay,
+        md: _core.MapData,
+        turn: Turn,
+        expected: _core.GameState,
+        hidden: frozenset[int],
+        unchecked: frozenset[int],
+    ):
+        super().__init__(replay, md, turn, None)
+        self.expected = expected
+        self.next_player = expected.active
+        self.hidden = hidden
+        self.unchecked = unchecked
+        self.survivors = {r[0] for r in expected.unit_rows()}
+        # Units each step's action list mentions from there on, by step index.
+        self.mentioned_after: dict[int, set[int]] = {}
+        seen: set[int] = set()
+        for k in range(len(self.actions) - 1, -1, -1):
+            self.mentioned_after[k] = set(seen)
+            seen |= _unit_ids(self.actions[k])
+
+    def _hp_seen(self, uid: int, hp: int) -> int | None:
+        return None if uid in self.hidden else _shown(hp)
+
+    def _check_supplies(self, state, slot: int, fuel: int | None, ammo: int | None, what: str, index: int) -> None:
+        u = state.unit(slot)
+        state.set_supplies(slot, u.fuel if fuel is None else fuel, u.ammo if ammo is None else ammo)
+
+    def _display_unknown(self, state, slot: int) -> bool:
+        u = state.unit(slot)
+        return state.hides_hp(u.owner) and state.hidden_belief(slot).count(0) < _core.HP_BINS - 1
+
+    def _hp_choices(self, state, slot: int) -> list[tuple[int, float]]:
+        """(internal HP, probability) the unit's beliefs allow."""
+        u = state.unit(slot)
+        w = state.hp_belief(slot)
+        here = _shown(u.hp)
+        if not self._display_unknown(state, slot):
+            total = sum(w)
+            return [(10 * (here - 1) + 1 + k, p / total) for k, p in enumerate(w) if p]
+        hidden = state.hidden_belief(slot)
+        out = []
+        for d, pd in enumerate(hidden, 1):
+            if not pd:
+                continue
+            within = w if d == here else [1] * _core.HP_BINS
+            total = sum(within) * sum(hidden)
+            out += [(10 * (d - 1) + 1 + k, pd * p / total) for k, p in enumerate(within) if p]
+        return out
+
+    def _display_choices(self, state, slot: int) -> list[tuple[int, float]]:
+        """(internal HP, probability) with one HP per display the beliefs allow: the
+        unit's own HP for its current display."""
+        best: dict[int, tuple[int, float]] = {}
+        here = state.unit(slot).hp
+        for hp, p in self._hp_choices(state, slot):
+            d = _shown(hp)
+            keep = here if d == _shown(here) else best.get(d, (hp, 0.0))[0]
+            best[d] = (keep, best.get(d, (hp, 0.0))[1] + p)
+        return sorted(best.values(), key=lambda c: -c[1])
+
+    def _fire_candidates(self, state, alias, step: _Step, pre: frozenset[int]) -> list[tuple[int, ...]]:
+        info = _view(step.log["Fire"]["combatInfoVision"])["combatInfo"]
+        want = (_logged_hp(info["attacker"]["units_hit_points"]), _logged_hp(info["defender"]["units_hit_points"]))
+        # A unit whose HP is hidden survived if it is still there later.
+        later = self.mentioned_after.get(step.index, set()) | self.survivors
+        alive = (step.uid in later, step.other in later)
+        slot = self._slot(state, alias, step.uid, step.index)
+        dslot = self._slot(state, alias, step.other, step.index)
+        here = self.md_xy(state.unit(slot).tile)
+        dest = step.path[-1] if step.path else here
+        assert step.target is not None
+        scored: list[tuple[float, tuple[int, int, int, int]]] = []
+        for att_start, pa in self._hp_choices(state, slot):
+            for def_start, pd in self._hp_choices(state, dslot):
+                s2 = state.copy()
+                s2.set_hp(slot, att_start)
+                s2.set_hp(dslot, def_start)
+                for a, d, p in _core.fight_outcomes(s2, slot, dest, step.target):
+                    if all(
+                        (_shown(hp) == w) if w is not None else (hp > 0 or not lives)
+                        for hp, w, lives in zip((a, d), want, alive, strict=True)
+                    ):
+                        scored.append((pa * pd * p, (att_start, def_start, a, d)))
+        scored.sort(key=lambda c: -c[0])
+        cands: list[tuple[int, ...]] = []
+        for _, cand in scored:  # keep those the rest of the log agrees with: ammo, meters, funds
+            try:
+                self._apply_fight(state.copy(), dict(alias), step, cand)
+            except Diverged:
+                continue
+            cands.append(cand)
+        if not cands:
+            u = state.unit(slot)
+            raise Diverged(
+                f"fire result: {self.r.units[u.type].name}", f"no internal HPs give the logged {want}", step.index, pre
+            )
+        return cands
+
+    def _apply_fight(self, state, alias, step: _Step, cand: tuple[int, ...]) -> None:
+        att_start, def_start, att_hp, def_hp = cand
+        state.set_hp(self._slot(state, alias, step.uid, step.index), att_start)
+        state.set_hp(self._slot(state, alias, step.other, step.index), def_start)
+        self._fire(state, alias, step, att_hp, def_hp)
+
+    def _step(self, state, alias, step: _Step) -> bool:
+        if step.name == "Capt":
+            slot = self._slot(state, alias, step.uid, step.index) if step.uid else state.unit_at(*step.target)
+            if slot >= 0 and self._display_unknown(state, slot):
+                return self._choose(
+                    state, alias, step, [[(slot, hp, p)] for hp, p in self._display_choices(state, slot)]
+                )
+        if step.name == "End" and state.hides_hp(1 - state.active):
+            return self._choose_repairs(state, alias, step)
+        return super()._step(state, alias, step)
+
+    def _choose(self, state, alias, step: _Step, choices: list[list[tuple[int, int, float]]]) -> bool:
+        """Apply the step after setting units' HPs as the first of ``choices`` (each a
+        list of (slot, HP, probability)) that the log agrees with, most likely first."""
+
+        def weight(c: list[tuple[int, int, float]]) -> float:
+            w = 1.0
+            for _, _, p in c:
+                w *= p
+            return w
+
+        worst: Diverged | None = None
+        for choice in sorted(choices, key=lambda c: -weight(c)):
+            s2, a2 = state.copy(), dict(alias)
+            for slot, hp, _ in choice:
+                s2.set_hp(slot, hp)
+            try:
+                ended = super()._step(s2, a2, step)
+            except Diverged as e:
+                worst = worst or e
+                continue
+            state.assign(s2)
+            alias.clear()
+            alias.update(a2)
+            return ended
+        assert worst is not None
+        raise worst
+
+    def _choose_repairs(self, state, alias, step: _Step) -> bool:
+        """End the turn, choosing the displays of the next player's Sonja units whose
+        display is unknown and that stand on their own properties (where they may be
+        repaired) to agree with the funds and HPs logged."""
+        nxt = 1 - state.active
+        props = {self.md.props()[p][:2] for p in range(self.md.n_props) if state.prop_owner(p) == nxt}
+        slots = [
+            sl
+            for sl in state.unit_slots()
+            if state.unit(sl).owner == nxt
+            and self.md_xy(state.unit(sl).tile) in props
+            and self._display_unknown(state, sl)
+            and not state.unit(sl).flags & _core.UNIT_CARRIED
+        ]
+        if not slots:
+            return super()._step(state, alias, step)
+        per_unit = [[(sl, hp, p) for hp, p in self._display_choices(state, sl)] for sl in slots]
+        keep = len(per_unit[0])
+        while keep > 1 and _product(min(len(c), keep) for c in per_unit) > self._MAX_REPAIR_CHOICES:
+            keep -= 1
+        combos: list[list[tuple[int, int, float]]] = [[]]
+        for opts in per_unit:
+            combos = [[*c, o] for c in combos for o in opts[:keep]]
+        return self._choose(state, alias, step, combos)
+
+
+def _product(values) -> int:
+    out = 1
+    for v in values:
+        out *= v
+    return out
+
+
+_ID_KEYS = frozenset(
+    ("units_id", "unitId", "deletedId", "loadedId", "transportId", "transportID", "joinID", "joinId", "loaded")
+)
+
+
+def _unit_ids(obj: Any) -> set[int]:
+    """AWBW unit ids a log entry refers to."""
+    out: set[int] = set()
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            v = _view(v)
+            if isinstance(v, (dict, list)):
+                out |= _unit_ids(v)
+            elif (k in _ID_KEYS or k in ("unit", "transport")) and str(v).isdigit():
+                out.add(int(v))
+    elif isinstance(obj, list):
+        for v in obj:
+            out |= _unit_ids(v)
+    return out
 
 
 class _Skip(Exception):
@@ -721,6 +994,40 @@ def step_turn(
     except (KeyError, TypeError, ValueError, IndexError) as e:  # a log entry missing what the checker reads
         return stepper.expected, None, f"unreadable log ({type(e).__name__})"
     return stepper.expected, stepper.end_beliefs, ""
+
+
+def step_spectator_turn(
+    replay: Replay,
+    md: _core.MapData,
+    k: int,
+    start: _core.GameState,
+    expected: _core.GameState,
+    *,
+    hidden: frozenset[int] = frozenset(),
+    unchecked: frozenset[int] = frozenset(),
+) -> tuple[dict[int, Beliefs] | None, str]:
+    """Step turn ``k`` of a game as a spectator sees it (``_SpectatorStepper``), from
+    ``start`` (with HP beliefs), and check it against ``expected``, the next turn's
+    start as shown: displayed HP only, and none for units in ``hidden``. Units in
+    ``unchecked`` (AWBW ids) are left out of that check.
+
+    Returns each unit's internal HP (one the beliefs allow) and beliefs at the
+    end of the turn by AWBW id, or None if the turn couldn't be stepped or
+    didn't match; and why not ("" if it matched).
+    """
+    turn = replay.turns[k]
+    if turn.actions is None:
+        return None, "no actions logged"
+    stepper = _SpectatorStepper(replay, md, turn, expected, hidden, unchecked)
+    try:
+        stepper.run(start)
+    except _Skip as e:
+        return None, str(e)
+    except Diverged as e:
+        return None, e.category
+    except (KeyError, TypeError, ValueError, IndexError) as e:  # a log entry missing what the checker reads
+        return None, f"unreadable log ({type(e).__name__})"
+    return stepper.end_beliefs, ""
 
 
 def check_file(path: Path) -> StepReport:

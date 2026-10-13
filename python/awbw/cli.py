@@ -130,6 +130,11 @@ def main(argv: list[str] | None = None) -> int:
     lv.add_argument("checkpoint", type=Path)
     lv.add_argument("game", help="game id or game page URL")
     lv.add_argument("--history", action="store_true", help="every turn so far, not just the current one")
+    lv.add_argument(
+        "--no-beliefs",
+        action="store_true",
+        help="fetch only the current turn; HP is known only as the page shows it (faster on first use)",
+    )
     lv.add_argument("--ratings", type=int, nargs=2, metavar=("P1", "P2"), help="the players' ratings (default unknown)")
     lv.add_argument("--device", default="auto")
 
@@ -559,8 +564,13 @@ def _live(args, http: Http) -> int:
     from .rules import load as load_rules
 
     try:
-        game, turns = live.fetch(live.game_id_from(args.game), http, history=args.history)
-        states = [live.state(game, t) for t in turns]
+        game, turns = live.fetch(live.game_id_from(args.game), http, history=args.history or not args.no_beliefs)
+        if args.no_beliefs:
+            states, stepped = [live.state(game, t) for t in turns], None
+        else:
+            states, stepped = live.states(game, turns)
+            if not args.history:
+                turns, states = turns[-1:], states[-1:]
     except (live.LiveUnavailable, live.Unsupported, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -595,10 +605,20 @@ def _live(args, http: Http) -> int:
     who = {pid: f"P{i + 1}" for i, pid in enumerate(game.order)}
     if game.acted and now.turn.player_id == game.to_move:
         print(f"  note: {game.acted} of {who[game.to_move]}'s units have acted since; the critic values turn starts")
-    if now.estimated_hp:
-        print(f"  note: {now.estimated_hp} damaged units show whole HP only; their exact HP is estimated")
-    if now.unknown_hp:
-        print(f"  note: {now.unknown_hp} units hide their HP (Sonja): any display to her opponent, full to her")
+    if stepped is not None:
+        why = ", ".join(f"{n} {reason}" for reason, n in stepped.failed.most_common())
+        tried = stepped.stepped + sum(stepped.failed.values())
+        print(
+            f"  HP beliefs from watching the game: {stepped.stepped} of {tried} turns stepped"
+            + (f" (not: {why}; their units' HP restarts from the page)" if why else "")
+        )
+        if now.unknown_hp and now.turn.player_id in {u.players_id for u in now.turn.units if u.id in now.hidden_hp}:
+            print(f"  note: {now.unknown_hp} units hide their HP (Sonja); to her, they show the likeliest displays")
+    else:
+        if now.estimated_hp:
+            print(f"  note: {now.estimated_hp} damaged units show whole HP only; their exact HP is estimated")
+        if now.unknown_hp:
+            print(f"  note: {now.unknown_hp} units hide their HP (Sonja): any display to her opponent, full to her")
     for u in now.put_back:
         owner, mover_id = who[u.players_id], now.turn.player_id
         where = "on its own board at a guessed tile" if u.players_id == mover_id else f"out of {who[mover_id]}'s sight"

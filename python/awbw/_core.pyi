@@ -210,6 +210,9 @@ class GameState:
 
     def copy(self) -> GameState: ...
 
+    def assign(self, other: GameState) -> None:
+        """Make this state equal to `other`, in place."""
+
     def to_bytes(self) -> bytes: ...
 
     @staticmethod
@@ -257,6 +260,16 @@ class GameState:
 
     def set_hp_unknown(self, slot: int) -> None:
         """Make every internal HP the unit's display allows equally likely."""
+
+    def set_hp(self, slot: int, hp: int) -> None:
+        """
+        Set the unit's internal HP, keeping what players know: within its display the HP
+        belief must allow it, and a new display makes every HP behind it equally likely.
+        For a unit whose owner hides HP, the hidden-HP belief must allow its display.
+        """
+
+    def set_supplies(self, slot: int, fuel: int, ammo: int) -> None:
+        """Set the unit's fuel and ammo."""
 
     def hides_hp(self, player: int) -> bool:
         """Whether the player's units show no HP to the other player (Sonja)."""

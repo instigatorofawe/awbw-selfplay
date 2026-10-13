@@ -307,6 +307,9 @@ NB_MODULE(_core, m) {
 
   nb::class_<awbw::GameState>(m, "GameState", "A game position: a fixed-size plain value.")
       .def("copy", [](const awbw::GameState& s) { return s; })
+      .def(
+          "assign", [](awbw::GameState& s, const awbw::GameState& other) { s = other; }, "other"_a,
+          "Make this state equal to `other`, in place.")
       .def("to_bytes",
            [](const awbw::GameState& s) {
              return nb::bytes(reinterpret_cast<const char*>(&s), sizeof s);
@@ -375,6 +378,35 @@ NB_MODULE(_core, m) {
             awbw::belief_unknown(s, slot);
           },
           "slot"_a, "Make every internal HP the unit's display allows equally likely.")
+      .def(
+          "set_hp",
+          [](awbw::GameState& s, int slot, int hp) {
+            check_slot(s, slot);
+            if (hp < 1 || hp > 100) throw nb::value_error("HP runs 1..100");
+            awbw::Unit& u = s.units[slot];
+            const bool same_display = awbw::displayed_hp(hp) == awbw::displayed_hp(u.hp);
+            if (same_display && s.hp_belief[slot][hp - awbw::hp_bin_base(hp)] == 0)
+              throw nb::value_error("the HP belief rules out that HP");
+            if (awbw::hides_hp(s, u.owner) && s.hp_hidden[slot][awbw::displayed_hp(hp) - 1] == 0)
+              throw nb::value_error("the hidden-HP belief rules out that display");
+            u.hp = static_cast<uint8_t>(hp);
+            if (!same_display) awbw::belief_unknown(s, slot);
+          },
+          "slot"_a, "hp"_a,
+          "Set the unit's internal HP, keeping what players know: within its display the HP\n"
+          "belief must allow it, and a new display makes every HP behind it equally likely.\n"
+          "For a unit whose owner hides HP, the hidden-HP belief must allow its display.")
+      .def(
+          "set_supplies",
+          [](awbw::GameState& s, int slot, int fuel, int ammo) {
+            check_slot(s, slot);
+            const awbw::UnitSpec& t = awbw::kUnits[s.units[slot].type];
+            if (fuel < 0 || fuel > t.fuel) throw nb::value_error("fuel out of range");
+            if (ammo < 0 || ammo > t.ammo) throw nb::value_error("ammo out of range");
+            s.units[slot].fuel = static_cast<uint8_t>(fuel);
+            s.units[slot].ammo = static_cast<uint8_t>(ammo);
+          },
+          "slot"_a, "fuel"_a, "ammo"_a, "Set the unit's fuel and ammo.")
       .def(
           "hides_hp",
           [](const awbw::GameState& s, int player) {

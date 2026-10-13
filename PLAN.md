@@ -385,7 +385,24 @@ static_assert(std::is_trivially_copyable_v<GameState>);
     unit back, hidden and out of the other player's sight, with the HP its
     army value implies. On 1,342 validation games that reproduced the
     replay's encoding in all 45 positions with an unseen enemy unit. Ended
-    turns are cached in `cache/live/<game>/`.
+    turns are cached in `cache/live/<game>/`, with their actions.
+  - Each turn's response also has its `actions`, flattened from the replay
+    log as the viewer plays them: a move and what the unit did next are two
+    entries (a unit acting where it stands has no move), the end of a turn is
+    `NextTurn`, fields are renamed (`copValue` for `playersCOP`, ...), and
+    every per-viewer field holds one copy. `live.replay_actions` puts them
+    back in the replay format: on 6 finished games without Sonja (136
+    turns, every action kind replays log but Unhide), stepping the replays
+    with their converted viewer actions gave the same result as with their
+    own in every turn, and filled in two turns the replay files have no log
+    for.
+  - Whose view it is: a spectator of a game in progress gets "?" for Sonja's
+    HP everywhere, as her opponent does. A finished game's viewer shows its
+    turn starts in full (hidden units and Sonja's HP) and each turn's log as
+    the player whose turn it was saw it.
+  - The log of a game in progress leaves out supplies: an APC's Supply has no
+    entry, and only the fuel logged next shows the refill (2 games in
+    progress checked; finished games and recent replays log them).
 - **Global League rotation** (`awbw league`): `api/league/maps.php` with
   `{"method": "listMaps"}` (the read-only call the public GL maps page makes).
   - Per map: mode (std/fog/hf), unit limit, capture limit, enabled CO tiers
@@ -609,10 +626,40 @@ knows what a player who watched every turn knows:
     - The encoder shows a display the player to move doesn't know as HP
       plane 0, with `hp_p0`..`hp_p9` holding P(display = k + 1); the
       army value uses the expected display.
-  - The live tool can't yet step a game's history, so a live unit below
-    10 knows only its display (every internal HP behind it equally
-    likely), and Sonja's "?" units have a uniform display belief. With
-    Sonja to move, her own units show as full.
+  - **Live games** (`live.states`) get the same beliefs by stepping every
+    turn from the start as a spectator (`step_check.step_spectator_turn`),
+    from the viewer's log (§5):
+    - Internal HPs are unknown, so a fight is tried from every pair of
+      internal HPs the two units' beliefs allow (for a Sonja unit whose
+      display is unknown, every display her hidden belief allows), keeping
+      the outcomes the logged displays, power meters and funds agree with,
+      likeliest first. Beliefs only read what both players see, so any
+      such choice updates them the same. A "?" unit that is still around
+      later survived.
+    - Captures and the repairs at a turn's start show a Sonja unit's
+      display through capture points and funds, so they choose it too.
+    - The turn's end is checked by display (not fuel and ammo, which come
+      from the log since supplies go unlogged); the units put back for
+      hidden ones are left out of both.
+    - At the start every unit is at 10 × its map HP (predeployed units,
+      Sonja's too), which both players know.
+    - A turn the engine can't step leaves each unit whose HP its log may
+      have changed knowing only what the page shows; the others keep theirs.
+    - Validation (`tests/python/test_cached_live.py`): on the 3 finished
+      games without Sonja that the datasets keep, each turn's encoding
+      equals the dataset's (79 turns), and 3 more step every turn. In 2
+      finished Sonja games, 58 of 64 do; the rest come from a fight with a
+      Sonja unit whose display
+      her opponent didn't know, which moves the other unit's belief by her
+      true display in the replay (the watcher's view) and by the likeliest
+      in live. In progress: 35 of 35 turns stepped in one game, 19 of 20 in
+      a Sonja game (one fight the engine can't reproduce: the meters say her
+      Tank was at 9 when everything logged before leaves it at 10). Stepping
+      takes 0.2 s for 36 turns.
+    - On that Sonja game, P1's win chance at the current turn went from
+      96.8% with page-only HP (any display of hers equally likely) to 59.2%.
+    - With Sonja to move, her own units show the displays stepping chose;
+      `awbw live --no-beliefs` skips the history (page-only HP).
 
 - **21 `uint8` planes `[21, H, W]`** (21 KB per state at 32×32). `PLANES`
   gives each one's name, number of values and whether it is an index to

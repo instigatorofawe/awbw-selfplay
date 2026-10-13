@@ -10,12 +10,7 @@ A spectator is shown less than a replay records:
 
 * HP is the displayed 1-10, not the exact value. A unit showing d gets 10d - 4,
   about the average exact HP behind that display in replays, or 100 for a 10.
-  Below 10 its HP belief (what the critic reads) allows every internal HP
-  behind the display equally; a player who watched every fight would know
-  more, as the replay datasets do, but stepping a live game's history isn't
-  done yet. Sonja's units show "?" outside her team: they count as full, and
-  to her opponent any display is equally likely (her opponent's encoding shows
-  that; hers shows them as full).
+  Sonja's units show "?" outside her team: they count as full.
 * Hidden Subs and Stealths are left out unless the other player can see them,
   but each player's unit count and army value include them. Each one left out
   is put back, hidden, on a tile out of the other player's sight, with the HP
@@ -24,12 +19,29 @@ A spectator is shown less than a replay records:
   units are all on its board, though, so one of those put back is in the
   wrong place there.
 
+What the critic reads of HP is each unit's HP belief: what a player who
+watched every turn knows. ``states`` gets it by stepping the game's turns from
+the start, as the replay datasets do, with each turn's log from the replay
+viewer (``replay_actions`` puts it in the replay file's format). A spectator's
+log shows displayed HP and "?" for Sonja's, as her opponent sees them, so
+stepping chooses internal HPs (and her displays) that the beliefs allow and
+the log agrees with (``step_check.step_spectator_turn``). With Sonja to move,
+her own units show the displays it chose. ``state`` alone knows only the
+page: below 10 every internal HP behind a display is equally likely, and any
+display of Sonja's to her opponent.
+
+The viewer's log for a game in progress leaves out supplies (an APC's refill
+shows only in the fuel logged next), and a finished game's viewer shows its
+hidden units and Sonja's HP in the turn starts (and its log as the player
+whose turn it was saw it).
+
 Turns that have ended never change, so they are cached under
 ``cache/live/<game id>/``.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 from collections import Counter
@@ -38,9 +50,11 @@ from pathlib import Path
 from typing import Any
 
 from . import _core, engine, rules
-from .maps import MapInfo, fetch_map, load_map
+from .maps import MapInfo, PredeployedUnit, fetch_map, load_map
 from .net import Http, cache_dir, write_atomic
+from .replay.combat_check import _view
 from .replay.model import BuildingState, GameInfo, PlayerState, Replay, Turn, UnitState
+from .replay.step_check import Beliefs, step_spectator_turn
 
 AWBW = "https://awbw.amarriner.com"
 GAME_URL = AWBW + "/game.php?games_id={game_id}"
@@ -80,6 +94,7 @@ class LiveGame:
     day_limit: int  # 0 = off
     unit_limit: int  # 0 = off
     bans: tuple[str, ...]  # unit names
+    predeployed: list[PredeployedUnit] = field(default_factory=list)  # the map's units, once it is loaded
 
     def check_supported(self) -> None:
         if self.game.fog:
@@ -177,13 +192,20 @@ def _post_turn(game: LiveGame, index: int, http: Http, initial: bool = False) ->
     return data
 
 
+def _kept(data: dict[str, Any]) -> dict[str, Any]:
+    """What a turn's response is kept for: its day, start state and actions."""
+    gs = data["gameState"]
+    return {"day": data["day"], "gameState": {k: gs.get(k) for k in _KEEP}, "actions": data.get("actions") or []}
+
+
 def _load_turn(game: LiveGame, index: int, http: Http, last: int) -> dict[str, Any]:
-    """Turn ``index``'s start (day and gameState); ended turns come from the cache."""
+    """Turn ``index``'s start and actions; ended turns come from the cache."""
     path = _turn_path(game.game.id, index)
     if index < last and path.exists():
-        return json.loads(path.read_text())
-    data = _post_turn(game, index, http)
-    kept = {"day": data["day"], "gameState": {k: data["gameState"].get(k) for k in _KEEP}}
+        kept = json.loads(path.read_text())
+        if "actions" in kept:  # cached before actions were kept: fetch again
+            return kept
+    kept = _kept(_post_turn(game, index, http))
     if index < last:
         write_atomic(path, json.dumps(kept).encode())
     return kept
@@ -205,7 +227,154 @@ def fetch_turn_data(game: LiveGame, http: Http, *, history: bool = False) -> lis
         current = _post_turn(game, count - 1, http)
     last = count - 1
     out = [(i, _load_turn(game, i, http, last)) for i in range(last)] if history else []
-    out.append((last, {"day": current["day"], "gameState": {k: current["gameState"].get(k) for k in _KEEP}}))
+    out.append((last, _kept(current)))
+    return out
+
+
+# --- actions ---------------------------------------------------------------
+
+# Actions a unit can take after moving: the replay logs the move inside them.
+_AFTER_MOVE = ("Fire", "Capt", "Load", "Join", "Supply", "Repair", "Hide", "Unhide", "AttackSeam")
+
+
+def _views(value: Any) -> dict[str, Any]:
+    """A value as the replay logs one that differs by viewer: the spectator's is the global copy."""
+    return {"global": value}
+
+
+def _mover(kind: str, a: dict[str, Any]) -> int | None:
+    """The unit an after-move action is by, if the action says."""
+    if kind in ("Fire", "AttackSeam"):
+        return int(a["attacker"]["units_id"])
+    key = {"Load": "loadedId", "Join": "joinId", "Repair": "unitId", "Hide": "unitId", "Unhide": "unitId"}.get(kind)
+    return int(a[key]) if key and a.get(key) is not None else None
+
+
+def _after_move(kind: str, a: dict[str, Any], mover: int | None) -> dict[str, Any]:
+    """An after-move action's own part, as the replay logs it."""
+    rest = {k: v for k, v in a.items() if k != "action"}
+    if kind == "Fire":
+        info = {"attacker": rest.pop("attacker"), "defender": rest.pop("defender")}
+        return {"action": kind, "combatInfoVision": _views({"hasVision": True, "combatInfo": info})} | rest
+    if kind == "Capt":
+        if "newIncome" in rest:
+            rest["income"] = rest.pop("newIncome")
+        return {"action": kind} | rest
+    if kind == "Load":
+        return {"action": kind, "loaded": rest["loadedId"], "transport": rest["transportId"]}
+    if kind == "Join":
+        return {
+            "action": kind,
+            "newFunds": _views(rest["newFunds"]),
+            "playerId": rest.get("playerId"),
+            "unit": _views(rest["joinedUnit"]),
+            "joinID": rest["joinId"],
+        }
+    if kind == "Supply":
+        return {"action": kind, "unit": _views(mover), "rows": rest.get("suppliedIds") or []}
+    if kind == "Repair":
+        return {
+            "action": kind,
+            "unit": _views(rest["unitId"]),
+            "repaired": _views(rest["repairedUnit"]),
+            "funds": _views(rest["funds"]),
+        }
+    if kind in ("Hide", "Unhide"):
+        return {"action": kind, "unit": _views(rest["unitId"]), "vision": _views(rest.get("vision"))}
+    assert kind == "AttackSeam"
+    att = rest.pop("attacker")
+    out = {
+        "action": kind,
+        "unit": _views({"hasVision": True, "combatInfo": att}),
+        "buildings_hit_points": rest.pop("seamHp"),
+        "buildings_terrain_id": rest.pop("seamTerrainId", None),
+    }
+    return out | rest
+
+
+def _plain(kind: str, a: dict[str, Any]) -> dict[str, Any]:
+    """An action that is not part of a move, as the replay logs it."""
+    rest = {k: v for k, v in a.items() if k != "action"}
+    if kind == "Build":
+        return {"action": kind, "newUnit": _views(rest.get("newUnit"))} | {
+            k: v for k, v in rest.items() if k != "newUnit"
+        }
+    if kind == "Unload":
+        return {
+            "action": kind,
+            "unit": _views(rest["unloadedUnit"]),
+            "transportID": _views(rest["transportId"]),
+            "discovered": rest.get("discovered"),
+        }
+    if kind == "Delete":
+        return {"action": kind, "Delete": {"action": kind, "unitId": _views(rest["deletedId"])}}
+    if kind == "Power":
+        out: dict[str, Any] = {"action": kind}
+        for k, v in rest.items():
+            if k == "playerId":
+                out["playerID"] = v
+            elif k == "copValue":
+                out["playersCOP"] = v
+            elif k in ("unitReplace", "playerReplace", "unitAdd"):
+                out[k] = _views(v)
+            else:
+                out[k] = v
+        return out
+    if kind == "NextTurn":
+        info = {"event": "NextTurn"} | rest
+        for k in ("nextFunds", "repaired", "supplied"):
+            if k in info:
+                info[k] = _views(info[k])
+        return {"action": "End", "updatedInfo": info}
+    if kind == "Resign":
+        over = rest.pop("GameOver", None)
+        out = {"action": kind, "Resign": {"action": kind} | rest}
+        return out | ({"GameOver": over} if over is not None else {})
+    return dict(a)
+
+
+def replay_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A turn's actions from the replay API (a spectator's view, one entry per step)
+    in the replay file's format, as the turn stepper reads it.
+
+    The API lists a move and what the unit did after it as two entries, and a
+    unit acting where it stands without the move; the replay nests the move in
+    the action. Fields that the replay logs per viewer get the spectator's copy
+    as their global one, so ``_view`` reads them as it reads a replay's.
+    """
+    out: list[dict[str, Any]] = []
+    move: dict[str, Any] | None = None  # the last move, while the next entry may be its unit's action
+    unit: dict[str, Any] = {}  # the unit that made it
+    for a in actions:
+        kind = str(a.get("action"))
+        if move is not None and kind in _AFTER_MOVE:
+            mover = _mover(kind, a)
+            if mover is None and kind == "Capt":
+                b = a["buildingInfo"]
+                ends_there = (int(unit["units_x"]), int(unit["units_y"])) == (
+                    int(b["buildings_x"]),
+                    int(b["buildings_y"]),
+                )
+                mover = int(unit["units_id"]) if ends_there else None
+            if mover is None and kind == "Supply" and unit.get("units_name") == "APC":
+                mover = int(unit["units_id"])  # the API names no supplier: the APC that just moved
+            if mover == int(unit["units_id"]):
+                out.append({"action": kind, "Move": move, kind: _after_move(kind, a, mover)})
+                move = None
+                continue
+        if move is not None:
+            out.append(move)
+            move = None
+        if kind == "Move":
+            unit = a["unit"]
+            rest = {k: v for k, v in a.items() if k not in ("action", "unit", "path")}
+            move = {"action": "Move", "unit": _views(unit), "paths": _views(a.get("path") or [])} | rest
+        elif kind in _AFTER_MOVE:
+            out.append({"action": kind, "Move": [], kind: _after_move(kind, a, _mover(kind, a))})
+        else:
+            out.append(_plain(kind, a))
+    if move is not None:
+        out.append(move)
     return out
 
 
@@ -388,6 +557,7 @@ def live_turn(index: int, data: dict[str, Any], info: MapInfo) -> LiveTurn:
         players=players,
         buildings=buildings,
         units=units,
+        actions=replay_actions(data["actions"]) if "actions" in data else None,
         weather_start=_weather_owner(weather, players),
     )
     lt = LiveTurn(
@@ -402,10 +572,16 @@ def live_turn(index: int, data: dict[str, Any], info: MapInfo) -> LiveTurn:
     return lt
 
 
-def state(game: LiveGame, lt: LiveTurn) -> _core.GameState:
-    """The engine state at the start of a live turn."""
+def state(game: LiveGame, lt: LiveTurn, *, put_back: bool = True) -> _core.GameState:
+    """The engine state at the start of a live turn, knowing only what the page shows
+    (``states`` adds what watching the turns before tells). Without ``put_back``,
+    the hidden units the page left out stay out."""
     md = engine.map_data(game.game.map_id)
-    s = engine.state_from_turn(Replay(game.game, [lt.turn]), lt.turn, md, game.settings())
+    turn = lt.turn
+    if not put_back and lt.put_back:
+        left_out = {u.id for u in lt.put_back}
+        turn = dataclasses.replace(turn, units=[u for u in turn.units if u.id not in left_out])
+    s = engine.state_from_turn(Replay(game.game, [turn]), turn, md, game.settings())
     for slot in s.unit_slots():
         if s.unit(slot).id in lt.display_only:
             s.set_hp_unknown(slot)
@@ -416,11 +592,134 @@ def state(game: LiveGame, lt: LiveTurn) -> _core.GameState:
     return s
 
 
+# --- beliefs ---------------------------------------------------------------
+
+
+def _sure(k: int) -> list[int]:
+    """A belief sure of its k-th value."""
+    return [255 if i == k else 0 for i in range(_core.HP_BINS)]
+
+
+def _starting_beliefs(game: LiveGame, first: LiveTurn) -> dict[int, Beliefs]:
+    """The units on the board when the game starts are the map's, at 10 x the HP the
+    map gives them (Sonja's too, though the page hides it): everyone knows their HP."""
+    on_map = {(p.x, p.y): p.hp for p in game.predeployed}
+    out: dict[int, Beliefs] = {}
+    for u in first.turn.units:
+        shown = on_map.get((u.x, u.y)) if u.id in first.hidden_hp else _displayed(u.hp)
+        if shown:
+            out[u.id] = (10 * shown, _sure(_core.HP_BINS - 1), _sure(shown - 1))
+    return out
+
+
+def _beliefs_of(s: _core.GameState) -> dict[int, Beliefs]:
+    return {s.unit(i).id: (s.unit(i).hp, s.hp_belief(i), s.hidden_belief(i)) for i in s.unit_slots()}
+
+
+def _give_beliefs(s: _core.GameState, lt: LiveTurn, beliefs: dict[int, Beliefs]) -> None:
+    """Give the units of a turn's start the internal HP and beliefs ``beliefs`` has
+    for them (by AWBW id), where their shown HP agrees."""
+    left_out = {u.id for u in lt.put_back}
+    for slot in s.unit_slots():
+        u = s.unit(slot)
+        if u.id in left_out or u.id not in beliefs:
+            continue
+        hp, w, hidden = beliefs[u.id]
+        if u.id not in lt.hidden_hp and _displayed(hp) != _displayed(u.hp):
+            continue
+        hides = s.hides_hp(u.owner)
+        s.set_hp_unknown(slot)
+        if hides:
+            s.set_hidden_unknown(slot)
+        s.set_hp(slot, hp)
+        s.set_hp_belief(slot, w)
+        if hides:
+            s.set_hidden_belief(slot, hidden)
+
+
+def _hp_touched(actions: list[dict[str, Any]]) -> set[int] | None:
+    """AWBW ids of the units whose HP a turn's log may have changed, or None for any."""
+    ids: set[int] = set()
+    for a in actions:
+        kind = a.get("action")
+        if kind == "Fire":
+            info = _view(a["Fire"]["combatInfoVision"])["combatInfo"]
+            ids |= {int(info["attacker"]["units_id"]), int(info["defender"]["units_id"])}
+        elif kind == "Repair":
+            ids.add(int(_view(a["Repair"]["repaired"])["units_id"]))
+        elif kind == "Join":
+            ids |= {int(a["Join"]["joinID"]), int(_view(a["Join"]["unit"])["units_id"])}
+        elif kind == "Power":
+            if a.get("hpChange") or a.get("missileCoords"):
+                return None
+            rows = (_view(a.get("unitReplace")) or {}).get("units") or []
+            ids |= {int(r["units_id"]) for r in rows if "units_hit_points" in r}
+        elif kind == "End":
+            ids |= {int(r["units_id"]) for r in _view(a["updatedInfo"].get("repaired")) or []}
+    return ids
+
+
+@dataclass(slots=True)
+class History:
+    """How stepping a game's turns went (``states``)."""
+
+    stepped: int = 0  # turns stepped to the next turn's start
+    failed: Counter[str] = field(default_factory=Counter)  # turns the engine couldn't step, by why
+
+
+def states(game: LiveGame, turns: list[LiveTurn]) -> tuple[list[_core.GameState], History]:
+    """The engine state at the start of each of a game's turns (every turn from the
+    first, in order), with HP beliefs from stepping the turns before as a spectator
+    (``step_check.step_spectator_turn``): what a player who watched the whole game
+    knows of each unit's internal HP, and of Sonja's units' displays.
+
+    Hidden units the page left out are left out of the stepping too. A turn the
+    engine can't step leaves each unit whose HP its log may have changed knowing
+    only what the page shows; the others keep what they had.
+    """
+    md = engine.map_data(game.game.map_id)
+    replay = Replay(game.game, [lt.turn for lt in turns])
+    out: list[_core.GameState] = []
+    report = History()
+    known = _starting_beliefs(game, turns[0])
+    for k, lt in enumerate(turns):
+        s = state(game, lt)
+        _give_beliefs(s, lt, known)
+        out.append(s)
+        if k + 1 == len(turns):
+            break
+        start = s
+        if lt.put_back:
+            start = state(game, lt, put_back=False)
+            _give_beliefs(start, lt, known)
+        nxt = turns[k + 1]
+        end, why = step_spectator_turn(
+            replay,
+            md,
+            k,
+            start,
+            state(game, nxt),
+            hidden=frozenset(nxt.hidden_hp),
+            unchecked=frozenset(u.id for u in nxt.put_back),
+        )
+        if end is not None:
+            report.stepped += 1
+            known = end
+            continue
+        report.failed[why] += 1
+        touched = _hp_touched(lt.turn.actions or [])
+        before = _beliefs_of(start)
+        known = {} if touched is None else {uid: b for uid, b in before.items() if uid not in touched}
+    return out, report
+
+
 def fetch(game_id: int, http: Http, *, history: bool = False) -> tuple[LiveGame, list[LiveTurn]]:
-    """A public game's page and its current turn's start (or every turn's, with ``history``)."""
+    """A public game's page and its current turn's start (or every turn's, with
+    ``history``, which ``states`` needs for beliefs)."""
     game = fetch_game(game_id, http)
     game.check_supported()
     fetch_map(game.game.map_id, http)
     info = load_map(game.game.map_id)
     engine.register(info)
+    game.predeployed = list(info.predeployed)
     return game, [live_turn(i, data, info) for i, data in fetch_turn_data(game, http, history=history)]
