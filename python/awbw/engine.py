@@ -63,7 +63,7 @@ def state_from_turn(replay: Replay, turn: Turn, md: _core.MapData | None = None)
             | (_core.UNIT_HIDDEN if u.sub_dive in _HIDDEN else 0)
             | (_core.UNIT_CAPTURING if u.capturing else 0)
         )
-        cargo = (*u.cargo, 0, 0)[:2]
+        cargo = u.cargo
         rows.append(
             (u.id, unit_type[u.name], index[u.players_id], u.x, u.y, u.hp, u.fuel, u.ammo, flags, cargo[0], cargo[1])
         )

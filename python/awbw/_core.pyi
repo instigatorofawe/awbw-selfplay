@@ -35,6 +35,17 @@ UNIT_STUNNED: int = 8
 
 UNIT_CAPTURING: int = 16
 
+STAR_VALUE: int = 90000
+
+ACTIONS: dict = ...
+
+OK: int = 0
+
+TRAPPED: int = 1
+
+def status_name(status: int) -> str:
+    """What an apply() status code means."""
+
 class MapData:
     """A map's static data, shared by every game on it."""
 
@@ -135,7 +146,10 @@ class Unit:
     def carrier(self) -> int: ...
 
     @property
-    def cargo(self) -> list[int]: ...
+    def cargo(self) -> tuple[int, int]:
+        """
+        Slots of the units in cargo slots 1 and 2; -1 = empty (slots don't shift).
+        """
 
 class Player:
     @property
@@ -160,7 +174,13 @@ class Player:
     def power_on(self) -> int: ...
 
     @property
+    def power_uses(self) -> int: ...
+
+    @property
     def eliminated(self) -> int: ...
+
+    @property
+    def power_atk(self) -> int: ...
 
 class GameState:
     """A game position: a fixed-size plain value."""
@@ -187,6 +207,9 @@ class GameState:
     @property
     def winner(self) -> int: ...
 
+    def seed(self, seed: int) -> None:
+        """Reseed the state's RNG (combat luck)."""
+
     @property
     def players(self) -> list[Player]: ...
 
@@ -194,6 +217,14 @@ class GameState:
 
     def unit_slots(self) -> list[int]:
         """Slots holding a unit, in slot order."""
+
+    def find_unit(self, id: int) -> int:
+        """Slot of the unit with this id, or -1."""
+
+    def unit_rows(self) -> list[tuple[int, int, int, int, int, int, int, int, int, int, int]]:
+        """
+        (id, type, owner, x, y, hp, fuel, ammo, flags, cargo1_id, cargo2_id) for every unit, in slot order; cargo ids are 0 when empty.
+        """
 
     def unit_at(self, x: int, y: int) -> int:
         """Slot of the uncarried unit on a tile, or -1."""
@@ -323,3 +354,24 @@ def combat_outcomes(att: Combatant, defender: Combatant, dist: int) -> list[tupl
     """
     Exact (attacker_hp, defender_hp, probability) results of an attack, counterattack included.
     """
+
+def apply(state: GameState, kind: int, unit: int = -1, to: tuple[int, int] | None = None, target: tuple[int, int] | None = None, arg: int = 0, path: Sequence[tuple[int, int]] | None = None, att_hp: int = -1, def_hp: int = -1) -> int:
+    """
+    Carry out one action for the active player, in place. kind: ACTIONS[name]; unit: slot; to / target: (x, y); path: [(x, y), ...] from the unit's tile to `to` (default: the cheapest path its owner can see); att_hp / def_hp force a fight's result. Returns OK, TRAPPED or an error status (state unchanged); see status_name.
+    """
+
+def combatant(state: GameState, slot: int, at: tuple[int, int] | None = None) -> Combatant:
+    """
+    The unit as the damage formula sees it, standing on `at` (default: its tile).
+    """
+
+def fight_outcomes(state: GameState, slot: int, from_: tuple[int, int], target: tuple[int, int]) -> list[tuple[int, int, float]]:
+    """
+    (attacker_hp, defender_hp, probability) results of the unit attacking from `from_` the unit on `target`.
+    """
+
+def cop_cost(co: int, uses: int) -> int:
+    """COP cost after `uses` power uses."""
+
+def scop_cost(co: int, uses: int) -> int:
+    """SCOP cost after `uses` power uses."""

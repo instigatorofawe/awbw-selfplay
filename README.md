@@ -7,10 +7,11 @@ C++, bound to Python with nanobind. It is for:
 2. deep MCTS self-play.
 
 See [PLAN.md](PLAN.md) for the design and milestones. Current status: **M1,
-the C++ rules engine**. Replay ingestion (M0) is done. The combat core
-reproduces every attack logged in the cached replays. Every turn-start snapshot
-loads into the engine's `GameState`, and its movement rules accept every
-logged move they can check.
+the C++ rules engine**. Replay ingestion (M0) is done. The engine applies
+every action kind and runs the start of each turn; replaying the cached games
+turn by turn from their snapshots, it reproduces every checkable turn exactly
+but one (114,497 of 114,498, 2.01M actions). CO powers with immediate
+effects, and rain and snow, come next.
 
 ## Setup
 
@@ -50,6 +51,7 @@ uv run awbw fetch-map 176376  # map terrain from AWBW's public map API
 uv run awbw league --fetch-maps   # snapshot the Global League std rotation + settings
 uv run awbw check-combat      # every logged attack vs the engine's damage formula
 uv run awbw check-moves       # load every snapshot into the engine; check logged moves
+uv run awbw check-turns       # replay every turn with the engine; compare with the next snapshot
 ```
 
 Requests are rate-limited (`--rate`, default one per second). Please keep it

@@ -11,7 +11,6 @@ void init_state(const MapData& map, GameState& s) {
   s.next_id = 1;
   s.day = 1;
   s.winner = kNoOwner;
-  s.pending = kNoUnit;
   std::memset(s.unit_at, kNoUnit, sizeof s.unit_at);
   std::memset(s.prop_owner, kNoOwner, sizeof s.prop_owner);
   for (int p = 0; p < map.n_props; ++p) {
@@ -59,7 +58,6 @@ void remove_unit(GameState& s, int slot) {
   } else if (s.unit_at[u.tile] == slot) {
     s.unit_at[u.tile] = kNoUnit;
   }
-  if (s.pending == slot) s.pending = kNoUnit;
   std::memset(&u, 0, sizeof u);
   u.cargo[0] = u.cargo[1] = u.carrier = kNoUnit;
 }
@@ -82,24 +80,14 @@ void load_unit(GameState& s, int slot, int transport) {
   u.tile = t.tile;
   u.flags |= kCarried;
   u.carrier = static_cast<uint8_t>(transport);
-  for (uint8_t& c : t.cargo) {
-    if (c == kNoUnit) {
-      c = static_cast<uint8_t>(slot);
-      return;
-    }
-  }
+  t.cargo[t.cargo[0] == kNoUnit ? 0 : 1] = static_cast<uint8_t>(slot);
 }
 
 void unload_unit(GameState& s, int slot, int tile) {
   Unit& u = s.units[slot];
   Unit& t = s.units[u.carrier];
   for (uint8_t& c : t.cargo) {
-    if (c == slot) c = kNoUnit;
-  }
-  // Keep a lone cargo in the first slot, as AWBW does (cargo1 before cargo2).
-  if (t.cargo[0] == kNoUnit) {
-    t.cargo[0] = t.cargo[1];
-    t.cargo[1] = kNoUnit;
+    if (c == slot) c = kNoUnit;  // the other cargo keeps its slot, as in AWBW
   }
   u.flags &= static_cast<uint8_t>(~kCarried);
   u.carrier = kNoUnit;

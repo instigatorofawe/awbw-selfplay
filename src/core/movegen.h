@@ -22,14 +22,22 @@ struct Reach {
 int move_points(const GameState& s, const Unit& u);
 // Movement points the unit can spend now: 0 if it can't move this turn.
 int move_budget(const GameState& s, const Unit& u);
+// Whether `viewer` can see the unit in slot `slot`. Dived Subs and hidden
+// Stealths are invisible to the enemy, even without fog, unless next to one of
+// the enemy's units.
+bool visible_to(const MapData& m, const GameState& s, int slot, int viewer);
+
 // Cost of entering `tile` for the unit, 0 if it can't: terrain cost (1 under
-// Sturm and Lash's powers), and enemy units block.
+// Sturm and Lash's powers), and enemy units its owner can see block. Moves are
+// planned from the mover's view; an unseen hidden enemy on the way traps the
+// unit when the move is carried out (see apply).
 int step_cost(const MapData& m, const GameState& s, const Unit& u, int tile);
 
 void reachable(const MapData& m, const GameState& s, int slot, Reach& r);
 
 // Cost of moving along `path` (path[0] is the unit's tile), or -1 if the path
-// is not a legal move: tiles not adjacent, impassable, blocked, or over budget.
+// is not a legal move from the mover's view: tiles not adjacent, impassable,
+// blocked, or over budget.
 int path_cost(const MapData& m, const GameState& s, int slot, const uint16_t* path, int n);
 
 }  // namespace awbw

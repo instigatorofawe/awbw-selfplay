@@ -17,11 +17,23 @@ int move_budget(const GameState& s, const Unit& u) {
   return std::min<int>(move_points(s, u), u.fuel);
 }
 
+bool visible_to(const MapData& m, const GameState& s, int slot, int viewer) {
+  const Unit& u = s.units[slot];
+  if (u.owner == viewer || !u.has(kHidden)) return true;
+  for (int d = 0; d < kNumDirs; ++d) {
+    const int nb = m.neighbor[u.tile][d];
+    if (nb != kOffMap && s.unit_at[nb] != kNoUnit && s.units[s.unit_at[nb]].owner == viewer)
+      return true;
+  }
+  return false;
+}
+
 int step_cost(const MapData& m, const GameState& s, const Unit& u, int tile) {
   const int cost = move_cost(m, s, tile, kUnits[u.type].move_type);
   if (cost == 0) return 0;
   const int other = s.unit_at[tile];
-  if (other != kNoUnit && s.units[other].owner != u.owner) return 0;
+  if (other != kNoUnit && s.units[other].owner != u.owner && visible_to(m, s, other, u.owner))
+    return 0;
   const Player& p = s.players[u.owner];
   return kCos[p.co].state[p.power_on].move_cost_one ? 1 : cost;
 }

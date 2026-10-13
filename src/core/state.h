@@ -21,7 +21,7 @@ enum UnitFlag : uint8_t {
   kHidden = 2,      // dived Sub or hidden Stealth
   kCarried = 4,     // inside a transport
   kStunned = 8,     // can't act this turn (Von Bolt)
-  kCapturing = 16,  // capturing the property it stands on
+  kCapturing = 16,  // captured this turn (AWBW's flag; progress lives on the property)
 };
 
 struct Unit {
@@ -77,8 +77,7 @@ struct GameState {
   uint8_t active;   // player index to move
   uint8_t weather;  // index into the weather tables
   uint8_t winner;   // kNoOwner while the game runs; kDraw
-  uint8_t pending;  // transport that unloaded and may unload again, or kNoUnit
-  uint8_t _pad[2];
+  uint8_t _pad[3];
   Player players[kMaxPlayers];
   Unit units[kMaxUnits];
   uint8_t unit_at[kMaxTiles];  // slot of the uncarried unit on each tile, or kNoUnit
@@ -103,7 +102,8 @@ int add_unit(GameState& s, const Unit& u);
 void remove_unit(GameState& s, int slot);
 // Move an uncarried unit (and its cargo) to an empty tile, or to its own.
 void relocate_unit(GameState& s, int slot, int tile);
-// Put an uncarried unit into a transport with a free cargo slot.
+// Put an uncarried unit into a transport's first free cargo slot. Cargo
+// slots don't shift when a unit unloads, as in AWBW.
 void load_unit(GameState& s, int slot, int transport);
 // Take cargo out of its transport onto an empty tile.
 void unload_unit(GameState& s, int slot, int tile);

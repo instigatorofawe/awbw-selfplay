@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "core/actions.h"
 #include "core/combat.h"
 #include "core/movegen.h"
 #include "test_util.h"
@@ -117,6 +118,69 @@ void BM_CheckState(benchmark::State& st) {
   for (auto _ : st) benchmark::DoNotOptimize(check_state(b.map, b.state));
 }
 BENCHMARK(BM_CheckState);
+
+// Copy the board and move one unit to the far edge of its reach (the copy is
+// included: search applies actions to copies).
+void BM_ApplyMove(benchmark::State& st) {
+  const Board& b = board();
+  auto r = std::make_unique<Reach>();
+  std::vector<Action> moves;
+  for (int slot : b.slots) {
+    if (b.state.units[slot].owner != b.state.active) continue;
+    reachable(b.map, b.state, slot, *r);
+    for (int i = r->n - 1; i >= 0; --i) {
+      if (b.state.unit_at[r->tiles[i]] == kNoUnit) {
+        Action a;
+        a.kind = kActWait;
+        a.unit = static_cast<uint8_t>(slot);
+        a.to = r->tiles[i];
+        moves.push_back(a);
+        break;
+      }
+    }
+  }
+  auto s = std::make_unique<GameState>();
+  size_t i = 0;
+  for (auto _ : st) {
+    *s = b.state;
+    benchmark::DoNotOptimize(apply(b.map, *s, moves[i]));
+    i = (i + 1) % moves.size();
+  }
+}
+BENCHMARK(BM_ApplyMove);
+
+// Copy a small state and resolve a tank duel with luck drawn from the RNG.
+void BM_ApplyFire(benchmark::State& st) {
+  const MapData m = make_map({"......", "......"});
+  GameState base = make_state(m);
+  const int tank = put(base, m, kTank, 0, 0, 0);
+  put(base, m, kTank, 1, 2, 0);
+  Action a;
+  a.kind = kActFire;
+  a.unit = static_cast<uint8_t>(tank);
+  a.to = static_cast<uint16_t>(m.tile(1, 0));
+  a.target = static_cast<uint16_t>(m.tile(2, 0));
+  auto s = std::make_unique<GameState>();
+  for (auto _ : st) {
+    *s = base;
+    rng_next(base.rng);
+    benchmark::DoNotOptimize(apply(m, *s, a));
+  }
+}
+BENCHMARK(BM_ApplyFire);
+
+// Copy the board and end the turn: the next player's income, repairs and fuel.
+void BM_EndTurn(benchmark::State& st) {
+  const Board& b = board();
+  Action end;
+  end.kind = kActEndTurn;
+  auto s = std::make_unique<GameState>();
+  for (auto _ : st) {
+    *s = b.state;
+    benchmark::DoNotOptimize(apply(b.map, *s, end));
+  }
+}
+BENCHMARK(BM_EndTurn);
 
 }  // namespace
 }  // namespace awbw

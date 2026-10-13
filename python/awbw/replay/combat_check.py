@@ -86,6 +86,12 @@ def _view(obj: Any) -> Any:
     return merged
 
 
+def unit_id(payload: Any) -> int:
+    """A logged unit reference: an id, or (in some Unhide logs) the whole unit."""
+    v = _view(payload)
+    return int(v["units_id"]) if isinstance(v, dict) else int(v)
+
+
 def _fill(a: Any, b: Any) -> Any:
     if isinstance(a, dict) and isinstance(b, dict):
         return {k: _fill(a.get(k), b.get(k)) if k in b else a[k] for k in a} | {
@@ -238,7 +244,7 @@ class _TurnState:
                 if u is not None:
                     u.ammo = self.r.units[u.type].ammo
         elif kind in ("Hide", "Unhide"):
-            u = self.units.get(int(_view(action[kind]["unit"])))
+            u = self.units.get(unit_id(action[kind]["unit"]))
             if u is not None:
                 u.hidden = kind == "Hide"
         elif kind == "Delete":

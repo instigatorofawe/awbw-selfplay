@@ -19,8 +19,8 @@ inline constexpr int kBlueMoon = 2;
 //   . plain   M mountain  F wood   R river  = road  ^ bridge
 //   ~ sea     _ shoal     % reef   | pipe   S pipe seam  X missile silo
 //   # neutral city  $ neutral base  & neutral comtower
-//   Orange Star: C city  B base  A airport  P port  H HQ  T comtower
-//   Blue Moon:   c city  b base  a airport  p port  h HQ  t comtower
+//   Orange Star: C city  B base  A airport  P port  H HQ  T comtower  L lab
+//   Blue Moon:   c city  b base  a airport  p port  h HQ  t comtower  l lab
 inline int16_t terrain_for(char g) {
   switch (g) {
     case '.':
@@ -77,6 +77,10 @@ inline int16_t terrain_for(char g) {
       return 47;
     case 't':
       return 129;
+    case 'L':
+      return 146;
+    case 'l':
+      return 140;
     default:
       throw std::invalid_argument(std::string("unknown map glyph ") + g);
   }

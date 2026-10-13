@@ -60,9 +60,12 @@ TEST_F(StateTest, CargoFollowsTransport) {
   relocate_unit(s, lander, m.tile(3, 2));
   EXPECT_EQ(s.units[tank].tile, m.tile(3, 2));
   EXPECT_EQ(s.units[inf].tile, m.tile(3, 2));
-  unload_unit(s, tank, m.tile(3, 1));
-  EXPECT_EQ(s.units[lander].cargo[0], inf);  // remaining cargo moves to slot 1
-  EXPECT_EQ(s.units[lander].cargo[1], kNoUnit);
+  unload_unit(s, tank, m.tile(3, 1));            // leaves slot 1 empty
+  EXPECT_EQ(s.units[lander].cargo[0], kNoUnit);  // slots don't shift, as in AWBW
+  EXPECT_EQ(s.units[lander].cargo[1], inf);
+  const int mech = put(s, m, kMech, 0, 4, 1);
+  load_unit(s, mech, lander);  // into the free first slot
+  EXPECT_EQ(s.units[lander].cargo[0], mech);
   EXPECT_EQ(check_state(m, s), "");
   remove_unit(s, lander);  // cargo goes down with it
   EXPECT_FALSE(s.units[inf].alive());

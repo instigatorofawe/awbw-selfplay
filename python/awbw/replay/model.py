@@ -153,7 +153,7 @@ class UnitState:
     capturing: bool
     fired: bool
     carried: bool
-    cargo: tuple[int, ...]  # AWBW unit ids of loaded units
+    cargo: tuple[int, int]  # AWBW ids in cargo slots 1 and 2; 0 = empty (slots don't shift)
     sub_dive: str  # "N", or the dived/hidden marker for subs and stealths
     movement_points: int
     vision: int
@@ -167,7 +167,7 @@ class UnitState:
 
     @classmethod
     def from_php(cls, f: dict[str, Any]) -> UnitState:
-        cargo = tuple(c for c in (int(f.get("cargo1_units_id") or 0), int(f.get("cargo2_units_id") or 0)) if c)
+        cargo = (int(f.get("cargo1_units_id") or 0), int(f.get("cargo2_units_id") or 0))
         return cls(
             id=int(f["id"]),
             players_id=int(f["players_id"]),

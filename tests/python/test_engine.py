@@ -89,3 +89,64 @@ def test_movement(md):
     assert _core.move_points(s, 1) == 6
     with pytest.raises(IndexError):
         _core.reachable(s, 5)
+
+
+A = _core.ACTIONS
+
+
+def test_apply_capture_then_end_turn(md):
+    s = snapshot(
+        md, [(60, U["Infantry"], 0, 1, 1, 100, 99, 0, 0, 0, 0), (70, U["Infantry"], 1, 4, 1, 100, 99, 0, 0, 0, 0)]
+    )
+    inf = s.find_unit(60)
+    assert _core.apply(s, A["Capture"], inf, to=(3, 0)) == _core.OK
+    city = next(i for i, p in enumerate(md.props()) if p[:2] == (3, 0))
+    assert s.prop_points(city) == 10
+    assert s.unit(inf).fuel == 96
+    before = s.to_bytes()
+    status = _core.apply(s, A["Wait"], inf, to=(2, 0))
+    assert _core.status_name(status) == "cannot act"
+    assert s.to_bytes() == before  # errors change nothing
+    funds = s.players[1].funds
+    assert _core.apply(s, A["EndTurn"]) == _core.OK
+    assert s.active == 1 and s.day == 4
+    assert s.players[1].funds == funds + 1000  # Blue Moon's HQ pays
+    assert not s.unit(inf).flags & _core.UNIT_MOVED
+
+
+def test_apply_fire_with_a_forced_result(md):
+    s = snapshot(md, [(60, U["Tank"], 0, 1, 1, 100, 70, 9, 0, 0, 0), (70, U["Tank"], 1, 2, 0, 100, 70, 9, 0, 0, 0)])
+    tank = s.find_unit(60)
+    outs = _core.fight_outcomes(s, tank, (1, 0), (2, 0))
+    assert outs and abs(sum(p for _, _, p in outs) - 1) < 1e-9
+    att_hp, def_hp, _ = outs[0]
+    assert _core.apply(s, A["Fire"], tank, to=(1, 0), target=(2, 0), att_hp=att_hp, def_hp=def_hp) == _core.OK
+    rows = {r[0]: r for r in s.unit_rows()}
+    assert (rows[60][5], rows[70][5]) == (att_hp, def_hp)
+    assert rows[60][7] == 8 and rows[60][3:5] == (1, 0)
+    assert _core.apply(s, A["Fire"], s.find_unit(60), target=(2, 0)) != _core.OK  # already acted
+
+
+def test_apply_build_and_explicit_path(md):
+    s = snapshot(md, [(60, U["Recon"], 0, 1, 1, 100, 80, 0, 0, 0, 0)])
+    recon = s.find_unit(60)
+    assert _core.apply(s, A["Wait"], recon, to=(2, 0), path=[(1, 1), (1, 0), (2, 0)]) == _core.OK
+    assert s.unit(recon).fuel == 80 - 4  # tires pay 2 on plains
+    with pytest.raises(ValueError):
+        _core.apply(s, 99)
+    assert _core.status_name(_core.apply(s, A["Build"], target=(0, 0), arg=U["Infantry"])) == "cannot build"  # HQ
+
+
+def test_cargo_slots(md):
+    s = snapshot(
+        md,
+        [
+            (50, U["Lander"], 0, 1, 2, 100, 99, 0, 0, 0, 51),
+            (51, U["Infantry"], 0, 1, 2, 100, 99, 0, 0, 0, 0),
+        ],
+    )
+    lander = s.find_unit(50)
+    assert s.unit(lander).cargo == (-1, s.find_unit(51))  # AWBW's slot 2, kept
+    assert _core.apply(s, A["Unload"], lander, target=(1, 1), arg=1) == _core.OK
+    assert s.unit(lander).cargo == (-1, -1)
+    assert not s.unit(lander).flags & _core.UNIT_MOVED  # unloading in place keeps its action

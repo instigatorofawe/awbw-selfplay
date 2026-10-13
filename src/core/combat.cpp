@@ -34,11 +34,6 @@ void luck_distribution(const Combatant& c, Luck& luck) {
   }
 }
 
-// Only direct units counterattack, and only against adjacent attackers.
-bool can_counter(const Combatant& def, const Combatant& att, int dist) {
-  return kUnits[def.type].max_range == 1 && can_attack(def, att, dist);
-}
-
 bool can_find(int att_type, const Combatant& def) {
   if (!def.hidden) return true;
   if (def.type == kStealth) return att_type == kFighter || att_type == kStealth;
@@ -46,10 +41,20 @@ bool can_find(int att_type, const Combatant& def) {
   return true;
 }
 
-// Sonja's Counter Break: a unit that could counter strikes first instead.
-bool defender_strikes_first(const Combatant& def) { return def.co == 18 && def.power == 2; }
+int roll_luck(const Combatant& c, uint64_t (&rng)[2]) {
+  const CoStateSpec& s = co_state(c);
+  return rng_below(rng, s.luck_good + 1) - rng_below(rng, s.luck_bad + 1);
+}
 
 }  // namespace
+
+// Only direct units counterattack, and only against adjacent attackers.
+bool can_counter(const Combatant& def, const Combatant& att, int dist) {
+  return kUnits[def.type].max_range == 1 && can_attack(def, att, dist);
+}
+
+// Sonja's Counter Break: a unit that could counter strikes first instead.
+bool strikes_first(const Combatant& def) { return def.co == 18 && def.power == 2; }
 
 Weapon choose_weapon(const Combatant& att, int def_type) {
   if (kPrimaryDamage[att.type][def_type] != kNoDamage && att.ammo > 0) return kPrimaryWeapon;
@@ -101,11 +106,13 @@ int damage(const Combatant& att, const Combatant& def, int luck, bool counter) {
   // AWBW rounds raw up to a multiple of 0.05 and then down to an integer.
   // Replays also show an exact x.95 rounding up (floating point in AWBW), so
   // the result is floor(raw + 0.05). In integers raw = n / 100000.
-  const int64_t offense = int64_t{base} * attack_value(att, def) + 100 * int64_t{luck};
+  // A counterattack bonus (Sonja, Kanbei's SCOP) adds to the attack value; it
+  // doesn't scale luck (checked against internal HPs in replays).
+  const int atk = attack_value(att, def) + (counter ? co_state(att).counter - 100 : 0);
+  const int64_t offense = int64_t{base} * atk + 100 * int64_t{luck};
   const int64_t defense = 200 - defense_value(def, att) - defense_stars(def) * displayed_hp(def.hp);
   if (offense <= 0 || defense <= 0) return 0;
-  int64_t n = offense * displayed_hp(att.hp) * defense;
-  if (counter) n = n * co_state(att).counter / 100;
+  const int64_t n = offense * displayed_hp(att.hp) * defense;
   return static_cast<int>(std::min<int64_t>((n + 5000) / 100000, 255));
 }
 
@@ -113,7 +120,7 @@ bool combat_outcomes(const Combatant& att, const Combatant& def, int dist,
                      std::vector<Outcome>& out) {
   out.clear();
   if (!can_attack(att, def, dist)) return false;
-  const bool first_is_def = defender_strikes_first(def) && can_counter(def, att, dist);
+  const bool first_is_def = strikes_first(def) && can_counter(def, att, dist);
   const Combatant& a = first_is_def ? def : att;  // strikes first
   const Combatant& b = first_is_def ? att : def;  // strikes back, if able and alive
 
@@ -160,6 +167,39 @@ bool combat_outcomes(const Combatant& att, const Combatant& def, int dist,
     }
   }
   return true;
+}
+
+bool sample_fight(const Combatant& att, const Combatant& def, int dist, uint64_t (&rng)[2],
+                  Outcome& out) {
+  if (!can_attack(att, def, dist)) return false;
+  const bool first_is_def = strikes_first(def) && can_counter(def, att, dist);
+  const Combatant& a = first_is_def ? def : att;
+  Combatant b = first_is_def ? att : def;
+  const bool b_counters = first_is_def || can_counter(b, a, dist);
+  const int b_hp = std::max(0, b.hp - damage(a, b, roll_luck(a, rng), false));
+  int a_hp = a.hp;
+  if (b_hp > 0 && b_counters) {
+    b.hp = static_cast<uint8_t>(b_hp);
+    a_hp = std::max(0, a.hp - damage(b, a, roll_luck(b, rng), !first_is_def));
+  }
+  out = first_is_def ? Outcome{static_cast<uint8_t>(b_hp), static_cast<uint8_t>(a_hp), 1.0}
+                     : Outcome{static_cast<uint8_t>(a_hp), static_cast<uint8_t>(b_hp), 1.0};
+  return true;
+}
+
+Combatant seam_target() {
+  Combatant c;
+  c.type = kNeotank;
+  return c;
+}
+
+int seam_damage(const Combatant& att) {
+  const Weapon w = choose_weapon(att, kNeotank);
+  if (w == kNoWeapon) return 0;
+  const int base = (w == kPrimaryWeapon ? kPrimaryDamage : kSecondaryDamage)[att.type][kNeotank];
+  // The damage formula with no luck and defense 100 at 0 stars: (200 - 100) / 100 = 1.
+  const int64_t n = int64_t{base} * attack_value(att, seam_target()) * displayed_hp(att.hp) * 100;
+  return n <= 0 ? 0 : static_cast<int>((n + 5000) / 100000);
 }
 
 }  // namespace awbw

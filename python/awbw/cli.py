@@ -26,6 +26,8 @@ from .replay.sources import (
     write_index,
 )
 from .replay.stats import summarize, v1_rejection
+from .replay.step_check import StepReport
+from .replay.step_check import check_file as check_turns
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -69,6 +71,12 @@ def main(argv: list[str] | None = None) -> int:
     mv.add_argument("--workers", type=int)
     mv.add_argument("--show", type=int, default=10, help="print this many failures (default 10)")
 
+    tc = sub.add_parser("check-turns", help="replay every turn with the engine and compare it with the next snapshot")
+    tc.add_argument("dir", nargs="?", type=Path)
+    tc.add_argument("--workers", type=int)
+    tc.add_argument("--show", type=int, default=3, help="examples per mismatch kind (default 3)")
+    tc.add_argument("--skips", action="store_true", help="also list why turns were skipped")
+
     args = p.parse_args(argv)
     http = Http(min_interval=args.rate)
     commands = {
@@ -80,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
         "stats": _stats,
         "check-combat": _check_combat,
         "check-moves": _check_moves,
+        "check-turns": _check_turns,
     }
     return commands[args.cmd](args, http)
 
@@ -243,6 +252,30 @@ def _check_moves(args, http: Http) -> int:
     for line in total.failures[: args.show]:
         print(f"  move {line}")
     return 0 if not total.failures and not total.snapshot_errors else 1
+
+
+def _check_turns(args, http: Http) -> int:
+    root = args.dir or cache_dir() / "replays"
+    paths = sorted(root.glob("*.zip"))
+    total = StepReport()
+    with ProcessPoolExecutor(args.workers) as pool:
+        for rep in pool.map(check_turns, paths, chunksize=4):
+            total.add(rep)
+    checked = total.turns - sum(total.skipped.values())
+    bad = sum(total.diverged.values())
+    print(f"{total.replays} replays, {total.turns} turns; replays skipped: {dict(total.replays_skipped)}")
+    print(f"{checked} turns checked: {total.ok} match ({total.actions_ok} actions), {bad} differ")
+    print(f"{sum(total.skipped.values())} turns skipped")
+    if args.skips:
+        for reason, n in total.skipped.most_common():
+            print(f"  {n:7d}  {reason}")
+    if bad:
+        print("differences:")
+    for kind, n in total.diverged.most_common():
+        print(f"  {n:7d}  {kind}")
+        for line in total.examples.get(kind, [])[: args.show]:
+            print(f"             {line}")
+    return 0 if not bad else 1
 
 
 if __name__ == "__main__":

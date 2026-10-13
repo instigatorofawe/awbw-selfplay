@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "core/rng.h"
 #include "core/tables.h"
 
 namespace awbw {
@@ -41,6 +42,11 @@ bool can_attack(const Combatant& att, const Combatant& def, int dist);
 // Max attack range after CO modifiers (never below the minimum range).
 int max_range(const Combatant& c);
 
+// Whether `def` strikes back at `att` (direct units only, at distance 1).
+bool can_counter(const Combatant& def, const Combatant& att, int dist);
+// Whether `def` strikes before its attacker when it can counter (Sonja's SCOP).
+bool strikes_first(const Combatant& def);
+
 // Attack % (100 = no modifiers) of `att` hitting `def`.
 int attack_value(const Combatant& att, const Combatant& def);
 // Defense % (100 = no modifiers) of `def` when hit by `att`.
@@ -63,5 +69,16 @@ struct Outcome {
 // are merged. `out` is cleared first. Returns false if `att` cannot attack.
 bool combat_outcomes(const Combatant& att, const Combatant& def, int dist,
                      std::vector<Outcome>& out);
+
+// One fight with luck drawn from `rng`: a single draw from combat_outcomes'
+// distribution (`prob` is left at 1). Returns false if `att` cannot attack.
+bool sample_fight(const Combatant& att, const Combatant& def, int dist, uint64_t (&rng)[2],
+                  Outcome& out);
+
+// Pipe seams are hit as an undefended full-HP Neotank on 0-star terrain, with
+// no luck (checked against every logged seam attack).
+Combatant seam_target();
+// Damage `att` deals to a pipe seam, in seam HP (99 = intact).
+int seam_damage(const Combatant& att);
 
 }  // namespace awbw

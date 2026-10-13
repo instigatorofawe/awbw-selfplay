@@ -14,6 +14,7 @@ nanobind, for:
 | Players | 2 (no team or tag games) |
 | Settings | Standard only: 1000 funds per property (no high income), no starting funds, powers on; any capture limit |
 | Fog | Off (games with fog are filtered out of datasets) |
+| Hidden units | Dived Subs and hidden Stealths stay hidden from the opponent even without fog (AWBW's rule), so the game has hidden information. A move that runs into an unseen one stops short ("trapped") |
 | Weather | Clear only to start; random weather comes later |
 | Search | Gumbel AlphaZero-style MCTS, exact simulator, explicit chance nodes |
 | First model | Critic trained on positions parsed from human replays |
@@ -28,14 +29,14 @@ awbw-selfplay/
   tools/gen_tables.py         # rules JSON -> src/core/tables.h (pre-commit checks it is current)
   src/core/                   # C++20, no Python dependency
     tables.h                  # generated constexpr tables
-    map  state  snapshot  movegen  combat   # done (.h/.cpp each)
-    apply  turn  cos  hash  encode          # to come
+    map  state  snapshot  movegen  combat  actions   # done (.h/.cpp each); rng.h
+    cos  hash  encode                               # to come
     search/                   # batched Gumbel MCTS
   src/bindings/module.cpp     # thin nanobind layer
   python/awbw/
     rules/    maps.py
     engine.py                 # replay snapshot -> GameState glue
-    replay/   sources.py  parse.py  combat_check.py  move_check.py  validate.py  extract.py
+    replay/   sources.py  parse.py  combat_check.py  move_check.py  step_check.py  extract.py
     data/     shards.py  loader.py
     nn/       model.py  train_critic.py  selfplay.py
     render.py  agents/
@@ -73,8 +74,8 @@ struct Unit {                 // 16 bytes
   uint8_t  type, owner;
   uint8_t  hp;                // internal 1..100; displayed = (hp + 9) / 10
   uint8_t  fuel, ammo;
-  uint8_t  flags;             // moved | hidden | carried | stunned | capturing
-  uint8_t  cargo[2];          // slots of loaded units
+  uint8_t  flags;             // moved | hidden | carried | stunned | captured this turn
+  uint8_t  cargo[2];          // slots of loaded units; AWBW's slots, which don't shift
   uint8_t  carrier;           // slot of the transport carrying it
   uint8_t  _pad;
 };
@@ -98,7 +99,6 @@ struct GameState {
   uint32_t next_id;           // id of the next unit built
   uint16_t day;
   uint8_t  active, weather, winner;
-  uint8_t  pending;           // transport that unloaded and may unload again
   Player   players[2];
   Unit     units[kMaxUnits];               // 128
   uint8_t  unit_at[kMaxTiles];             // occupancy grid; check_state() verifies it
@@ -139,15 +139,19 @@ static_assert(std::is_trivially_copyable_v<GameState>);
 | Factory selected | unit type | 25 |
 
 - **Action ID:** `channel * MAX_TILES + tile`, plus a few non-spatial IDs.
-- **No cancel/undo.** Several unloads before Wait are allowed by keeping
-  `pending` open.
+- **No cancel/undo.** A transport may unload where it stands at any time in
+  its turn (AWBW allows it even after the transport has acted), so a second
+  unload is just another action.
 - **Forced steps auto-advance.** A phase with exactly one legal action is
   applied immediately. It produces no search and no training sample.
 - **Full-action API.** `enumerate_full_actions()` returns complete
   `(unit, dest, cmd, target)` tuples, used by replay decomposition and
   heuristic bots.
-- **Paths:** without fog, the destination is enough. Fuel is charged at the
-  shortest-path cost.
+- **Paths:** the destination is enough: the engine takes the cheapest path the
+  mover's owner can see (`apply` also takes an explicit path; replays pass the
+  logged one, which costs more than the cheapest in 0.7% of moves). The path
+  only matters for fuel and for hidden enemies: a player may route around a
+  suspected Stealth. Choosing paths is left out of the action space for now.
 
 ## 4. Rules engine
 
@@ -169,14 +173,19 @@ static_assert(std::is_trivially_copyable_v<GameState>);
   bonus for the current power state, capped by fuel. Enemy units block;
   friendly units can be passed through. Sturm (always) and Lash (powers) pay 1
   per passable tile. A broken seam moves like pipe rubble.
+  - Moves are planned from the mover's view: enemies its owner can see block,
+    unseen hidden ones don't. Carrying out the move on the real board, the
+    unit stops on the last tile before an unseen enemy (`kTrapped`), pays
+    only for the tiles it crossed, and loses its action. A hidden unit is seen
+    by enemies next to it.
   - **Verified** (`awbw check-moves`, 2,000 replays): 55,022 snapshots load
     with no errors, and all 176,783 checkable logged moves pass. The path is
     legal, its cost equals the fuel spent, and the search finds no cheaper
     route. For each of the 50 (unit, CO, power) combinations with ≥ 300 moves,
     the longest logged move reaches the engine's movement points exactly.
-  - Until `apply` exists, moves are checked against the turn-start state up
-    to the first action that can change movement (Fire, Power, AttackSeam,
-    Supply, Repair).
+  - `check-moves` checks moves against the turn-start state up to the first
+    action that can change movement (Fire, Power, AttackSeam, Supply, Repair);
+    `check-turns` (below) checks every move with the full engine.
   - Turns in snow (Olaf's powers) or rain (Drake's SCOP) are skipped: 5,268
     moves. Those move costs are not tabulated yet, and the 253 snow-turn moves
     spend more fuel than clear-weather costs predict.
@@ -191,32 +200,74 @@ static_assert(std::is_trivially_copyable_v<GameState>);
   - ATK = 100 + CO + 10 per owned comtower (+10 on any power) + terrain bonus.
     DEF = 100 + CO (+10 on any power). Air units get no terrain stars.
   - Counterattacks only from direct units against adjacent attackers, using
-    post-damage HP. Sonja's and Kanbei's ×1.5 applies to the raw counter.
-    Sonja's Counter Break strike comes first and gets no ×1.5.
+    post-damage HP. Sonja's and Kanbei's "×1.5 counters" add 50 to the
+    counter's ATK; luck isn't scaled. (Scaling the whole raw damage passes
+    every displayed result too, but internal HPs in later snapshots rule it
+    out.) Sonja's Counter Break strike comes first and gets no bonus.
   - A hidden Stealth can only be hit by Fighters and Stealths, a dived Sub
     only by Subs and Cruisers; that also rules out counters against them.
   - Checked quirks: Koal's road bonus excludes bridges; Jake's plains bonus
     includes pipe rubble; Kindle's SCOP bonus counts her urban properties at
     the time of the attack (it persists into the opponent's turn).
+- **Actions** (`src/core/actions.h`): `Action` is 8 bytes `{kind, unit, to,
+  target, arg}`; `Status apply(map, state, action, Detail = {})` validates and
+  applies, leaving the state unchanged on an error. Kinds: Wait, Fire,
+  Capture, Load, Join, Unload, Supply, Repair, Hide, Unhide, AttackSeam,
+  Explode, Launch (unit actions: move to `to`, then act), Build, Power,
+  Delete, EndTurn, Resign. `Detail` carries an optional path and a forced
+  fight result.
 - **Chance API.** One interface serves search and replays alike:
-
-  ```cpp
-  // Exact distribution over results, merged by resulting (attacker_hp, defender_hp).
-  int  outcomes(const MapData&, const GameState&, Action, Outcome* out);
-  void apply(const MapData&, GameState&, Action, const Outcome* forced = nullptr);
-  ```
-
-  - Search uses `outcomes` for its chance nodes.
-  - Replays force the logged result. If the logged result isn't in
-    `outcomes`, that is a damage-formula bug.
-  - Random play samples with the in-state RNG.
-- **Turn start:**
-  - income
-  - repairs, in AWBW order, only if affordable, and only on the right
-    property type
-  - resupply
-  - daily fuel burn; crashing/sinking
-  - power reset
+  `combat_outcomes()` gives the exact distribution over (attacker HP,
+  defender HP); `apply` takes a forced result (`Detail::att_hp / def_hp`,
+  rejected if impossible) or rolls one from the in-state RNG.
+  - Search uses `combat_outcomes` for its chance nodes.
+  - Replays force the logged result.
+- **Rules found in replays** (all now enforced by `check-turns`):
+  - **Power meter** (35,408 fights with known HP): each side gains the full
+    cost of the displayed HP it loses plus half the cost of what it deals
+    (AWBW counts 10 meter per funds), nothing while its own power is on,
+    capped at the SCOP cost. A star is 90,000. Using a power subtracts its
+    cost; each use raises both costs by a fifth of the base, up to 10 uses
+    (3,975 power uses). A CO without a COP reports the SCOP cost for both.
+  - **Capture:** points = displayed HP × CO capture % (Sami's SCOP takes it at
+    once). Progress lives on the property and resets when the unit on it
+    leaves or dies. AWBW's unit `capture` flag only means "captured this
+    turn". Taking the HQ, or the last lab of a player without an HQ, wins.
+    The capture limit counts properties **except comtowers and labs**: all
+    30 capture-limit wins ended exactly when that count reached the limit,
+    and 335 captures across 142 games passed the limit counting them
+    without ending the game.
+  - **Join:** displayed HPs add up (the result is a whole HP), the excess
+    over 10 is refunded at a tenth of the unit cost per HP, fuel and ammo add
+    up to the max, and the joined unit keeps the stationary unit's id.
+  - **Transports:** unloading without moving keeps the transport's action
+    (players hop infantry through APCs this way); a transport may unload in
+    place even after acting (an APC supplies, then unloads); moving then
+    unloading ends its turn; cargo may land on the tile the transport just
+    left. Cargo slots never shift: a load takes the first empty slot.
+  - **Supply:** an APC also refills the cargo of the transports next to it,
+    as an action and at turn start.
+  - **Black Boat repair:** +1 HP priced per displayed HP gained, so topping up
+    9.6 to 10 is free (26 of 27 cases; one 9.5 stays put).
+  - **Pipe seams** (1,483 attacks): hit as an undefended full-HP Neotank on
+    0-star terrain with no luck: base × ATK/100 × HP/10. Broken at 0.
+  - **Hidden attackers:** a unit that can't see a hidden Stealth deals it
+    nothing back but still spends ammo on the counter.
+  - Builds logged with no unit didn't happen. Game-ending captures log the
+    remaining points without resetting them.
+- **Turn start** (for the player whose turn begins):
+  - their power ends; stunned units sit the turn out; AWBW's per-turn flags
+    reset (the previous player's moved flags clear at the end of their turn)
+  - daily fuel for air units, ships and hidden units (Eagle's air units burn
+    2 less); none on day 1
+  - income from cities, bases, airports, ports and HQs (not comtowers or
+    labs), plus Sasha's 100 per property
+  - repairs on own properties of the right type (cities, HQs and bases for
+    ground units, airports for air, ports for ships): +2 HP (+3 Rachel)
+    priced per displayed HP gained, in slot (creation) order, falling back to
+    +1 HP when only that is affordable; resupply there in any case
+  - APC resupply of neighbours and their cargo; air units and ships at 0 fuel
+    are destroyed
 - **COs:**
   - A `CoSpec` data struct covers the day-to-day modifiers.
   - A `switch` on CO id handles power effects (Sturm, Rachel, Von Bolt stun,
@@ -325,12 +376,23 @@ static_assert(std::is_trivially_copyable_v<GameState>);
      little about who was winning. Provisional; a later cutoff may suit better.
 5. **Convert** each snapshot to a `GameState` (C++ `from_snapshot`) and run
    invariant checks.
-6. **Validate** (once the engine runs): apply the logged actions with forced
-   outcomes and diff against the next snapshot (units, HP, fuel, ammo, funds,
-   ownership, capture points, power meter).
-   - Record either "verified" or the first point where engine and replay
-     diverge (CO, action type, day).
+6. **Validate** (`awbw check-turns`, `awbw.replay.step_check`): every turn
+   starts from its snapshot, the logged actions are applied with the engine,
+   and the result is compared after each action with what the log shows
+   (position, fuel, fight results, ammo, meters, capture points, funds) and
+   at the end with the next snapshot (every unit, both players, every
+   property).
+   - Fights are forced to the logged displayed result; when that leaves
+     several internal HPs, the checker searches them, guided by the next
+     snapshot, with conflict-directed backjumping (each unit's HP records the
+     fight choices it depends on).
    - The divergence report *is* the rules bug tracker.
+   - **Result on the cache (4,431 replays, 121,246 turns): 114,497 of
+     114,498 checked turns match exactly (2.01M actions).** 6,748 turns are
+     skipped: CO powers with immediate effects (Kindle COP, Andy, Sasha, Jess,
+     Rachel SCOP, Eagle SCOP, Von Bolt, Hawke, Drake, Sturm, Olaf), rain and
+     snow, and turns with no log. The one mismatch is the Black Boat repair
+     above.
 7. **Extract samples:**
    - **v0 (needs only `from_snapshot`, not the full engine):** turn-start
      states + game outcome. The critic can start training before the engine
@@ -463,7 +525,8 @@ while training:
 ## 10. Testing & benchmarks
 
 - **C++ (googletest, `tests/cpp/`):** maps, state bookkeeping, snapshots,
-  movement, damage; turn start and every CO power to come. CI runs them on
+  movement, damage, every action kind and the turn start (68 tests); every
+  CO power to come. CI runs them on
   Linux and macOS, in Release and under ASan/UBSan.
 - **Damage formula across all logged attacks:** every logged combat result
   must be in `outcomes()`. This checks the formula over the whole replay
@@ -481,6 +544,8 @@ while training:
   - random games/sec
   - clone (35 ns), `check_state` (0.6 µs), `reachable` (0.4 µs per unit)
   - `damage` (3.5 ns), `combat_outcomes` (0.7 µs for tank vs tank)
+  - copy + `apply`: a move (0.5 µs), a fight with rolled luck (0.2 µs), end
+    of turn on a 30×30 board with ~50 units (0.3 µs)
   - `encode_batch` (µs per state)
   - MCTS simulations/sec, with a dummy net and with the real net
 
@@ -489,7 +554,7 @@ while training:
 | # | Milestone | Exit criteria |
 |---|---|---|
 | M0 | Replay ingestion (Python): download + cache, parser, rules JSON | Thousands of replays parsed; settings/filter stats known |
-| M1 | C++ core + bindings: state, `from_snapshot`, movegen, all actions except CO powers, `outcomes`, turn start, `encode_batch` | Every logged attack in `outcomes()` (**done**); state, snapshots, movegen (**done**); apply, turn start, `encode_batch`; v0 dataset → **critic v0** |
+| M1 | C++ core + bindings: state, `from_snapshot`, movegen, all actions except CO powers, `outcomes`, turn start, `encode_batch` | Every logged attack in `outcomes()` (**done**); state, snapshots, movegen (**done**); apply and turn start, every checkable turn replayed exactly (**done**); `encode_batch`; v0 dataset → **critic v0** |
 | M2 | Exact match: full replay stepping, all COs/powers, edge cases | ≥ 99% of filtered replays fully verified; benchmarks in CI |
 | M3 | v1 datasets: all idle-phase states + action labels | **Critic v1** + policy prior (behavior cloning); baselines: random, greedy, critic-greedy 1-ply |
 | M4 | Batched Gumbel MCTS with chance nodes, `collect`/`submit` | Search + critic beats critic-greedy; sims/sec measured |

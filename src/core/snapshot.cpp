@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <vector>
 
+#include "core/actions.h"
+
 namespace awbw {
 
 namespace {
@@ -33,6 +35,10 @@ bool load_snapshot(const MapData& m, const Snapshot& snap, GameState& s, std::st
     p.scop_cost = sp.scop_cost;
     p.power_on = static_cast<uint8_t>(sp.power_on);
     p.eliminated = static_cast<uint8_t>(sp.eliminated);
+    // Snapshots don't count power uses; each use adds a fifth of the base cost.
+    const int base = kCos[sp.co].scop_stars * kStarValue;
+    p.power_uses = static_cast<uint8_t>(
+        base ? std::clamp(sp.scop_cost * 5 / base - 5, 0, kMaxCostedPowerUses) : 0);
   }
 
   for (int i = 0; i < snap.n_buildings; ++i) {
@@ -132,7 +138,7 @@ bool load_snapshot(const MapData& m, const Snapshot& snap, GameState& s, std::st
       }
       const int k = static_cast<int>(it - order.begin());
       Unit& t = s.units[slot];
-      t.cargo[t.cargo[0] == kNoUnit ? 0 : 1] = static_cast<uint8_t>(k);
+      t.cargo[c] = static_cast<uint8_t>(k);  // AWBW's slot: slots don't shift on unload
       s.units[k].carrier = static_cast<uint8_t>(slot);
       s.units[k].tile = t.tile;
     }
