@@ -1,0 +1,30 @@
+{
+  "_doc": "AWBW unit types. Stats match the awbwUnit fields in replay snapshots (checked over the cache). class is one of foot, vehicle, copter, plane, naval. range is [min, max] attack distance. hidden_fuel_per_day applies while dived (Sub) or hidden (Stealth). carry lists what a transport can load, as unit selectors (see rules/__init__.py).",
+  "units": [
+    {"id": 1, "name": "Infantry", "class": "foot", "cost": 1000, "move": 3, "move_type": "F", "vision": 2, "fuel": 99, "fuel_per_day": 0, "ammo": 0, "range": [1, 1], "capture": true},
+    {"id": 2, "name": "Mech", "class": "foot", "cost": 3000, "move": 2, "move_type": "B", "vision": 2, "fuel": 70, "fuel_per_day": 0, "ammo": 3, "range": [1, 1], "capture": true},
+    {"id": 3, "name": "Md.Tank", "class": "vehicle", "cost": 16000, "move": 5, "move_type": "T", "vision": 1, "fuel": 50, "fuel_per_day": 0, "ammo": 8, "range": [1, 1]},
+    {"id": 4, "name": "Tank", "class": "vehicle", "cost": 7000, "move": 6, "move_type": "T", "vision": 3, "fuel": 70, "fuel_per_day": 0, "ammo": 9, "range": [1, 1]},
+    {"id": 5, "name": "Recon", "class": "vehicle", "cost": 4000, "move": 8, "move_type": "W", "vision": 5, "fuel": 80, "fuel_per_day": 0, "ammo": 0, "range": [1, 1]},
+    {"id": 6, "name": "APC", "class": "vehicle", "cost": 5000, "move": 6, "move_type": "T", "vision": 1, "fuel": 70, "fuel_per_day": 0, "ammo": 0, "range": [1, 1], "carry": {"slots": 1, "units": ["foot"]}, "supplies": true},
+    {"id": 7, "name": "Artillery", "class": "vehicle", "cost": 6000, "move": 5, "move_type": "T", "vision": 1, "fuel": 50, "fuel_per_day": 0, "ammo": 9, "range": [2, 3]},
+    {"id": 8, "name": "Rocket", "class": "vehicle", "cost": 15000, "move": 5, "move_type": "W", "vision": 1, "fuel": 50, "fuel_per_day": 0, "ammo": 6, "range": [3, 5]},
+    {"id": 9, "name": "Anti-Air", "class": "vehicle", "cost": 8000, "move": 6, "move_type": "T", "vision": 2, "fuel": 60, "fuel_per_day": 0, "ammo": 9, "range": [1, 1]},
+    {"id": 10, "name": "Missile", "class": "vehicle", "cost": 12000, "move": 4, "move_type": "W", "vision": 5, "fuel": 50, "fuel_per_day": 0, "ammo": 6, "range": [3, 5]},
+    {"id": 11, "name": "Fighter", "class": "plane", "cost": 20000, "move": 9, "move_type": "A", "vision": 2, "fuel": 99, "fuel_per_day": 5, "ammo": 9, "range": [1, 1]},
+    {"id": 12, "name": "Bomber", "class": "plane", "cost": 22000, "move": 7, "move_type": "A", "vision": 2, "fuel": 99, "fuel_per_day": 5, "ammo": 9, "range": [1, 1]},
+    {"id": 13, "name": "B-Copter", "class": "copter", "cost": 9000, "move": 6, "move_type": "A", "vision": 3, "fuel": 99, "fuel_per_day": 2, "ammo": 6, "range": [1, 1]},
+    {"id": 14, "name": "T-Copter", "class": "copter", "cost": 5000, "move": 6, "move_type": "A", "vision": 2, "fuel": 99, "fuel_per_day": 2, "ammo": 0, "range": [1, 1], "carry": {"slots": 1, "units": ["foot"]}},
+    {"id": 15, "name": "Battleship", "class": "naval", "cost": 28000, "move": 5, "move_type": "S", "vision": 2, "fuel": 99, "fuel_per_day": 1, "ammo": 9, "range": [2, 6]},
+    {"id": 16, "name": "Cruiser", "class": "naval", "cost": 18000, "move": 6, "move_type": "S", "vision": 3, "fuel": 99, "fuel_per_day": 1, "ammo": 9, "range": [1, 1], "carry": {"slots": 2, "units": ["copter"]}},
+    {"id": 17, "name": "Lander", "class": "naval", "cost": 12000, "move": 6, "move_type": "L", "vision": 1, "fuel": 99, "fuel_per_day": 1, "ammo": 0, "range": [1, 1], "carry": {"slots": 2, "units": ["ground"]}},
+    {"id": 18, "name": "Sub", "class": "naval", "cost": 20000, "move": 5, "move_type": "S", "vision": 5, "fuel": 60, "fuel_per_day": 1, "hidden_fuel_per_day": 5, "ammo": 6, "range": [1, 1], "hides": true},
+    {"id": 28, "name": "Black Boat", "class": "naval", "cost": 7500, "move": 7, "move_type": "L", "vision": 1, "fuel": 60, "fuel_per_day": 1, "ammo": 0, "range": [1, 1], "carry": {"slots": 2, "units": ["foot"]}, "repairs": true},
+    {"id": 29, "name": "Carrier", "class": "naval", "cost": 30000, "move": 5, "move_type": "S", "vision": 4, "fuel": 99, "fuel_per_day": 1, "ammo": 9, "range": [3, 8], "carry": {"slots": 2, "units": ["air"]}},
+    {"id": 30, "name": "Stealth", "class": "plane", "cost": 24000, "move": 6, "move_type": "A", "vision": 4, "fuel": 60, "fuel_per_day": 5, "hidden_fuel_per_day": 8, "ammo": 6, "range": [1, 1], "hides": true},
+    {"id": 46, "name": "Neotank", "class": "vehicle", "cost": 22000, "move": 6, "move_type": "T", "vision": 1, "fuel": 99, "fuel_per_day": 0, "ammo": 9, "range": [1, 1]},
+    {"id": 960900, "name": "Piperunner", "class": "vehicle", "cost": 20000, "move": 9, "move_type": "P", "vision": 4, "fuel": 99, "fuel_per_day": 0, "ammo": 9, "range": [2, 5]},
+    {"id": 968731, "name": "Black Bomb", "class": "plane", "cost": 25000, "move": 9, "move_type": "A", "vision": 1, "fuel": 45, "fuel_per_day": 5, "ammo": 0, "range": [1, 1], "explodes": true},
+    {"id": 1141438, "name": "Mega Tank", "class": "vehicle", "cost": 28000, "move": 4, "move_type": "T", "vision": 1, "fuel": 50, "fuel_per_day": 0, "ammo": 3, "range": [1, 1]}
+  ]
+}

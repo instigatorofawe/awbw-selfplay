@@ -24,16 +24,17 @@ nanobind, for:
 awbw-selfplay/
   pyproject.toml              # scikit-build-core + nanobind
   CMakeLists.txt
-  data/rules/*.json           # single source of truth: units, terrain, damage chart, COs
+  python/awbw/rules/*.json    # single source of truth: units, terrain, damage chart, COs
+  tools/gen_tables.py         # rules JSON -> src/core/tables.h (pre-commit checks it is current)
   src/core/                   # C++20, no Python dependency
-    tables.h                  # generated constexpr from data/rules
+    tables.h                  # generated constexpr tables
     map.h  state.h  movegen.cpp  apply.cpp  combat.cpp  turn.cpp  cos.cpp
     hash.cpp  encode.cpp  snapshot.cpp
     search/                   # batched Gumbel MCTS
   src/bindings/module.cpp     # thin nanobind layer
   python/awbw/
-    rules.py  maps.py
-    replay/   download.py  parse.py  validate.py  extract.py
+    rules/    maps.py
+    replay/   download.py  parse.py  combat_check.py  validate.py  extract.py
     data/     shards.py  loader.py
     nn/       model.py  train_critic.py  selfplay.py
     render.py  agents/
@@ -131,18 +132,40 @@ static_assert(std::is_trivially_copyable_v<GameState>);
 
 ## 4. Rules engine
 
-- **Tables:** generated from `data/rules/*.json`, which Python also reads.
-  The values come from AWBW's own pages and are verified against replays,
+- **Tables:** generated from `python/awbw/rules/*.json`, which Python also
+  reads (`awbw.rules.load()`), keyed on AWBW's unit, terrain, country and CO
+  ids. The values come from AWBW's own pages and are verified against replays,
   because AWBW differs from the cartridges in places.
+  - Units: stats equal the `awbwUnit` fields in snapshots. Terrain ids,
+    countries and move costs: from the MIT-licensed AWBW Replay Player's
+    tables. Damage: AWBW's `damage.php` chart, split into ammo / no-ammo
+    weapons by which targets consumed ammo in replays (e.g. Tank cannon vs
+    vehicles and ships, machine gun vs foot and copters; Cruiser missiles vs
+    ships, free anti-air gun vs air). The out-of-ammo machine-gun values are
+    AWDS numbers, still unverified.
+  - COs: modifiers from AWBW's `co.php`; star costs from snapshot
+    `co_max_power` / `co_max_spower`.
 - **Movement:** Dijkstra with a bucket queue (costs are small integers).
   Enemy units block; friendly units can be passed through. The fuel cap
   applies.
-- **Combat:** integer math, AWBW formula.
-  - Attacker uses displayed HP.
-  - Defender terrain stars × defender displayed HP.
-  - Air units get no terrain stars.
-  - CO attack/defense modifiers; luck (good and bad ranges, depending on CO).
-  - The counterattack uses post-damage HP.
+- **Combat** (`src/core/combat.cpp`; [wiki formula](https://awbw.fandom.com/wiki/Damage_Formula)),
+  in exact integer math. **Verified: all 126,149 attacks logged in 1,515
+  cached replays are in `combat_outcomes()`** (`awbw check-combat`).
+  - raw = (B·ATK/100 + luck − bad luck) · HP_att/10 · (200 − (DEF + stars·HP_def))/100,
+    with displayed HPs.
+  - Damage = floor(raw + 0.05). The wiki says "round up to a multiple of 0.05,
+    then down", but replays show an exact x.95 also rounding up (floating
+    point in AWBW); three logged attacks need this.
+  - ATK = 100 + CO + 10 per owned comtower (+10 on any power) + terrain bonus.
+    DEF = 100 + CO (+10 on any power). Air units get no terrain stars.
+  - Counterattacks only from direct units against adjacent attackers, using
+    post-damage HP. Sonja's and Kanbei's ×1.5 applies to the raw counter.
+    Sonja's Counter Break strike comes first and gets no ×1.5.
+  - A hidden Stealth can only be hit by Fighters and Stealths, a dived Sub
+    only by Subs and Cruisers; that also rules out counters against them.
+  - Checked quirks: Koal's road bonus excludes bridges; Jake's plains bonus
+    includes pipe rubble; Kindle's SCOP bonus counts her urban properties at
+    the time of the attack (it persists into the opponent's turn).
 - **Chance API.** One interface serves search and replays alike:
 
   ```cpp
@@ -422,7 +445,7 @@ while training:
 | # | Milestone | Exit criteria |
 |---|---|---|
 | M0 | Replay ingestion (Python): download + cache, parser, rules JSON | Thousands of replays parsed; settings/filter stats known |
-| M1 | C++ core + bindings: state, `from_snapshot`, movegen, all actions except CO powers, `outcomes`, turn start, `encode_batch` | Every logged attack in `outcomes()`; v0 dataset → **critic v0** |
+| M1 | C++ core + bindings: state, `from_snapshot`, movegen, all actions except CO powers, `outcomes`, turn start, `encode_batch` | Every logged attack in `outcomes()` (**done** for the combat core); v0 dataset → **critic v0** |
 | M2 | Exact match: full replay stepping, all COs/powers, edge cases | ≥ 99% of filtered replays fully verified; benchmarks in CI |
 | M3 | v1 datasets: all idle-phase states + action labels | **Critic v1** + policy prior (behavior cloning); baselines: random, greedy, critic-greedy 1-ply |
 | M4 | Batched Gumbel MCTS with chance nodes, `collect`/`submit` | Search + critic beats critic-greedy; sims/sec measured |

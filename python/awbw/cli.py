@@ -13,6 +13,7 @@ from .league import fetch_rotation, load_rotation
 from .maps import fetch_map
 from .net import Http, cache_dir
 from .replay import load_replay
+from .replay.combat_check import check_file
 from .replay.sources import (
     AwbwSession,
     ReplayUnavailable,
@@ -56,6 +57,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("dir", nargs="?", type=Path)
     s.add_argument("--workers", type=int)
 
+    c = sub.add_parser("check-combat", help="check every logged attack against the engine's damage formula")
+    c.add_argument("dir", nargs="?", type=Path)
+    c.add_argument("--workers", type=int)
+    c.add_argument("--show", type=int, default=10, help="print this many mismatches (default 10)")
+
     args = p.parse_args(argv)
     http = Http(min_interval=args.rate)
     commands = {
@@ -65,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         "league": _league,
         "inspect": _inspect,
         "stats": _stats,
+        "check-combat": _check_combat,
     }
     return commands[args.cmd](args, http)
 
@@ -187,6 +194,30 @@ def _stats(args, http: Http) -> int:
     rejections = Counter(v1_rejection(s) or "ACCEPTED" for s in summaries)
     show("v1 filter", rejections)
     return 0
+
+
+def _check_combat(args, http: Http) -> int:
+    root = args.dir or cache_dir() / "replays"
+    paths = sorted(root.glob("*.zip"))
+    with ProcessPoolExecutor(args.workers) as pool:
+        results = list(pool.map(check_file, paths, chunksize=8))
+    skipped = Counter(reason for _, reason in results if reason)
+    checks = [c for found, _ in results for c in found]
+    bad = [c for c in checks if c.ok is False]
+    print(f"{len(paths) - sum(skipped.values())} replays checked; skipped: {dict(skipped)}")
+    outcome = Counter("ok" if c.ok else "mismatch" if c.ok is False else f"skipped ({c.reason})" for c in checks)
+    print(f"{len(checks)} attacks: {dict(outcome)}")
+    if bad:
+        print("mismatches by (attacker CO, power) vs (defender CO, power):")
+        for key, n in Counter(((c.att_co, c.att_power), (c.def_co, c.def_power)) for c in bad).most_common(10):
+            print(f"  {n:6d}  {key}")
+        for c in bad[: args.show]:
+            print(
+                f"  game {c.game_id} day {c.day}: {c.attacker} (co {c.att_co}/{c.att_power}, hp {c.att_hp[:3]}) -> "
+                f"{c.defender} (co {c.def_co}/{c.def_power}, hp {c.def_hp[:3]}) at {c.dist}: "
+                f"logged {c.logged}, engine {c.predicted[:6]} {c.detail}"
+            )
+    return 0 if not bad else 1
 
 
 if __name__ == "__main__":

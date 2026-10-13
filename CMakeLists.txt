@@ -12,16 +12,20 @@ find_package(Python 3.12 REQUIRED COMPONENTS Interpreter Development.Module Deve
 find_package(nanobind CONFIG REQUIRED)
 
 # Engine core: plain C++20, no Python dependency.
-add_library(awbw_core INTERFACE)
-target_include_directories(awbw_core INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+add_library(awbw_core STATIC src/core/combat.cpp)
+target_include_directories(awbw_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+set_target_properties(awbw_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  target_compile_options(awbw_core PRIVATE -Wall -Wextra)
+endif()
 
 if(AWBW_NATIVE)
   include(CheckCXXCompilerFlag)
   check_cxx_compiler_flag(-march=native AWBW_HAS_MARCH_NATIVE)
   if(AWBW_HAS_MARCH_NATIVE)
-    target_compile_options(awbw_core INTERFACE -march=native)
+    target_compile_options(awbw_core PUBLIC -march=native)
   else()
-    target_compile_options(awbw_core INTERFACE -mcpu=native)
+    target_compile_options(awbw_core PUBLIC -mcpu=native)
   endif()
 endif()
 

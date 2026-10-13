@@ -1,0 +1,47 @@
+{
+  "_doc": "chart is AWBW's damage chart (awbw.amarriner.com/damage.php, fetched 2026-10-12): base damage % by attacker then defender. Where a unit has two weapons the chart shows the one it uses. primary_targets says which chart entries use the ammo weapon (default: every entry, for units with ammo; none for units without). Checked against ammo use in replays. secondary_fallback is machine-gun damage used when the ammo weapon is empty; these are AWDS values, not yet verified against AWBW replays.",
+  "chart": {
+    "Infantry": {"Infantry": 55, "Mech": 45, "Md.Tank": 1, "Tank": 5, "Recon": 12, "APC": 14, "Artillery": 15, "Rocket": 25, "Anti-Air": 5, "Missile": 25, "B-Copter": 7, "T-Copter": 30, "Neotank": 1, "Piperunner": 5, "Mega Tank": 1},
+    "Mech": {"Infantry": 65, "Mech": 55, "Md.Tank": 15, "Tank": 55, "Recon": 85, "APC": 75, "Artillery": 70, "Rocket": 85, "Anti-Air": 65, "Missile": 85, "B-Copter": 9, "T-Copter": 35, "Neotank": 15, "Piperunner": 55, "Mega Tank": 5},
+    "Md.Tank": {"Infantry": 105, "Mech": 95, "Md.Tank": 55, "Tank": 85, "Recon": 105, "APC": 105, "Artillery": 105, "Rocket": 105, "Anti-Air": 105, "Missile": 105, "B-Copter": 12, "T-Copter": 45, "Battleship": 10, "Cruiser": 45, "Lander": 35, "Sub": 10, "Black Boat": 35, "Carrier": 10, "Neotank": 45, "Piperunner": 85, "Mega Tank": 25},
+    "Tank": {"Infantry": 75, "Mech": 70, "Md.Tank": 15, "Tank": 55, "Recon": 85, "APC": 75, "Artillery": 70, "Rocket": 85, "Anti-Air": 65, "Missile": 85, "B-Copter": 10, "T-Copter": 40, "Battleship": 1, "Cruiser": 5, "Lander": 10, "Sub": 1, "Black Boat": 10, "Carrier": 1, "Neotank": 15, "Piperunner": 55, "Mega Tank": 10},
+    "Recon": {"Infantry": 70, "Mech": 65, "Md.Tank": 1, "Tank": 6, "Recon": 35, "APC": 45, "Artillery": 45, "Rocket": 55, "Anti-Air": 4, "Missile": 28, "B-Copter": 10, "T-Copter": 35, "Neotank": 1, "Piperunner": 6, "Mega Tank": 1},
+    "APC": {},
+    "Artillery": {"Infantry": 90, "Mech": 85, "Md.Tank": 45, "Tank": 70, "Recon": 80, "APC": 70, "Artillery": 75, "Rocket": 80, "Anti-Air": 75, "Missile": 80, "Battleship": 40, "Cruiser": 65, "Lander": 55, "Sub": 60, "Black Boat": 55, "Carrier": 45, "Neotank": 40, "Piperunner": 70, "Mega Tank": 15},
+    "Rocket": {"Infantry": 95, "Mech": 90, "Md.Tank": 55, "Tank": 80, "Recon": 90, "APC": 80, "Artillery": 80, "Rocket": 85, "Anti-Air": 85, "Missile": 90, "Battleship": 55, "Cruiser": 85, "Lander": 60, "Sub": 85, "Black Boat": 60, "Carrier": 60, "Neotank": 50, "Piperunner": 80, "Mega Tank": 25},
+    "Anti-Air": {"Infantry": 105, "Mech": 105, "Md.Tank": 10, "Tank": 25, "Recon": 60, "APC": 50, "Artillery": 50, "Rocket": 55, "Anti-Air": 45, "Missile": 55, "Fighter": 65, "Bomber": 75, "B-Copter": 120, "T-Copter": 120, "Stealth": 75, "Neotank": 5, "Piperunner": 25, "Black Bomb": 120, "Mega Tank": 1},
+    "Missile": {"Fighter": 100, "Bomber": 100, "B-Copter": 120, "T-Copter": 120, "Stealth": 100, "Black Bomb": 120},
+    "Fighter": {"Fighter": 55, "Bomber": 100, "B-Copter": 100, "T-Copter": 100, "Stealth": 85, "Black Bomb": 120},
+    "Bomber": {"Infantry": 110, "Mech": 110, "Md.Tank": 95, "Tank": 105, "Recon": 105, "APC": 105, "Artillery": 105, "Rocket": 105, "Anti-Air": 95, "Missile": 105, "Battleship": 75, "Cruiser": 85, "Lander": 95, "Sub": 95, "Black Boat": 95, "Carrier": 75, "Neotank": 90, "Piperunner": 105, "Mega Tank": 35},
+    "B-Copter": {"Infantry": 75, "Mech": 75, "Md.Tank": 25, "Tank": 55, "Recon": 55, "APC": 60, "Artillery": 65, "Rocket": 65, "Anti-Air": 25, "Missile": 65, "B-Copter": 65, "T-Copter": 95, "Battleship": 25, "Cruiser": 55, "Lander": 25, "Sub": 25, "Black Boat": 25, "Carrier": 25, "Neotank": 20, "Piperunner": 55, "Mega Tank": 10},
+    "T-Copter": {},
+    "Battleship": {"Infantry": 95, "Mech": 90, "Md.Tank": 55, "Tank": 80, "Recon": 90, "APC": 80, "Artillery": 80, "Rocket": 85, "Anti-Air": 85, "Missile": 90, "Battleship": 50, "Cruiser": 95, "Lander": 95, "Sub": 95, "Black Boat": 95, "Carrier": 60, "Neotank": 50, "Piperunner": 80, "Mega Tank": 25},
+    "Cruiser": {"Fighter": 55, "Bomber": 65, "B-Copter": 115, "T-Copter": 115, "Sub": 90, "Black Boat": 25, "Carrier": 5, "Stealth": 100, "Black Bomb": 120},
+    "Lander": {},
+    "Sub": {"Battleship": 55, "Cruiser": 25, "Lander": 95, "Sub": 55, "Black Boat": 95, "Carrier": 75},
+    "Black Boat": {},
+    "Carrier": {"Fighter": 100, "Bomber": 100, "B-Copter": 115, "T-Copter": 115, "Stealth": 100, "Black Bomb": 120},
+    "Stealth": {"Infantry": 90, "Mech": 90, "Md.Tank": 70, "Tank": 75, "Recon": 85, "APC": 85, "Artillery": 75, "Rocket": 85, "Anti-Air": 50, "Missile": 85, "Fighter": 45, "Bomber": 70, "B-Copter": 85, "T-Copter": 95, "Battleship": 45, "Cruiser": 35, "Lander": 65, "Sub": 55, "Black Boat": 65, "Carrier": 45, "Stealth": 55, "Neotank": 60, "Piperunner": 80, "Black Bomb": 120, "Mega Tank": 15},
+    "Neotank": {"Infantry": 125, "Mech": 115, "Md.Tank": 75, "Tank": 105, "Recon": 125, "APC": 125, "Artillery": 115, "Rocket": 125, "Anti-Air": 115, "Missile": 125, "B-Copter": 22, "T-Copter": 55, "Battleship": 15, "Cruiser": 50, "Lander": 40, "Sub": 15, "Black Boat": 40, "Carrier": 15, "Neotank": 55, "Piperunner": 105, "Mega Tank": 35},
+    "Piperunner": {"Infantry": 95, "Mech": 90, "Md.Tank": 55, "Tank": 80, "Recon": 90, "APC": 80, "Artillery": 80, "Rocket": 85, "Anti-Air": 85, "Missile": 90, "Fighter": 65, "Bomber": 75, "B-Copter": 105, "T-Copter": 105, "Battleship": 55, "Cruiser": 60, "Lander": 60, "Sub": 85, "Black Boat": 60, "Carrier": 60, "Stealth": 75, "Neotank": 50, "Piperunner": 80, "Black Bomb": 120, "Mega Tank": 25},
+    "Black Bomb": {},
+    "Mega Tank": {"Infantry": 135, "Mech": 125, "Md.Tank": 125, "Tank": 180, "Recon": 195, "APC": 195, "Artillery": 195, "Rocket": 195, "Anti-Air": 195, "Missile": 195, "B-Copter": 22, "T-Copter": 55, "Battleship": 45, "Cruiser": 65, "Lander": 75, "Sub": 45, "Black Boat": 105, "Carrier": 45, "Neotank": 115, "Piperunner": 180, "Mega Tank": 65}
+  },
+  "primary_targets": {
+    "Mech": ["vehicle"],
+    "Md.Tank": ["vehicle", "naval"],
+    "Tank": ["vehicle", "naval"],
+    "B-Copter": ["vehicle", "naval"],
+    "Cruiser": ["naval"],
+    "Neotank": ["vehicle", "naval"],
+    "Mega Tank": ["vehicle", "naval"]
+  },
+  "secondary_fallback": {
+    "Mech": {"Recon": 18, "Tank": 6, "Md.Tank": 1, "Neotank": 1, "Mega Tank": 1, "APC": 20, "Artillery": 32, "Rocket": 35, "Anti-Air": 6, "Missile": 35, "Piperunner": 6},
+    "Tank": {"Recon": 40, "Tank": 6, "Md.Tank": 1, "Neotank": 1, "Mega Tank": 1, "APC": 45, "Artillery": 45, "Rocket": 55, "Anti-Air": 5, "Missile": 30, "Piperunner": 6},
+    "Md.Tank": {"Recon": 45, "Tank": 8, "Md.Tank": 1, "Neotank": 1, "Mega Tank": 1, "APC": 45, "Artillery": 45, "Rocket": 55, "Anti-Air": 7, "Missile": 35, "Piperunner": 8},
+    "Neotank": {"Recon": 65, "Tank": 10, "Md.Tank": 1, "Neotank": 1, "Mega Tank": 1, "APC": 65, "Artillery": 65, "Rocket": 75, "Anti-Air": 17, "Missile": 55, "Piperunner": 17},
+    "Mega Tank": {"Recon": 65, "Tank": 10, "Md.Tank": 1, "Neotank": 1, "Mega Tank": 1, "APC": 65, "Artillery": 65, "Rocket": 75, "Anti-Air": 17, "Missile": 55, "Piperunner": 17},
+    "B-Copter": {"Recon": 30, "Tank": 6, "Md.Tank": 1, "Neotank": 1, "Mega Tank": 1, "APC": 20, "Artillery": 25, "Rocket": 35, "Anti-Air": 6, "Missile": 35, "Piperunner": 6}
+  }
+}

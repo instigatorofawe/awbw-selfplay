@@ -1,0 +1,25 @@
+{
+  "_doc": "From Countries.json in DeamonHunter/AWBW-Replay-Player (MIT License, Copyright (c) 2022 Justus Lind). AWBW country ids (awbwPlayer.countries_id) and codes (units countries_code).",
+  "countries": [
+    {"id": 1, "code": "os", "name": "Orange Star"},
+    {"id": 2, "code": "bm", "name": "Blue Moon"},
+    {"id": 3, "code": "ge", "name": "Green Earth"},
+    {"id": 4, "code": "yc", "name": "Yellow Comet"},
+    {"id": 5, "code": "bh", "name": "Black Hole"},
+    {"id": 6, "code": "rf", "name": "Red Fire"},
+    {"id": 7, "code": "gs", "name": "Grey Sky"},
+    {"id": 8, "code": "bd", "name": "Brown Desert"},
+    {"id": 9, "code": "ab", "name": "Amber Blossom"},
+    {"id": 10, "code": "js", "name": "Jade Sun"},
+    {"id": 16, "code": "ci", "name": "Cobalt Ice"},
+    {"id": 17, "code": "pc", "name": "Pink Cosmos"},
+    {"id": 19, "code": "tg", "name": "Teal Galaxy"},
+    {"id": 20, "code": "pl", "name": "Purple Lightning"},
+    {"id": 21, "code": "ar", "name": "Acid Rain"},
+    {"id": 22, "code": "wn", "name": "White Nova"},
+    {"id": 23, "code": "aa", "name": "Azure Asteroid"},
+    {"id": 24, "code": "ne", "name": "Noir Eclipse"},
+    {"id": 25, "code": "sc", "name": "Silver Claw"},
+    {"id": 26, "code": "uw", "name": "Umber Wilds"}
+  ]
+}

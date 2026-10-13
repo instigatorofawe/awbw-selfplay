@@ -8,6 +8,7 @@ import pytest
 
 from awbw.net import cache_dir
 from awbw.replay import load_replay
+from awbw.replay.combat_check import check_file
 
 PATHS = sorted((cache_dir() / "replays").glob("*.zip"))[:200]
 
@@ -44,3 +45,11 @@ def test_replay_invariants(path):
     # turn length has no End, and a timeout loss leaves the final turn unlogged.
     if len(order) == 2:
         assert all(turn.actions is not None for turn in r.turns[:-1])
+
+
+@pytest.mark.skipif(not PATHS, reason="no cached replays")
+@pytest.mark.parametrize("path", PATHS, ids=[p.stem for p in PATHS])
+def test_logged_attacks_match_engine(path):
+    checks, _ = check_file(path)
+    bad = [c for c in checks if c.ok is False]
+    assert not bad, bad[:3]

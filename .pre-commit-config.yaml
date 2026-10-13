@@ -32,6 +32,12 @@ repos:
   # the package's own stubs.
   - repo: local
     hooks:
+      - id: gen-tables
+        name: src/core/tables.h matches the rules JSON
+        entry: uv run --frozen python tools/gen_tables.py --check
+        language: system
+        files: ^(python/awbw/rules/|tools/gen_tables\.py$|src/core/tables\.h$)
+        pass_filenames: false
       - id: pyrefly
         name: pyrefly check
         entry: uv run --frozen pyrefly check
