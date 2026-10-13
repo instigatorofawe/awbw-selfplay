@@ -33,31 +33,18 @@ from .parse import ReplayFormatError, load_replay
 
 A = _core.ACTIONS
 _FLAGS = _core.UNIT_MOVED | _core.UNIT_HIDDEN | _core.UNIT_CAPTURING
-_SEARCH_BUDGET = 20000  # fight results tried per turn
+_SEARCH_BUDGET = 100_000  # fight results tried per turn
 
 # CO powers whose immediate effects the engine doesn't model yet, by AWBW CO
-# id: 1 = COP, 2 = SCOP. Powers that only change modifiers (and Colin's and
-# Sami's) are modelled.
-_UNMODELLED_POWERS: dict[int, tuple[int, ...]] = {
-    1: (1, 2),  # Andy: heal
-    5: (1, 2),  # Drake: damage, fuel, rain
-    9: (1, 2),  # Olaf: snow, damage
-    10: (2,),  # Eagle: refresh
-    12: (1, 2),  # Hawke: damage and heal
-    13: (1, 2),  # Sensei: spawn units
-    14: (1, 2),  # Jess: resupply
-    19: (1, 2),  # Sasha: meter drain; funds from damage dealt
-    23: (1,),  # Kindle: urban damage
-    28: (2,),  # Rachel: missiles
-    29: (1, 2),  # Sturm: meteor
-    30: (2,),  # Von Bolt: missile and stun
-}
+# id: 1 = COP, 2 = SCOP.
+_UNMODELLED_POWERS: dict[int, tuple[int, ...]] = {}
 
 
 # Powers whose effect lands at the start of the owner's next turn: skip the
 # opponent's turn while one is on.
-_UNMODELLED_CARRY_OVER = frozenset([(19, 2)])  # Sasha's War Bonds pay out then
+_UNMODELLED_CARRY_OVER: frozenset[tuple[int, int]] = frozenset()
 _POWER_LEVEL = {"N": 0, "Y": 1, "S": 2}
+_WEATHERS = {"C": "clear", "R": "rain", "S": "snow"}
 
 
 def _shown(hp: int) -> int:
@@ -83,6 +70,8 @@ class TurnCheck:
     category: str = ""
     detail: str = ""
     action: int = -1
+    # Missiles the engine aims where AWBW did, per power ("Rachel SCOP"): [matched, logged]
+    aims: dict[str, list[int]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -95,19 +84,28 @@ class StepReport:
     skipped: Counter = field(default_factory=Counter)  # turns, by reason
     diverged: Counter = field(default_factory=Counter)
     examples: dict[str, list[str]] = field(default_factory=dict)
+    aims: dict[str, list[int]] = field(default_factory=dict)  # see TurnCheck.aims
 
     def add_turn(self, t: TurnCheck, n_actions: int) -> None:
         self.turns += 1
         if t.ok:
             self.ok += 1
             self.actions_ok += n_actions
+            self._add_aims(t.aims)
         else:
             (self.skipped if t.ok is None else self.diverged)[t.category] += 1
             ex = self.examples.setdefault(t.category, [])
             if len(ex) < 5:
                 ex.append(f"{t.game_id} day {t.day} action {t.action}: {t.detail}")
 
+    def _add_aims(self, aims: dict[str, list[int]]) -> None:
+        for k, (hit, n) in aims.items():
+            tot = self.aims.setdefault(k, [0, 0])
+            tot[0] += hit
+            tot[1] += n
+
     def add(self, other: StepReport) -> None:
+        self._add_aims(other.aims)
         self.replays += other.replays
         self.replays_skipped.update(other.replays_skipped)
         self.turns += other.turns
@@ -176,6 +174,8 @@ class _TurnStepper:
         # Final HP of every unit in the next snapshot, to order fight candidates.
         self.final_hp = {u.id: u.hp for u in nxt.units} if nxt is not None else {}
         self.next_player = self.index[nxt.player_id] if nxt is not None else -1
+        # Missile aims by action index (the last search branch to pass a power overwrites).
+        self.aims: dict[int, tuple[str, int, int]] = {}
 
     # -- log -> steps ------------------------------------------------------
 
@@ -203,6 +203,23 @@ class _TurnStepper:
                     step.other = int(un["units_id"])
                     step.target = (int(un["units_x"]), int(un["units_y"]))
                     step.index = i + 1
+                    steps.append(step)
+                    i += 2
+                    continue
+            if (
+                name == "Move"
+                and i + 1 < len(acts)
+                and acts[i + 1].get("action") in ("Repair", "Supply")
+                and _move_part(acts[i + 1]) is None
+            ):
+                nxt = acts[i + 1]
+                if unit_id(nxt[nxt["action"]]["unit"]) == step.uid:
+                    # Logged as a move and then the action on its own: one engine action.
+                    step.name = str(nxt["action"])
+                    step.log = nxt
+                    step.index = i + 1
+                    if step.name == "Repair":
+                        step.other = int(_view(nxt["Repair"]["repaired"])["units_id"])
                     steps.append(step)
                     i += 2
                     continue
@@ -478,12 +495,7 @@ class _TurnStepper:
             slot = self._slot(state, alias, step.uid, i)
             self._apply(state, i, "Delete", unit=slot)
         elif name == "Power":
-            p = state.players[state.active]
-            level = 2 if a.get("coPower") == "S" else 1
-            if level in _UNMODELLED_POWERS.get(p.co, ()):
-                raise _Skip(f"power: {self.r.cos[p.co].name} {'SCOP' if level == 2 else 'COP'}")
-            self._apply(state, i, "Power", arg=level)
-            self._expect("power meter", state.players[state.active].power, int(a["playersCOP"]), i)
+            self._power(state, alias, a, i)
         elif name == "End":
             self._apply(state, i, "EndTurn")
             info = a["updatedInfo"]
@@ -506,6 +518,61 @@ class _TurnStepper:
         else:
             raise Diverged(f"unsupported action {name}", "no engine action for it", i)
         return False
+
+    def _power(self, state, alias: dict[int, int], a: dict, i: int) -> None:
+        p = state.players[state.active]
+        level = 2 if a.get("coPower") == "S" else 1
+        what = f"{self.r.cos[p.co].name} {'SCOP' if level == 2 else 'COP'}"
+        if level in _UNMODELLED_POWERS.get(p.co, ()):
+            raise _Skip(f"power: {what}")
+        missiles = [(int(c["x"]), int(c["y"])) for c in a.get("missileCoords") or []]
+        if missiles:  # how AWBW's aim compares with the engine's (not a divergence)
+            aimed = _core.missile_targets(state, level)
+            self.aims[i] = (what, sum(x == y for x, y in zip(aimed, missiles, strict=False)), len(missiles))
+        before = set(state.unit_slots())
+        self._apply(state, i, "Power", arg=level, missiles=missiles or None)
+        self._expect("power meter", state.players[state.active].power, int(a["playersCOP"]), i)
+        weather = a.get("weather")
+        if isinstance(weather, dict):
+            self._expect(f"{what}: weather", _core.WEATHERS[state.weather], _WEATHERS[weather["weatherCode"]], i)
+        added = _view(a.get("unitAdd"))
+        if isinstance(added, dict):  # Sensei's footsoldiers
+            new = {self.md_xy(state.unit(s).tile): s for s in set(state.unit_slots()) - before}
+            for row in added.get("units") or []:
+                xy = (int(row["units_x"]), int(row["units_y"]))
+                if xy not in new:
+                    raise Diverged(f"{what}: unit not placed", f"no new unit at {xy}", i)
+                alias[int(row["units_id"])] = state.unit(new.pop(xy)).id
+            if new:
+                raise Diverged(f"{what}: extra unit", f"engine places units at {sorted(new)}", i)
+        replaced = _view(a.get("unitReplace"))
+        rows = replaced.get("units") if isinstance(replaced, dict) else None
+        for row in rows or []:
+            slot = state.find_unit(alias.get(int(row["units_id"]), int(row["units_id"])))
+            if slot < 0:
+                continue
+            u = state.unit(slot)
+            name = self.r.units[u.type].name
+            # Sonja hides HP from her opponent: the log shows 0 (powers never kill).
+            if "units_hit_points" in row and int(row["units_hit_points"]) > 0:
+                self._expect(f"{what}: hp of {name}", _shown(u.hp), int(row["units_hit_points"]), i)
+            if "units_fuel" in row:
+                self._expect(f"{what}: fuel of {name}", u.fuel, int(row["units_fuel"]), i)
+            if "units_ammo" in row:
+                self._expect(f"{what}: ammo of {name}", u.ammo, int(row["units_ammo"]), i)
+            if "units_moved" in row:
+                moved = int(row["units_moved"])  # 0: may act again (Eagle), -1: stunned (Von Bolt)
+                flag = _core.UNIT_STUNNED if moved < 0 else _core.UNIT_MOVED
+                self._expect(f"{what}: moved flag of {name}", u.flags & flag, flag if moved else 0, i)
+        players = _view(a.get("playerReplace"))
+        for pid, row in (players or {}).items() if isinstance(players, dict) else ():
+            pi = self.index.get(int(pid))
+            if pi is None or not isinstance(row, dict):
+                continue
+            if "players_co_power" in row:
+                self._expect(f"{what}: power meter", state.players[pi].power, int(row["players_co_power"]), i)
+            if "players_funds" in row:
+                self._expect(f"{what}: funds", state.players[pi].funds, int(row["players_funds"]), i)
 
     def _prop_at(self, x: int, y: int) -> int:
         for p, (px, py, _, _) in enumerate(self.md.props()):
@@ -574,22 +641,29 @@ def check_turns(replay: Replay, md: _core.MapData) -> list[tuple[TurnCheck, int]
     """Check every turn of a replay; returns (result, number of actions) per turn."""
     out: list[tuple[TurnCheck, int]] = []
     gid = replay.game.id
+    order = replay.player_ids
     for k, turn in enumerate(replay.turns):
         nxt = replay.turns[k + 1] if k + 1 < len(replay.turns) else None
         n = len(turn.actions or [])
         res = TurnCheck(gid, turn.day, None)
+        j = (order.index(turn.player_id) + 1) % len(order)
         if turn.actions is None:
             res.category = "no actions logged"
-        elif turn.weather != "C" or (nxt is not None and nxt.weather != "C"):
-            res.category = "weather"
+        elif nxt is not None and (nxt.day, nxt.player_id) != (turn.day + (j == 0), order[j]):
+            res.category = "next snapshot missing"
         elif carried := [
             p for p in turn.players if (p.co_id, _POWER_LEVEL.get(p.co_power_on, 0)) in _UNMODELLED_CARRY_OVER
         ]:
             res.category = f"power on: {rules.load().cos[carried[0].co_id].name}"
         else:
             try:
-                _TurnStepper(replay, md, turn, nxt).run()
+                stepper = _TurnStepper(replay, md, turn, nxt)
+                stepper.run()
                 res.ok = True
+                for what, hit, n in stepper.aims.values():
+                    tot = res.aims.setdefault(what, [0, 0])
+                    tot[0] += hit
+                    tot[1] += n
             except _Skip as e:
                 res.category = str(e)
             except Diverged as e:

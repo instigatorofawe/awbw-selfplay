@@ -10,6 +10,8 @@ void init_state(const MapData& map, GameState& s) {
   s.settings = Settings{};
   s.next_id = 1;
   s.day = 1;
+  s.weather = kClear;
+  s.weather_owner = kNoOwner;
   s.winner = kNoOwner;
   std::memset(s.unit_at, kNoUnit, sizeof s.unit_at);
   std::memset(s.prop_owner, kNoOwner, sizeof s.prop_owner);
@@ -107,10 +109,15 @@ int terrain_stars(const MapData& m, const GameState& s, int tile) {
   return m.stars[tile];
 }
 
-int move_cost(const MapData& m, const GameState& s, int tile, int move_type) {
+int move_cost(const MapData& m, const GameState& s, int tile, int move_type, int weather) {
   if (m.kind[tile] == kSeam && s.prop_points[m.prop[tile]] == 0)
-    return kMoveCost[s.weather][kRubble][move_type];
-  return m.move_cost[s.weather][move_type][tile];
+    return kMoveCost[weather][kRubble][move_type];
+  return m.move_cost[weather][move_type][tile];
+}
+
+int weather_for(const GameState& s, int player) {
+  const Player& p = s.players[player];
+  return kCos[p.co].state[p.power_on].weather_as[s.weather];
 }
 
 int count_units(const GameState& s, int owner) {

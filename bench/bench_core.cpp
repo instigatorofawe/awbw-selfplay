@@ -46,7 +46,7 @@ const Board& board() {
       for (int x = 1; x < 30; x += 4) {
         const int type = types[i % 8];
         const int t = out->map.tile(x, y);
-        if (move_cost(out->map, out->state, t, kUnits[type].move_type) == 0) continue;
+        if (move_cost(out->map, out->state, t, kUnits[type].move_type, kClear) == 0) continue;
         out->slots.push_back(put(out->state, out->map, type, i % 2, x, y));
         ++i;
       }

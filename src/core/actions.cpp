@@ -1,6 +1,7 @@
 #include "core/actions.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <vector>
 
 #include "core/movegen.h"
@@ -9,10 +10,22 @@ namespace awbw {
 
 namespace {
 
+constexpr int kCoAndy = 1;
+constexpr int kCoDrake = 5;
 constexpr int kCoSami = 8;
+constexpr int kCoOlaf = 9;
+constexpr int kCoEagle = 10;
+constexpr int kCoHawke = 12;
+constexpr int kCoSensei = 13;
+constexpr int kCoJess = 14;
 constexpr int kCoColin = 15;
 constexpr int kCoHachi = 17;
+constexpr int kCoSasha = 19;
 constexpr int kCoKindle = 23;
+constexpr int kCoRachel = 28;
+constexpr int kCoSturm = 29;
+constexpr int kCoVonBolt = 30;
+constexpr int kMissileRadius = 2;
 
 const CoStateSpec& co_state(const GameState& s, int player) {
   const Player& p = s.players[player];
@@ -227,6 +240,12 @@ Status fire(const MapData& m, GameState& s, const Action& a, const Detail& d, co
       int64_t{displayed_hp(t.hp) - displayed_hp(o.def_hp)} * kUnits[t.type].cost;
   charge(s.players[u.owner], lost_att + lost_def / 2);
   charge(s.players[t.owner], lost_def + lost_att / 2);
+  // War Bonds: Sasha earns half the value of the damage her units deal, in
+  // her attacks and in their counterattacks.
+  Player& ap = s.players[u.owner];
+  Player& dp = s.players[t.owner];
+  if (ap.co == kCoSasha && ap.power_on == 2) ap.funds += static_cast<int32_t>(lost_def / 20);
+  if (dp.co == kCoSasha && dp.power_on == 2) dp.funds += static_cast<int32_t>(lost_att / 20);
 
   u.hp = o.att_hp;
   t.hp = o.def_hp;
@@ -319,7 +338,7 @@ Status unload(const MapData& m, GameState& s, const Action& a, const MovePlan& m
   const bool free =
       s.unit_at[a.target] == kNoUnit || (s.unit_at[a.target] == a.unit && a.target != dest);
   if (a.target >= m.n_tiles || m.distance(dest, a.target) != 1 || !free ||
-      move_cost(m, s, a.target, kUnits[s.units[c].type].move_type) == 0)
+      move_cost(m, s, a.target, kUnits[s.units[c].type].move_type, weather_for(s, u.owner)) == 0)
     return kErrCannotUnload;
   const bool moves = dest != u.tile;
   execute_move(m, s, a.unit, mp, true);
@@ -528,28 +547,236 @@ Status build(const MapData& m, GameState& s, const Action& a) {
   return kOk;
 }
 
-Status power(GameState& s, const Action& a) {
-  Player& p = s.players[s.active];
+bool is_urban(int kind) {
+  switch (kind) {
+    case kCity:
+    case kBase:
+    case kAirport:
+    case kPort:
+    case kHq:
+    case kLab:
+    case kComtower:
+      return true;
+    default:
+      return false;
+  }
+}
+
+void heal(Unit& u, int amount) { u.hp = static_cast<uint8_t>(std::min(100, u.hp + amount)); }
+
+// Apply `f` to every unit of `player`, or only the uncarried ones. Replays:
+// Andy's heals reach units in transports; Hawke's heals and all power damage
+// don't.
+template <typename F>
+void for_units_of(GameState& s, int player, bool carried, F&& f) {
+  for (Unit& u : s.units) {
+    if (u.alive() && u.owner == player && (carried || !u.has(kCarried))) f(u);
+  }
+}
+
+int missile_count(int co, bool super) {
+  if (co == kCoRachel && super) return 3;
+  if (co == kCoSturm || (co == kCoVonBolt && super)) return 1;
+  return 0;
+}
+
+// Internal HP a missile takes from each unit it hits.
+int missile_damage(int co, bool super) {
+  if (co == kCoSturm) return super ? 80 : 40;
+  return 30;  // Rachel's Covering Fire, Von Bolt's Ex Machina
+}
+
+enum MissileAim { kAimFoot, kAimCost, kAimHp, kAimVonBolt, kAimSturm };
+
+// Whether a footsoldier stands on a property it is partway through capturing.
+bool mid_capture(const MapData& m, const GameState& s, const Unit& u) {
+  const int prop = m.prop[u.tile];
+  return prop != kNoProp && is_capturable(m.prop_kind[prop]) && s.prop_owner[prop] != u.owner &&
+         s.prop_points[prop] < kFullCapture;
+}
+
+// Where AWBW aims a missile, per awbw.fandom.com/wiki/Rachel, /Von_Bolt and
+// /Sturm. Every uncarried unit within reach of a tile adds a value, negative
+// for the user's own; the tile with the highest total wins, then the highest
+// tie score, then the first tile in row order. Values:
+//   Rachel, in her missiles' order, with HP clamped to 0.1 below 1.0 and to
+//   3.0 above it: HP x4 for an Infantry or Mech over 1.0 HP (x8 mid-capture);
+//   HP x cost (2G below 1.0 HP), ties to the enemy's unclamped HP x cost; HP,
+//   ties to the enemy's unclamped HP.
+//   Von Bolt: displayed HP lost (at most 3) x cost, ties as Rachel's second.
+//   Sturm: displayed HP x cost, centred only on an enemy unit.
+// Against logged centres (check-turns): 1,521 of 1,578 Rachel missiles, 347
+// of 358 Von Bolt's, all 59 of Sturm's.
+int aim_missile(const MapData& m, const GameState& s, MissileAim aim, int me) {
+  thread_local int64_t score[kMaxTiles], tie[kMaxTiles];
+  std::fill(score, score + m.n_tiles, 0);
+  std::fill(tie, tie + m.n_tiles, 0);
+  for (const Unit& u : s.units) {
+    if (!u.alive() || u.has(kCarried)) continue;
+    const int sign = u.owner == me ? -1 : 1;
+    const int64_t cost = kUnits[u.type].cost;
+    const int hp = u.hp > 30 ? 30 : u.hp < 10 ? 1 : u.hp;
+    int64_t v = 0, t = 0;
+    switch (aim) {
+      case kAimFoot:
+        v = hp;
+        if ((u.type == kInfantry || u.type == kMech) && u.hp > 10)
+          v *= mid_capture(m, s, u) ? 8 : 4;
+        break;
+      case kAimCost:
+        v = u.hp < 10 ? 20 : hp * cost;
+        t = u.hp * cost;
+        break;
+      case kAimHp:
+        v = hp;
+        t = u.hp;
+        break;
+      case kAimVonBolt:
+        v = (u.hp > 30 ? 3 : displayed_hp(u.hp) - 1) * cost;
+        t = u.hp * cost;
+        break;
+      case kAimSturm:
+        v = displayed_hp(u.hp) * cost;
+        break;
+    }
+    v *= sign;
+    t = sign > 0 ? t : 0;  // tie scores count the enemy's units only
+    const int ux = m.x_of(u.tile), uy = m.y_of(u.tile);
+    for (int dy = -kMissileRadius; dy <= kMissileRadius; ++dy) {
+      const int reach = kMissileRadius - std::abs(dy);
+      for (int dx = -reach; dx <= reach; ++dx) {
+        const int x = ux + dx, y = uy + dy;
+        if (x < 0 || y < 0 || x >= m.width || y >= m.height) continue;
+        score[m.tile(x, y)] += v;
+        tie[m.tile(x, y)] += t;
+      }
+    }
+  }
+  int best = -1;
+  for (int t = 0; t < m.n_tiles; ++t) {
+    if (aim == kAimSturm && (s.unit_at[t] == kNoUnit || s.units[s.unit_at[t]].owner == me))
+      continue;
+    if (best < 0 || score[t] > score[best] || (score[t] == score[best] && tie[t] > tie[best]))
+      best = t;
+  }
+  return best;
+}
+
+Status power(const MapData& m, GameState& s, const Action& a, const Detail& d) {
+  const int me = s.active, enemy = 1 - me;
+  Player& p = s.players[me];
   const CoSpec& co = kCos[p.co];
   if (!s.settings.use_powers || p.power_on || (a.arg != 1 && a.arg != 2)) return kErrPower;
   const bool super = a.arg == 2;
   if ((super ? co.scop_stars : co.cop_stars) == 0) return kErrPower;
   const int price = super ? p.scop_cost : p.cop_cost;
   if (p.power < price) return kErrPower;
+  const int n_missiles = missile_count(p.co, super);
+  if (d.missiles && d.n_missiles != n_missiles) return kErrBadTarget;
+  for (int i = 0; d.missiles && i < n_missiles; ++i) {
+    if (d.missiles[i] >= m.n_tiles) return kErrBadTarget;
+  }
+
   p.power -= price;
   p.power_on = a.arg;
   if (p.power_uses < 255) ++p.power_uses;
   p.cop_cost = cop_cost(p.co, p.power_uses);
   p.scop_cost = scop_cost(p.co, p.power_uses);
-  if (p.co == kCoColin) {
-    if (super) {
-      p.power_atk = static_cast<int16_t>(3 * p.funds / 1000);  // Power of Money
-    } else {
-      p.funds = p.funds * 3 / 2;  // Gold Rush
+  Player& foe = s.players[enemy];
+  switch (p.co) {
+    case kCoAndy:  // Hyper Repair, Hyper Upgrade
+      for_units_of(s, me, true, [&](Unit& u) { heal(u, super ? 50 : 20); });
+      break;
+    case kCoDrake:  // Tsunami, Typhoon
+      for_units_of(s, enemy, false, [&](Unit& u) {
+        hurt(u, super ? 20 : 10);
+        u.fuel = static_cast<uint8_t>((u.fuel + 1) / 2);
+      });
+      if (super) {
+        s.weather = kRain;
+        s.weather_owner = static_cast<uint8_t>(me);
+      }
+      break;
+    case kCoOlaf:  // Blizzard, Winter Fury
+      if (super) for_units_of(s, enemy, false, [&](Unit& u) { hurt(u, 20); });
+      s.weather = kSnow;
+      s.weather_owner = static_cast<uint8_t>(me);
+      break;
+    case kCoEagle:  // Lightning Strike: everything but footsoldiers acts again
+      if (super) {
+        for (Unit& u : s.units) {
+          if (u.alive() && u.owner == me && kUnits[u.type].cls != kFoot)
+            u.flags &= static_cast<uint8_t>(~kMoved);
+        }
+      }
+      break;
+    case kCoHawke:  // Black Wave, Black Storm
+      for_units_of(s, me, false, [&](Unit& u) { heal(u, super ? 20 : 10); });
+      for_units_of(s, enemy, false, [&](Unit& u) { hurt(u, super ? 20 : 10); });
+      break;
+    case kCoSensei: {  // Copter Command, Airborne Assault: 9 HP footsoldiers on empty cities
+      for (int prop = 0; prop < m.n_props; ++prop) {
+        const int tile = m.prop_tile[prop];
+        if (m.prop_kind[prop] != kCity || s.prop_owner[prop] != me || s.unit_at[tile] != kNoUnit)
+          continue;
+        if ((s.settings.unit_limit && count_units(s, me) >= s.settings.unit_limit) ||
+            alloc_unit(s) < 0)
+          break;
+        Unit n{};
+        n.tile = static_cast<uint16_t>(tile);
+        n.type = super ? kMech : kInfantry;
+        n.owner = static_cast<uint8_t>(me);
+        n.hp = 90;
+        resupply(n);
+        add_unit(s, n);
+      }
+      break;
+    }
+    case kCoJess:  // Turbo Charge, Overdrive
+      for (Unit& u : s.units) {
+        if (u.alive() && u.owner == me) resupply(u);
+      }
+      break;
+    case kCoColin:
+      if (super) {
+        p.power_atk = static_cast<int16_t>(3 * p.funds / 1000);  // Power of Money
+      } else {
+        p.funds = p.funds * 3 / 2;  // Gold Rush
+      }
+      break;
+    case kCoSasha:  // Market Crash: the enemy meter loses (funds / 50000) of its maximum
+      if (!super) {
+        const int64_t drain = int64_t{foe.scop_cost} * p.funds / 50000;
+        foe.power = static_cast<int32_t>(std::max<int64_t>(0, foe.power - drain));
+      }
+      break;
+    case kCoKindle:  // Urban Blight
+      if (!super) {
+        for_units_of(s, enemy, false, [&](Unit& u) {
+          if (is_urban(terrain_kind(m, s, u.tile))) hurt(u, 30);
+        });
+      }
+      break;
+    default:
+      break;
+  }
+  if (n_missiles) {
+    // Every missile is aimed before any lands.
+    const int damage = missile_damage(p.co, super);
+    uint16_t aimed[3];
+    if (!d.missiles) missile_targets(m, s, a.arg, aimed);
+    const uint16_t* centres = d.missiles ? d.missiles : aimed;
+    for (int i = 0; i < n_missiles; ++i) {
+      const int centre = centres[i];
+      if (centre == kNoTile) continue;
+      // Missiles hit every unit in reach, the user's own included.
+      for (Unit& u : s.units) {
+        if (!u.alive() || u.has(kCarried) || m.distance(u.tile, centre) > kMissileRadius) continue;
+        hurt(u, damage);
+        if (p.co == kCoVonBolt) u.flags |= kStunned;
+      }
     }
   }
-  // Other powers' immediate effects (healing, damage, weather, stuns, ...)
-  // are not modelled yet.
   return kOk;
 }
 
@@ -560,11 +787,20 @@ void start_turn(const MapData& m, GameState& s) {
   p.power_on = 0;
   p.power_atk = 0;
   const CoStateSpec& co = kCos[p.co].state[0];
+  if (s.weather_owner == me) {  // power weather lasts until its owner's next turn
+    s.weather = kClear;
+    s.weather_owner = kNoOwner;
+  }
 
   for (Unit& u : s.units) {
     if (!u.alive() || u.owner != me) continue;
-    u.flags &= static_cast<uint8_t>(~kCapturing);
-    if (u.has(kStunned)) u.flags = static_cast<uint8_t>((u.flags & ~kStunned) | kMoved);
+    // A stunned unit sits out this turn; AWBW leaves its flags alone, so a
+    // capture flag stays up.
+    if (u.has(kStunned)) {
+      u.flags = static_cast<uint8_t>((u.flags & ~kStunned) | kMoved);
+    } else {
+      u.flags &= static_cast<uint8_t>(~kCapturing);
+    }
     if (u.has(kCarried) || s.day == 1) continue;  // no daily fuel on day 1
     int burn = u.has(kHidden) ? kUnits[u.type].hidden_fuel_per_day : kUnits[u.type].fuel_per_day;
     if (is_air(u.type)) burn = std::max(0, burn + co.air_fuel_per_day);
@@ -678,6 +914,20 @@ Combatant combatant(const MapData& m, const GameState& s, int slot, int tile) {
   return c;
 }
 
+int missile_targets(const MapData& m, const GameState& s, int level, uint16_t* out) {
+  const Player& p = s.players[s.active];
+  const int n = missile_count(p.co, level == 2);
+  static constexpr MissileAim kRachel[3] = {kAimFoot, kAimCost, kAimHp};
+  for (int i = 0; i < n; ++i) {
+    const MissileAim aim = p.co == kCoRachel  ? kRachel[i]
+                           : p.co == kCoSturm ? kAimSturm
+                                              : kAimVonBolt;
+    const int t = aim_missile(m, s, aim, s.active);
+    out[i] = t < 0 ? kNoTile : static_cast<uint16_t>(t);
+  }
+  return n;
+}
+
 int scop_cost(int co, int uses) { return scaled_cost(kCos[co].scop_stars, uses); }
 
 int cop_cost(int co, int uses) {
@@ -690,7 +940,7 @@ Status apply(const MapData& m, GameState& s, const Action& a, const Detail& d) {
     case kActBuild:
       return build(m, s, a);
     case kActPower:
-      return power(s, a);
+      return power(m, s, a, d);
     case kActDelete: {
       if (a.unit >= kMaxUnits || !s.units[a.unit].alive() || s.units[a.unit].owner != s.active ||
           s.units[a.unit].has(kCarried))

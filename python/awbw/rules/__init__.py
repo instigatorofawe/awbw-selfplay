@@ -23,7 +23,7 @@ from typing import Any
 MOVE_TYPES = ("F", "B", "T", "W", "A", "S", "L", "P")  # AWBW movement_type codes
 UNIT_CLASSES = ("foot", "vehicle", "copter", "plane", "naval")
 POWER_STATES = ("d2d", "cop", "scop")
-WEATHERS = ("clear",)  # rain and snow costs are not tabulated yet
+WEATHERS = ("clear", "rain", "snow")
 TERRAIN_GROUPS = {"urban": ("city", "base", "airport", "port", "hq", "lab", "comtower")}
 POWER_BONUS = 10  # every CO's extra attack and defense % while a power is on
 TOWER_ATK = 10  # default attack % per owned comtower
@@ -101,6 +101,7 @@ class CoState:
     income_bonus: int
     air_fuel_per_day: int
     repair_bonus: int  # extra internal HP per repair
+    weather_as: tuple[int, ...]  # by WEATHERS index: the weather this CO's units move in
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,6 +293,7 @@ _CO_KEYS = frozenset(
         "income_bonus",
         "air_fuel_per_day",
         "repair_bonus",
+        "weather_as",
     ]
 )
 
@@ -335,4 +337,5 @@ def _co_state(units, primary, secondary, kinds, raw: dict[str, Any]) -> CoState:
         income_bonus=raw.get("income_bonus", 0),
         air_fuel_per_day=raw.get("air_fuel_per_day", 0),
         repair_bonus=raw.get("repair_bonus", 0),
+        weather_as=tuple(WEATHERS.index(raw.get("weather_as", {}).get(w, w)) for w in WEATHERS),
     )

@@ -41,7 +41,9 @@ struct SnapshotUnit {
 struct Snapshot {
   Settings settings;
   int day;
-  int active;  // player index
+  int active;         // player index
+  int weather;        // Weather
+  int weather_owner;  // player index whose power set the weather, or -1
   SnapshotPlayer players[kMaxPlayers];
   const SnapshotBuilding* buildings;
   int n_buildings;

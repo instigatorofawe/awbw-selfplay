@@ -28,18 +28,40 @@ bool visible_to(const MapData& m, const GameState& s, int slot, int viewer) {
   return false;
 }
 
-int step_cost(const MapData& m, const GameState& s, const Unit& u, int tile) {
-  const int cost = move_cost(m, s, tile, kUnits[u.type].move_type);
+namespace {
+
+// What a unit's step costs depend on, worked out once per search.
+struct Mover {
+  const Unit& u;
+  int move_type;
+  int weather;
+  bool cost_one;  // Sturm, and Lash's powers: every move costs 1, except in snow
+
+  Mover(const GameState& s, const Unit& unit)
+      : u(unit), move_type(kUnits[unit.type].move_type), weather(weather_for(s, unit.owner)) {
+    const Player& p = s.players[unit.owner];
+    cost_one = kCos[p.co].state[p.power_on].move_cost_one && weather != kSnow;
+  }
+};
+
+int enter_cost(const MapData& m, const GameState& s, const Mover& mv, int tile) {
+  const int cost = move_cost(m, s, tile, mv.move_type, mv.weather);
   if (cost == 0) return 0;
   const int other = s.unit_at[tile];
-  if (other != kNoUnit && s.units[other].owner != u.owner && visible_to(m, s, other, u.owner))
+  if (other != kNoUnit && s.units[other].owner != mv.u.owner && visible_to(m, s, other, mv.u.owner))
     return 0;
-  const Player& p = s.players[u.owner];
-  return kCos[p.co].state[p.power_on].move_cost_one ? 1 : cost;
+  return mv.cost_one ? 1 : cost;
+}
+
+}  // namespace
+
+int step_cost(const MapData& m, const GameState& s, const Unit& u, int tile) {
+  return enter_cost(m, s, Mover(s, u), tile);
 }
 
 void reachable(const MapData& m, const GameState& s, int slot, Reach& r) {
   const Unit& u = s.units[slot];
+  const Mover mv(s, u);
   std::memset(r.cost, kUnreachable, m.n_tiles);
   r.n = 0;
   const int budget = move_budget(s, u);
@@ -64,7 +86,7 @@ void reachable(const MapData& m, const GameState& s, int slot, Reach& r) {
     for (int d = 0; d < kNumDirs; ++d) {
       const int nb = m.neighbor[t][d];
       if (nb == kOffMap) continue;
-      const int w = step_cost(m, s, u, nb);
+      const int w = enter_cost(m, s, mv, nb);
       if (w == 0) continue;
       const int nc = c + w;
       if (nc > budget || nc >= r.cost[nb]) continue;
@@ -79,10 +101,11 @@ void reachable(const MapData& m, const GameState& s, int slot, Reach& r) {
 int path_cost(const MapData& m, const GameState& s, int slot, const uint16_t* path, int n) {
   const Unit& u = s.units[slot];
   if (n < 1 || path[0] != u.tile) return -1;
+  const Mover mv(s, u);
   int total = 0;
   for (int i = 1; i < n; ++i) {
     if (path[i] >= m.n_tiles || m.distance(path[i - 1], path[i]) != 1) return -1;
-    const int w = step_cost(m, s, u, path[i]);
+    const int w = enter_cost(m, s, mv, path[i]);
     if (w == 0) return -1;
     total += w;
   }

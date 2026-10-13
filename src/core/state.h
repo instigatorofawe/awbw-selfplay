@@ -74,10 +74,12 @@ struct GameState {
   Settings settings;
   uint32_t next_id;  // id of the next unit built
   uint16_t day;
-  uint8_t active;   // player index to move
-  uint8_t weather;  // index into the weather tables
-  uint8_t winner;   // kNoOwner while the game runs; kDraw
-  uint8_t _pad[3];
+  uint8_t active;         // player index to move
+  uint8_t weather;        // Weather
+  uint8_t weather_owner;  // player whose power set the weather (it ends at their next turn), or
+                          // kNoOwner
+  uint8_t winner;         // kNoOwner while the game runs; kDraw
+  uint8_t _pad[2];
   Player players[kMaxPlayers];
   Unit units[kMaxUnits];
   uint8_t unit_at[kMaxTiles];  // slot of the uncarried unit on each tile, or kNoUnit
@@ -108,11 +110,14 @@ void load_unit(GameState& s, int slot, int transport);
 // Take cargo out of its transport onto an empty tile.
 void unload_unit(GameState& s, int slot, int tile);
 
-// Terrain kind / defense stars / move cost of a tile now: pipe seams break
-// into rubble and silos empty when fired.
+// Terrain kind / defense stars / move cost in `weather` of a tile now: pipe
+// seams break into rubble and silos empty when fired.
 int terrain_kind(const MapData& m, const GameState& s, int tile);
 int terrain_stars(const MapData& m, const GameState& s, int tile);
-int move_cost(const MapData& m, const GameState& s, int tile, int move_type);
+int move_cost(const MapData& m, const GameState& s, int tile, int move_type, int weather);
+// The weather `player`'s units move in (Olaf is unaffected by snow and moves
+// in rain as in snow; Drake is unaffected by rain).
+int weather_for(const GameState& s, int player);
 
 int count_units(const GameState& s, int owner);
 int count_props(const MapData& m, const GameState& s, int owner, int kind = -1);

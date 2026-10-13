@@ -33,7 +33,7 @@ enum ActionKind : uint8_t {
   kActLaunch,      // fire the loaded missile silo on `to` at `target`: 3 HP within 2 tiles
   // Player actions.
   kActBuild,   // build UnitType `arg` on the property at `target`
-  kActPower,   // arg 1: COP, 2: SCOP
+  kActPower,   // arg 1: COP, 2: SCOP; immediate effects (heals, damage, weather, ...) included
   kActDelete,  // scrap `unit`
   kActEndTurn,
   kActResign,
@@ -58,6 +58,10 @@ struct Detail {
   int path_len = 0;
   int att_hp = -1;  // Fire: attacker and defender HP after the fight; -1 = roll
   int def_hp = -1;
+  // Power: missile centres (Rachel's three, Sturm's and Von Bolt's one);
+  // nullptr = aim them as AWBW does.
+  const uint16_t* missiles = nullptr;
+  int n_missiles = 0;
 };
 
 enum Status : uint8_t {
@@ -97,6 +101,12 @@ Status apply(const MapData& m, GameState& s, const Action& a, const Detail& d = 
 
 // The fight as the damage formula sees it, for the unit in `slot` standing on `tile`.
 Combatant combatant(const MapData& m, const GameState& s, int slot, int tile);
+
+// Where the active player's power `level` (1 COP, 2 SCOP) would aim its
+// missiles now, as AWBW does: writes up to 3 tiles (kNoTile if there is no
+// target) and returns how many missiles the power fires.
+inline constexpr uint16_t kNoTile = 0xFFFF;
+int missile_targets(const MapData& m, const GameState& s, int level, uint16_t* out);
 
 // Power costs with `uses` powers used so far (AWBW co_max_power / co_max_spower).
 // A CO without a COP reports the SCOP cost for both, as AWBW does.

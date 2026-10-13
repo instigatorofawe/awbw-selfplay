@@ -266,6 +266,8 @@ def _check_turns(args, http: Http) -> int:
     print(f"{total.replays} replays, {total.turns} turns; replays skipped: {dict(total.replays_skipped)}")
     print(f"{checked} turns checked: {total.ok} match ({total.actions_ok} actions), {bad} differ")
     print(f"{sum(total.skipped.values())} turns skipped")
+    for what, (hit, n) in sorted(total.aims.items()):
+        print(f"  missiles aimed where AWBW aimed them: {what} {hit} of {n}")
     if args.skips:
         for reason, n in total.skipped.most_common():
             print(f"  {n:7d}  {reason}")

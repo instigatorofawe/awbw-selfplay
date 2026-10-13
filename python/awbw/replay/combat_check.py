@@ -164,7 +164,9 @@ class _TurnState:
             extra = p.colin_atk
         elif p.power == 2 and p.co == 23:  # Kindle: +3% attack per owned urban property
             extra = 3 * self._urban(u.owner)
-        return _core.Combatant(u.type, hp, u.ammo, p.co, p.power, kind, stars, self._towers(u.owner), extra, u.hidden)
+        # AWBW can log ammo -1 (after spending ammo the unit didn't have).
+        ammo = max(0, u.ammo)
+        return _core.Combatant(u.type, hp, ammo, p.co, p.power, kind, stars, self._towers(u.owner), extra, u.hidden)
 
     # -- actions ---------------------------------------------------------------
 

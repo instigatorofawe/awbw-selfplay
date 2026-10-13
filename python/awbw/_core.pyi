@@ -37,6 +37,8 @@ UNIT_CAPTURING: int = 16
 
 STAR_VALUE: int = 90000
 
+WEATHERS: tuple = ('clear', 'rain', 'snow')
+
 ACTIONS: dict = ...
 
 OK: int = 0
@@ -205,6 +207,14 @@ class GameState:
     def active(self) -> int: ...
 
     @property
+    def weather(self) -> int:
+        """Index into WEATHERS."""
+
+    @property
+    def weather_owner(self) -> int:
+        """Player whose power set the weather, or 255 for the game's own weather."""
+
+    @property
     def winner(self) -> int: ...
 
     def seed(self, seed: int) -> None:
@@ -240,9 +250,9 @@ class GameState:
 
     def __setstate__(self, arg: bytes, /) -> None: ...
 
-def load_snapshot(map: MapData, settings: Settings, day: int, active: int, players: Annotated[NDArray[numpy.int64], dict(shape=(None, 8), order='C', device='cpu', writable=False)], buildings: Annotated[NDArray[numpy.int64], dict(shape=(None, 4), order='C', device='cpu', writable=False)], units: Annotated[NDArray[numpy.int64], dict(shape=(None, 11), order='C', device='cpu', writable=False)]) -> GameState:
+def load_snapshot(map: MapData, settings: Settings, day: int, active: int, players: Annotated[NDArray[numpy.int64], dict(shape=(None, 8), order='C', device='cpu', writable=False)], buildings: Annotated[NDArray[numpy.int64], dict(shape=(None, 4), order='C', device='cpu', writable=False)], units: Annotated[NDArray[numpy.int64], dict(shape=(None, 11), order='C', device='cpu', writable=False)], weather: int = 0, weather_owner: int = -1) -> GameState:
     """
-    GameState from a flattened AWBW snapshot. players: [2, 8] (co, country, funds, power, cop_cost, scop_cost, power_on, eliminated); buildings: [n, 4] (x, y, terrain_id, capture); units: [n, 11] (id, type, owner, x, y, hp, fuel, ammo, flags, cargo1_id, cargo2_id).
+    GameState from a flattened AWBW snapshot. players: [2, 8] (co, country, funds, power, cop_cost, scop_cost, power_on, eliminated); buildings: [n, 4] (x, y, terrain_id, capture); units: [n, 11] (id, type, owner, x, y, hp, fuel, ammo, flags, cargo1_id, cargo2_id); weather: WEATHERS index; weather_owner: player index whose power set it, or -1.
     """
 
 def reachable(state: GameState, slot: int) -> list[tuple[int, int, int]]:
@@ -355,9 +365,14 @@ def combat_outcomes(att: Combatant, defender: Combatant, dist: int) -> list[tupl
     Exact (attacker_hp, defender_hp, probability) results of an attack, counterattack included.
     """
 
-def apply(state: GameState, kind: int, unit: int = -1, to: tuple[int, int] | None = None, target: tuple[int, int] | None = None, arg: int = 0, path: Sequence[tuple[int, int]] | None = None, att_hp: int = -1, def_hp: int = -1) -> int:
+def apply(state: GameState, kind: int, unit: int = -1, to: tuple[int, int] | None = None, target: tuple[int, int] | None = None, arg: int = 0, path: Sequence[tuple[int, int]] | None = None, att_hp: int = -1, def_hp: int = -1, missiles: Sequence[tuple[int, int]] | None = None) -> int:
     """
-    Carry out one action for the active player, in place. kind: ACTIONS[name]; unit: slot; to / target: (x, y); path: [(x, y), ...] from the unit's tile to `to` (default: the cheapest path its owner can see); att_hp / def_hp force a fight's result. Returns OK, TRAPPED or an error status (state unchanged); see status_name.
+    Carry out one action for the active player, in place. kind: ACTIONS[name]; unit: slot; to / target: (x, y); path: [(x, y), ...] from the unit's tile to `to` (default: the cheapest path its owner can see); att_hp / def_hp force a fight's result; missiles: a power's missile centres [(x, y), ...] (default: aimed as AWBW does). Returns OK, TRAPPED or an error status (state unchanged); see status_name.
+    """
+
+def missile_targets(state: GameState, level: int) -> list[tuple[int, int] | None]:
+    """
+    Where the active player's power `level` (1 COP, 2 SCOP) would aim its missiles now, as AWBW does: [(x, y), ...] (None for a missile with no target); [] for a power without missiles.
     """
 
 def combatant(state: GameState, slot: int, at: tuple[int, int] | None = None) -> Combatant:

@@ -20,6 +20,12 @@ bool load_snapshot(const MapData& m, const Snapshot& snap, GameState& s, std::st
   s.settings = snap.settings;
   s.day = static_cast<uint16_t>(snap.day);
   s.active = static_cast<uint8_t>(snap.active);
+  if (snap.weather < 0 || snap.weather >= kNumWeathers || snap.weather_owner >= kMaxPlayers) {
+    error = "bad weather";
+    return false;
+  }
+  s.weather = static_cast<uint8_t>(snap.weather);
+  s.weather_owner = snap.weather_owner < 0 ? kNoOwner : static_cast<uint8_t>(snap.weather_owner);
   for (int i = 0; i < kMaxPlayers; ++i) {
     const SnapshotPlayer& sp = snap.players[i];
     Player& p = s.players[i];

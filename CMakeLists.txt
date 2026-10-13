@@ -90,6 +90,7 @@ if(AWBW_BUILD_TESTS)
     tests/cpp/test_combat.cpp
     tests/cpp/test_map.cpp
     tests/cpp/test_movegen.cpp
+    tests/cpp/test_powers.cpp
     tests/cpp/test_snapshot.cpp
     tests/cpp/test_state.cpp)
   target_link_libraries(awbw_tests PRIVATE awbw_core GTest::gtest_main)

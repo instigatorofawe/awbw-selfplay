@@ -15,7 +15,7 @@ nanobind, for:
 | Settings | Standard only: 1000 funds per property (no high income), no starting funds, powers on; any capture limit |
 | Fog | Off (games with fog are filtered out of datasets) |
 | Hidden units | Dived Subs and hidden Stealths stay hidden from the opponent even without fog (AWBW's rule), so the game has hidden information. A move that runs into an unseen one stops short ("trapped") |
-| Weather | Clear only to start; random weather comes later |
+| Weather | Clear, plus the rain and snow CO powers bring (Drake, Olaf); random weather comes later |
 | Search | Gumbel AlphaZero-style MCTS, exact simulator, explicit chance nodes |
 | First model | Critic trained on positions parsed from human replays |
 
@@ -98,7 +98,7 @@ struct GameState {
   Settings settings;
   uint32_t next_id;           // id of the next unit built
   uint16_t day;
-  uint8_t  active, weather, winner;
+  uint8_t  active, weather, weather_owner, winner;  // weather_owner: whose power set it
   Player   players[2];
   Unit     units[kMaxUnits];               // 128
   uint8_t  unit_at[kMaxTiles];             // occupancy grid; check_state() verifies it
@@ -178,20 +178,26 @@ static_assert(std::is_trivially_copyable_v<GameState>);
     unit stops on the last tile before an unseen enemy (`kTrapped`), pays
     only for the tiles it crossed, and loses its action. A hidden unit is seen
     by enemies next to it.
-  - **Verified** (`awbw check-moves`, 2,000 replays): 55,022 snapshots load
-    with no errors, and all 176,783 checkable logged moves pass. The path is
-    legal, its cost equals the fuel spent, and the search finds no cheaper
-    route. For each of the 50 (unit, CO, power) combinations with ≥ 300 moves,
-    the longest logged move reaches the engine's movement points exactly.
+  - **Weather:** rain and snow use their own cost tables (AW2's, checked
+    against 881 logged moves in them first). Olaf moves in snow as in clear
+    and in rain as in snow; Drake ignores rain; Sturm's and Lash's cost of 1
+    doesn't apply in snow. Power weather lasts until the start of its user's
+    next turn (the opponent's turn is the one in it).
+  - **Verified** (`awbw check-moves`, 7,359 replays): 201,628 snapshots load
+    with no errors, and all 653,924 checkable logged moves pass, those in rain
+    and snow included. The path is legal, its cost equals the fuel spent, and
+    the search finds no cheaper route. (Earlier, on 2,000 replays: for each
+    of the 50 (unit, CO, power) combinations with ≥ 300 moves, the longest
+    logged move reaches the engine's movement points exactly.)
   - `check-moves` checks moves against the turn-start state up to the first
     action that can change movement (Fire, Power, AttackSeam, Supply, Repair);
     `check-turns` (below) checks every move with the full engine.
-  - Turns in snow (Olaf's powers) or rain (Drake's SCOP) are skipped: 5,268
-    moves. Those move costs are not tabulated yet, and the 253 snow-turn moves
-    spend more fuel than clear-weather costs predict.
 - **Combat** (`src/core/combat.cpp`; [wiki formula](https://awbw.fandom.com/wiki/Damage_Formula)),
-  in exact integer math. **Verified: all 168,210 attacks logged in 2,000
-  cached replays are in `combat_outcomes()`** (`awbw check-combat`).
+  in exact integer math. **Verified: 627,074 of the 627,101 attacks logged
+  in 7,338 cached replays are in `combat_outcomes()`** (`awbw check-combat`).
+  The 27 others are Lash attacks in turns played between 2026-07-26 and
+  07-28 02:11 that get no terrain-star bonus; it holds in her attacks at any
+  other time, so AWBW seems to have dropped it for those days.
   - raw = (B·ATK/100 + luck − bad luck) · HP_att/10 · (200 − (DEF + stars·HP_def))/100,
     with displayed HPs.
   - Damage = floor(raw + 0.05). The wiki says "round up to a multiple of 0.05,
@@ -214,8 +220,8 @@ static_assert(std::is_trivially_copyable_v<GameState>);
   applies, leaving the state unchanged on an error. Kinds: Wait, Fire,
   Capture, Load, Join, Unload, Supply, Repair, Hide, Unhide, AttackSeam,
   Explode, Launch (unit actions: move to `to`, then act), Build, Power,
-  Delete, EndTurn, Resign. `Detail` carries an optional path and a forced
-  fight result.
+  Delete, EndTurn, Resign. `Detail` carries an optional path, a forced
+  fight result and a power's missile centres.
 - **Chance API.** One interface serves search and replays alike:
   `combat_outcomes()` gives the exact distribution over (attacker HP,
   defender HP); `apply` takes a forced result (`Detail::att_hp / def_hp`,
@@ -253,11 +259,36 @@ static_assert(std::is_trivially_copyable_v<GameState>);
     0-star terrain with no luck: base × ATK/100 × HP/10. Broken at 0.
   - **Hidden attackers:** a unit that can't see a hidden Stealth deals it
     nothing back but still spends ammo on the counter.
+  - **CO powers' immediate effects:**
+    - Andy +2 / +5 HP to all his units, units in transports included; Hawke
+      +1 / +2 to his and −1 / −2 to the enemy's, neither reaching cargo.
+    - Drake −1 / −2 HP and half the fuel (rounded up) of enemy units, plus
+      rain on his SCOP; Olaf snow, plus −2 HP on his SCOP; Kindle's COP −3 HP
+      to enemies on urban terrain. Power damage never kills (0.1 HP left) and
+      never reaches cargo.
+    - Eagle's SCOP lets every non-footsoldier unit act again; Jess resupplies
+      every unit; Sensei places 9 HP unmoved infantry (mechs on SCOP) on every
+      empty owned city.
+    - Sasha's COP drains the enemy meter by scop_cost × funds / 50,000; her
+      SCOP (War Bonds) pays half the value of the damage her units deal while
+      it is on, in her attacks and in their counterattacks in the opponent's
+      turn.
+    - Missiles hit every uncarried unit within 2 tiles, the user's own too:
+      Rachel's three × 3 HP, Sturm's 4 / 8 HP, Von Bolt's 3 HP plus a stun.
+      A stunned unit keeps its AWBW capture flag through the turn it sits
+      out.
+    - Missile aim follows the AWBW wiki's rules (Rachel, Von Bolt and Sturm
+      pages): each candidate centre scores the units in reach, the user's
+      own negative; ties go to a second score and then the top-left tile.
+      Replays give the logged centres; otherwise the engine aims them. It
+      matches AWBW for 1,521 of 1,578 Rachel missiles, 347 of 358 Von Bolt
+      missiles and all 59 Sturm missiles.
   - Builds logged with no unit didn't happen. Game-ending captures log the
     remaining points without resetting them.
 - **Turn start** (for the player whose turn begins):
-  - their power ends; stunned units sit the turn out; AWBW's per-turn flags
-    reset (the previous player's moved flags clear at the end of their turn)
+  - their power ends, and the weather their power set; stunned units sit the
+    turn out; AWBW's per-turn flags reset (the previous player's moved flags
+    clear at the end of their turn)
   - daily fuel for air units, ships and hidden units (Eagle's air units burn
     2 less); none on day 1
   - income from cities, bases, airports, ports and HQs (not comtowers or
@@ -270,8 +301,8 @@ static_assert(std::is_trivially_copyable_v<GameState>);
     are destroyed
 - **COs:**
   - A `CoSpec` data struct covers the day-to-day modifiers.
-  - A `switch` on CO id handles power effects (Sturm, Rachel, Von Bolt stun,
-    Olaf snow, ...).
+  - A `switch` on CO id handles power effects (heals, damage, weather,
+    missiles, stuns, ...); `weather_as` in the CO table covers Olaf and Drake.
   - No virtual dispatch in the hot path.
 - **Easy-to-miss details:**
   - Join HP cap and funds refund.
@@ -387,12 +418,17 @@ static_assert(std::is_trivially_copyable_v<GameState>);
      snapshot, with conflict-directed backjumping (each unit's HP records the
      fight choices it depends on).
    - The divergence report *is* the rules bug tracker.
-   - **Result on the cache (4,431 replays, 121,246 turns): 114,497 of
-     114,498 checked turns match exactly (2.01M actions).** 6,748 turns are
-     skipped: CO powers with immediate effects (Kindle COP, Andy, Sasha, Jess,
-     Rachel SCOP, Eagle SCOP, Von Bolt, Hawke, Drake, Sturm, Olaf), rain and
-     snow, and turns with no log. The one mismatch is the Black Boat repair
-     above.
+   - **Result on the cache (7,245 replays, 198,438 turns): 197,481 of
+     197,503 checked turns match exactly (3.53M actions).** 935 turns are
+     skipped: 934 with no log, and one whose next snapshot is missing (the
+     opponent's turn was never recorded). The 22 mismatches are
+     known oddities in `tests/python/test_cached_replays.py`:
+     - 19 turns of Lash games in that window (her missing terrain bonus);
+     - a Black Boat repair that leaves 9.5 HP (two others top up to 10);
+     - the only turn whose repairs ran short of funds: AWBW skipped a hidden
+       Stealth (repaired in other turns) for a Tank built after it, and left
+       funds that would have paid for 1 HP of the Stealth;
+     - one turn whose fight results take 508k tries, over the search budget.
 7. **Extract samples:**
    - **v0 (needs only `from_snapshot`, not the full engine):** turn-start
      states + game outcome. The critic can start training before the engine
@@ -555,7 +591,7 @@ while training:
 |---|---|---|
 | M0 | Replay ingestion (Python): download + cache, parser, rules JSON | Thousands of replays parsed; settings/filter stats known |
 | M1 | C++ core + bindings: state, `from_snapshot`, movegen, all actions except CO powers, `outcomes`, turn start, `encode_batch` | Every logged attack in `outcomes()` (**done**); state, snapshots, movegen (**done**); apply and turn start, every checkable turn replayed exactly (**done**); `encode_batch`; v0 dataset → **critic v0** |
-| M2 | Exact match: full replay stepping, all COs/powers, edge cases | ≥ 99% of filtered replays fully verified; benchmarks in CI |
+| M2 | Exact match: full replay stepping, all COs/powers, edge cases | CO powers' effects, missile aim, rain and snow (**done**); ≥ 99% of filtered replays fully verified; benchmarks in CI |
 | M3 | v1 datasets: all idle-phase states + action labels | **Critic v1** + policy prior (behavior cloning); baselines: random, greedy, critic-greedy 1-ply |
 | M4 | Batched Gumbel MCTS with chance nodes, `collect`/`submit` | Search + critic beats critic-greedy; sims/sec measured |
 | M5 | Self-play loop: actors / learner / evaluator, mixed with human data | Elo rises across checkpoints vs. fixed baselines |

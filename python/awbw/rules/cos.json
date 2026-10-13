@@ -1,5 +1,5 @@
 {
-  "_doc": "AWBW COs by AWBW CO id. stars are [COP, SCOP] power-meter stars (from co_max_power / co_max_spower in replay snapshots); null means no such power. d2d holds the day-to-day modifiers; cop and scop start from d2d and replace any key they set, so a power that keeps a d2d penalty restates it. Every CO also gets +10% attack and defense while a power is on, and each owned comtower gives +10% attack (tower_atk); the engine adds those, so they are not listed. mods entries apply atk/def (%), move and range to the units an entry selects (see rules/__init__.py for selectors). luck is [good, bad]: the attacker adds a roll in 0..good and subtracts one in 0..bad. terrain_atk is extra attack % by the attacker's terrain kind (replays show Koal's road bonus excludes bridges and Jake's plains bonus includes pipe rubble). notes quote awbw.amarriner.com/co.php (2026-10-12); effects not expressible as modifiers are implemented in the engine by CO id.",
+  "_doc": "AWBW COs by AWBW CO id. stars are [COP, SCOP] power-meter stars (from co_max_power / co_max_spower in replay snapshots); null means no such power. d2d holds the day-to-day modifiers; cop and scop start from d2d and replace any key they set, so a power that keeps a d2d penalty restates it. Every CO also gets +10% attack and defense while a power is on, and each owned comtower gives +10% attack (tower_atk); the engine adds those, so they are not listed. mods entries apply atk/def (%), move and range to the units an entry selects (see rules/__init__.py for selectors). luck is [good, bad]: the attacker adds a roll in 0..good and subtracts one in 0..bad. weather_as maps a weather to the one the CO's units move in (Olaf, Drake). terrain_atk is extra attack % by the attacker's terrain kind (replays show Koal's road bonus excludes bridges and Jake's plains bonus includes pipe rubble). notes quote awbw.amarriner.com/co.php (2026-10-12); effects not expressible as modifiers are implemented in the engine by CO id.",
   "cos": [
     {"id": 1, "name": "Andy", "stars": [3, 6],
      "d2d": {},
@@ -17,7 +17,7 @@
      "scop": {"mods": [{"units": "all", "atk": 40, "def": 50}], "counter": 150},
      "notes": {"d2d": "Units cost +20% more to build, but gain +30% attack and defense.", "cop": "Morale Boost -- All units' attack is increased to +40%.", "scop": "Samurai Spirit -- All units' attack is increased to +40% and defense to +50%. Counterattacks do 1.5x more damage."}},
     {"id": 5, "name": "Drake", "stars": [4, 7],
-     "d2d": {"mods": [{"units": "naval", "def": 10, "move": 1}, {"units": "air", "atk": -30}]},
+     "d2d": {"mods": [{"units": "naval", "def": 10, "move": 1}, {"units": "air", "atk": -30}], "weather_as": {"rain": "clear"}},
      "cop": {},
      "scop": {},
      "notes": {"d2d": "Naval units gain +1 movement and +10 defense. Air units lose -30% attack. Unaffected by rain (except vision), and has a higher chance of Rain in random weather.", "cop": "Tsunami -- All enemy units lose 1 HP (to a minimum of 0.1 HP) and half their fuel.", "scop": "Typhoon -- All enemy units lose 2 HP (to a minimum of 0.1 HP) and half their fuel. Weather changes to rain for 1 day."}},
@@ -32,7 +32,7 @@
      "scop": {"mods": [{"units": "foot", "atk": 70, "move": 2}, {"units": "direct", "except": "foot", "atk": -10}, {"units": "transport", "move": 1}]},
      "notes": {"d2d": "Footsoldiers gain +30% attack and a 50% capture point bonus (rounded down). Other direct units lose -10% attack. Transports gain +1 movement.", "cop": "Double Time -- Footsoldiers gain +1 movement and their attack is increased to +50%.", "scop": "Victory March -- Footsoldiers gain +2 movement and their attack is increased to +70%. Footsoldiers capture buildings instantly, regardless of their HP."}},
     {"id": 9, "name": "Olaf", "stars": [3, 7],
-     "d2d": {},
+     "d2d": {"weather_as": {"rain": "snow", "snow": "clear"}},
      "cop": {},
      "scop": {},
      "notes": {"d2d": "Unaffected by snow, but rain affects him the same as snow would for others.", "cop": "Blizzard -- Changes the weather to Snow for 1 day.", "scop": "Winter Fury -- Enemy units lose 2 HP (to a minimum of 0.1 HP), and the weather changes to snow for 1 day."}},

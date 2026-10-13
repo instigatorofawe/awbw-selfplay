@@ -51,7 +51,7 @@ uint16_t tile_of(const awbw::MapData& md, XY xy) {
 
 int apply_action(awbw::GameState& s, int kind, int unit, std::optional<XY> to,
                  std::optional<XY> target, int arg, std::optional<std::vector<XY>> path, int att_hp,
-                 int def_hp) {
+                 int def_hp, std::optional<std::vector<XY>> missiles) {
   const awbw::MapData& md = map_for(s);
   if (kind < 0 || kind >= awbw::kNumActionKinds) throw nb::value_error("unknown action kind");
   awbw::Action a;
@@ -73,17 +73,25 @@ int apply_action(awbw::GameState& s, int kind, int unit, std::optional<XY> to,
   }
   d.att_hp = att_hp;
   d.def_hp = def_hp;
+  std::vector<uint16_t> centres;
+  if (missiles) {
+    for (const XY& xy : *missiles) centres.push_back(tile_of(md, xy));
+    d.missiles = centres.data();
+    d.n_missiles = static_cast<int>(centres.size());
+  }
   return awbw::apply(md, s, a, d);
 }
 
 awbw::GameState load_snapshot(const awbw::MapData& m, const awbw::Settings& settings, int day,
                               int active, Rows<int64_t, 8> players, Rows<int64_t, 4> buildings,
-                              Rows<int64_t, 11> units) {
+                              Rows<int64_t, 11> units, int weather, int weather_owner) {
   if (players.shape(0) != awbw::kMaxPlayers) throw nb::value_error("players must have 2 rows");
   awbw::Snapshot snap{};
   snap.settings = settings;
   snap.day = day;
   snap.active = active;
+  snap.weather = weather;
+  snap.weather_owner = weather_owner;
   auto pv = players.view();
   for (int i = 0; i < awbw::kMaxPlayers; ++i) {
     auto c = [&](int j) { return static_cast<int>(pv(i, j)); };
@@ -139,6 +147,9 @@ NB_MODULE(_core, m) {
   m.attr("UNIT_STUNNED") = static_cast<int>(awbw::kStunned);
   m.attr("UNIT_CAPTURING") = static_cast<int>(awbw::kCapturing);
   m.attr("STAR_VALUE") = awbw::kStarValue;
+  m.attr("WEATHERS") = nb::make_tuple("clear", "rain", "snow");
+  static_assert(awbw::kNumWeathers == 3 && awbw::kClear == 0 && awbw::kRain == 1 &&
+                awbw::kSnow == 2);
 
   {
     nb::dict kinds;
@@ -251,6 +262,9 @@ NB_MODULE(_core, m) {
       .def_ro("settings", &awbw::GameState::settings)
       .def_ro("day", &awbw::GameState::day)
       .def_ro("active", &awbw::GameState::active)
+      .def_ro("weather", &awbw::GameState::weather, "Index into WEATHERS.")
+      .def_ro("weather_owner", &awbw::GameState::weather_owner,
+              "Player whose power set the weather, or 255 for the game's own weather.")
       .def_ro("winner", &awbw::GameState::winner)
       .def(
           "seed", [](awbw::GameState& s, uint64_t seed) { awbw::rng_seed(s.rng, seed); }, "seed"_a,
@@ -333,11 +347,12 @@ NB_MODULE(_core, m) {
       });
 
   m.def("load_snapshot", &load_snapshot, "map"_a, "settings"_a, "day"_a, "active"_a, "players"_a,
-        "buildings"_a, "units"_a,
+        "buildings"_a, "units"_a, "weather"_a = 0, "weather_owner"_a = -1,
         "GameState from a flattened AWBW snapshot. players: [2, 8] (co, country, funds, power, "
         "cop_cost, scop_cost, power_on, eliminated); buildings: [n, 4] (x, y, terrain_id, "
         "capture); units: [n, 11] (id, type, owner, x, y, hp, fuel, ammo, flags, cargo1_id, "
-        "cargo2_id).");
+        "cargo2_id); weather: WEATHERS index; weather_owner: player index whose power set "
+        "it, or -1.");
 
   m.def(
       "reachable",
@@ -433,11 +448,32 @@ NB_MODULE(_core, m) {
 
   m.def("apply", &apply_action, "state"_a, "kind"_a, "unit"_a = -1, "to"_a = nb::none(),
         "target"_a = nb::none(), "arg"_a = 0, "path"_a = nb::none(), "att_hp"_a = -1,
-        "def_hp"_a = -1,
+        "def_hp"_a = -1, "missiles"_a = nb::none(),
         "Carry out one action for the active player, in place. kind: ACTIONS[name]; unit: slot; "
         "to / target: (x, y); path: [(x, y), ...] from the unit's tile to `to` (default: the "
-        "cheapest path its owner can see); att_hp / def_hp force a fight's result. Returns OK, "
+        "cheapest path its owner can see); att_hp / def_hp force a fight's result; missiles: "
+        "a power's missile centres [(x, y), ...] (default: aimed as AWBW does). Returns OK, "
         "TRAPPED or an error status (state unchanged); see status_name.");
+  m.def(
+      "missile_targets",
+      [](const awbw::GameState& s, int level) {
+        const awbw::MapData& md = map_for(s);
+        uint16_t out[3];
+        const int n = awbw::missile_targets(md, s, level, out);
+        std::vector<std::optional<XY>> xy;
+        for (int i = 0; i < n; ++i) {
+          if (out[i] == awbw::kNoTile) {
+            xy.emplace_back(std::nullopt);
+          } else {
+            xy.emplace_back(XY{md.x_of(out[i]), md.y_of(out[i])});
+          }
+        }
+        return xy;
+      },
+      "state"_a, "level"_a,
+      "Where the active player's power `level` (1 COP, 2 SCOP) would aim its missiles now, as "
+      "AWBW does: [(x, y), ...] (None for a missile with no target); [] for a power without "
+      "missiles.");
   m.def(
       "combatant",
       [](const awbw::GameState& s, int slot, std::optional<XY> at) {

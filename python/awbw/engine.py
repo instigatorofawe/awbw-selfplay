@@ -9,6 +9,7 @@ from .maps import MapInfo, load_map
 from .replay.model import GameInfo, Replay, Turn
 
 _POWER_ON = {"N": 0, "Y": 1, "S": 2}
+_WEATHER = {"C": 0, "R": 1, "S": 2}  # AWBW weather_code -> _core.WEATHERS index
 _HIDDEN = ("Y", "D")  # awbwUnit.sub_dive for a dived Sub / hidden Stealth
 
 
@@ -69,5 +70,13 @@ def state_from_turn(replay: Replay, turn: Turn, md: _core.MapData | None = None)
         )
     units = np.array(rows, dtype=np.int64).reshape(-1, 11)
     return _core.load_snapshot(
-        md, settings_for(replay.game), turn.day, index[turn.player_id], players, buildings, units
+        md,
+        settings_for(replay.game),
+        turn.day,
+        index[turn.player_id],
+        players,
+        buildings,
+        units,
+        weather=_WEATHER[turn.weather],
+        weather_owner=index.get(turn.weather_start, -1) if turn.weather_start is not None else -1,
     )

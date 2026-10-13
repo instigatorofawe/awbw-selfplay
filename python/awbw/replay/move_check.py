@@ -5,11 +5,10 @@ consistency. Logged moves are checked against the engine's movement rules:
 the path must be legal, its cost must equal the fuel spent, and the
 cheapest-path search must reach the destination at no more than that cost.
 
-Until the engine can apply actions, a move is checked against the turn-start
-state only while that state still decides its legality: up to the first
+Moves are checked against the turn-start state only while that state still
+decides their legality (check-turns applies every action): up to the first
 action that can change movement (a fight, which may remove blocking enemies;
-a CO power; a pipe seam attack; a resupply). Turns in rain or snow are
-skipped until those move costs are tabulated.
+a CO power; a pipe seam attack; a resupply).
 """
 
 from __future__ import annotations
@@ -67,9 +66,6 @@ def check_replay(path: Path) -> MoveReport:
             state = engine.state_from_turn(replay, turn, md)
         except ValueError as e:
             rep.snapshot_errors.append(f"{gid} day {turn.day}: {e}")
-            continue
-        if turn.weather != "C":  # only clear-weather move costs are tabulated so far
-            rep.skipped["weather"] += sum(_moves(a) is not None for a in turn.actions or [])
             continue
         slot_of = {state.unit(s).id: s for s in state.unit_slots()}
         for action in turn.actions or []:

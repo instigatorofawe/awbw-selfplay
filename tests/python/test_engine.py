@@ -150,3 +150,31 @@ def test_cargo_slots(md):
     assert _core.apply(s, A["Unload"], lander, target=(1, 1), arg=1) == _core.OK
     assert s.unit(lander).cargo == (-1, -1)
     assert not s.unit(lander).flags & _core.UNIT_MOVED  # unloading in place keeps its action
+
+
+def test_snapshot_weather_and_its_owner(md):
+    s = _core.load_snapshot(
+        md, _core.Settings(), 4, 0, players(), np.zeros((0, 4), dtype=np.int64), units(), weather=2, weather_owner=0
+    )
+    assert _core.WEATHERS[s.weather] == "snow" and s.weather_owner == 0
+    assert _core.apply(s, A["EndTurn"]) == _core.OK
+    assert _core.WEATHERS[s.weather] == "snow"  # lasts until its owner's next turn
+    assert _core.apply(s, A["EndTurn"]) == _core.OK
+    assert _core.WEATHERS[s.weather] == "clear"
+
+
+def test_missiles_aimed_or_given(md):
+    sturm = next(c.id for c in R.cos.values() if c.name == "Sturm")
+    p = players()
+    p[0, 0] = sturm
+    p[0, 3] = p[0, 4] = p[0, 5] = 10 * _core.STAR_VALUE
+    rows = [(60, U["Infantry"], 0, 0, 1, 100, 99, 0, 0, 0, 0), (70, U["Tank"], 1, 4, 1, 100, 70, 9, 0, 0, 0)]
+    s = _core.load_snapshot(md, _core.Settings(), 4, 0, p, np.zeros((0, 4), dtype=np.int64), units(*rows))
+    assert _core.missile_targets(s, 1) == [(4, 1)]  # Meteor Strike centres on an enemy unit
+    assert _core.missile_targets(s, 2) == [(4, 1)]
+    given = s.copy()
+    assert _core.apply(given, A["Power"], arg=1, missiles=[(0, 1)]) == _core.OK  # the logged centre
+    assert given.unit(given.find_unit(60)).hp == 60  # missiles hit their user's units too
+    assert given.unit(given.find_unit(70)).hp == 100
+    assert _core.apply(s, A["Power"], arg=1) == _core.OK
+    assert s.unit(s.find_unit(70)).hp == 60

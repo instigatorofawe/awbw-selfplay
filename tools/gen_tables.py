@@ -66,6 +66,8 @@ def generate() -> str:
     w("")
     w("enum TerrainKind : uint8_t { " + ", ".join(f"k{ident(k)}" for k in kinds) + " };")
     w("")
+    w("enum Weather : uint8_t { " + ", ".join(f"k{ident(x)}" for x in rules.WEATHERS) + " };")
+    w("")
     w("struct UnitSpec {")
     w("  const char* name;")
     w("  int32_t awbw_id;")
@@ -136,6 +138,7 @@ def generate() -> str:
     w("  int16_t income_bonus;  // funds per income property")
     w("  int8_t air_fuel_per_day;")
     w("  uint8_t repair_bonus;  // internal HP")
+    w("  uint8_t weather_as[kNumWeathers];  // the weather this CO's units move in")
     w("};")
     w("")
     w("struct CoSpec {")
@@ -159,7 +162,7 @@ def generate() -> str:
                 f"    {{{array(s.atk)}, {array(s.defense)}, {array(s.move)}, {array(s.range)}, {terrain}, "
                 f"{s.atk_per_star}, {s.star_mult}, {s.luck_good}, {s.luck_bad}, {s.tower_atk}, {s.tower_def}, "
                 f"{s.def_vs_indirect}, {s.counter}, {s.capture}, {s.cost}, {'true' if s.move_cost_one else 'false'}, "
-                f"{s.income_bonus}, {s.air_fuel_per_day}, {s.repair_bonus}}},"
+                f"{s.income_bonus}, {s.air_fuel_per_day}, {s.repair_bonus}, {array(s.weather_as)}}},"
             )
         w("  }},")
     w("};")

@@ -8,10 +8,10 @@ C++, bound to Python with nanobind. It is for:
 
 See [PLAN.md](PLAN.md) for the design and milestones. Current status: **M1,
 the C++ rules engine**. Replay ingestion (M0) is done. The engine applies
-every action kind and runs the start of each turn; replaying the cached games
-turn by turn from their snapshots, it reproduces every checkable turn exactly
-but one (114,497 of 114,498, 2.01M actions). CO powers with immediate
-effects, and rain and snow, come next.
+every action kind, every CO power's immediate effects, rain and snow, and the
+start of each turn. Replaying the cached games turn by turn from their
+snapshots, it reproduces 197,481 of 197,503 checked turns exactly (3.53M
+actions); the 22 others are AWBW oddities listed in PLAN.md.
 
 ## Setup
 

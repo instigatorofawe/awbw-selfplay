@@ -100,11 +100,11 @@ TEST(State, DynamicTerrain) {
   const int seam = m.tile(0, 0), silo = m.tile(2, 0);
   EXPECT_EQ(s.prop_points[m.prop[seam]], kFullSeamHp);
   EXPECT_EQ(terrain_kind(m, s, seam), kSeam);
-  EXPECT_EQ(move_cost(m, s, seam, kMoveTread), 0);
+  EXPECT_EQ(move_cost(m, s, seam, kMoveTread, kClear), 0);
   s.prop_points[m.prop[seam]] = 0;  // broken
   EXPECT_EQ(terrain_kind(m, s, seam), kRubble);
   EXPECT_EQ(terrain_stars(m, s, seam), 1);
-  EXPECT_EQ(move_cost(m, s, seam, kMoveTread), 1);
+  EXPECT_EQ(move_cost(m, s, seam, kMoveTread, kClear), 1);
   EXPECT_EQ(terrain_kind(m, s, silo), kSilo);
   s.prop_points[m.prop[silo]] = 0;
   EXPECT_EQ(terrain_kind(m, s, silo), kSiloEmpty);

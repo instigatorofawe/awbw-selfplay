@@ -60,6 +60,8 @@ def parse_snapshots(text: bytes) -> Replay:
                 players=[PlayerState.from_php(p.fields) for p in _members(f["players"])],
                 buildings=[BuildingState.from_php(b.fields) for b in _members(f["buildings"])],
                 units=[UnitState.from_php(u.fields) for u in _members(f["units"])],
+                weather_start=int(f["weather_start"]) if f.get("weather_start") else None,
+                started=str(f.get("activity_date") or ""),
             )
         )
     if game is None:

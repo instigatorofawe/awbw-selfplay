@@ -201,11 +201,13 @@ class Turn:
 
     day: int
     player_id: int  # whose turn it is
-    weather: str  # weather code ("C" clear, ...)
+    weather: str  # weather code ("C" clear, "R" rain, "S" snow)
     players: list[PlayerState]
     buildings: list[BuildingState]
     units: list[UnitState]
     actions: list[dict] | None = None  # None when the log has no entry for this turn
+    weather_start: int | None = None  # player id whose power set the weather
+    started: str = ""  # activity_date: when the turn began, "YYYY-MM-DD HH:MM:SS" (AWBW server time)
 
 
 @dataclass(slots=True)
