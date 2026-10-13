@@ -54,9 +54,22 @@ int defense_value(const Combatant& def, const Combatant& att);
 // Terrain stars that count for `c`'s defense (0 for air units).
 int defense_stars(const Combatant& c);
 
+// Distribution of net luck (good roll minus bad roll) for `c`'s CO state:
+// value lo + i has probability weight[i] / total.
+struct Luck {
+  int lo = 0;
+  int n = 0;
+  int total = 0;
+  int weight[256];  // the first n are set
+};
+void luck_distribution(const Combatant& c, Luck& luck);
+
 // Damage in internal HP that `att` deals to `def` with a given net luck roll
 // (good roll minus bad roll). `counter` applies counterattack multipliers.
 int damage(const Combatant& att, const Combatant& def, int luck, bool counter);
+// damage() for every luck value of `luck`: out[i] for luck lo + i (luck.n values).
+void luck_damages(const Combatant& att, const Combatant& def, bool counter, const Luck& luck,
+                  int* out);
 
 struct Outcome {
   uint8_t att_hp;  // attacker internal HP afterwards; 0 = destroyed

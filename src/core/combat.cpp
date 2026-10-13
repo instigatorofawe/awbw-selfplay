@@ -13,27 +13,6 @@ bool is_air(int type) {
   return cls == kCopter || cls == kPlane;
 }
 
-// Distribution of net luck (good roll minus bad roll) for a CO state: value
-// lo + i has probability weight[i] / total.
-struct Luck {
-  int lo = 0;
-  int n = 0;
-  int total = 0;
-  int weight[256] = {};
-};
-
-void luck_distribution(const Combatant& c, Luck& luck) {
-  const CoStateSpec& s = co_state(c);
-  const int good = s.luck_good, bad = s.luck_bad;
-  luck.lo = -bad;
-  luck.n = good + bad + 1;
-  luck.total = (good + 1) * (bad + 1);
-  std::fill(luck.weight, luck.weight + luck.n, 0);
-  for (int g = 0; g <= good; ++g) {
-    for (int b = 0; b <= bad; ++b) ++luck.weight[g - b + bad];
-  }
-}
-
 bool can_find(int att_type, const Combatant& def) {
   if (!def.hidden) return true;
   if (def.type == kStealth) return att_type == kFighter || att_type == kStealth;
@@ -47,6 +26,18 @@ int roll_luck(const Combatant& c, uint64_t (&rng)[2]) {
 }
 
 }  // namespace
+
+void luck_distribution(const Combatant& c, Luck& luck) {
+  const CoStateSpec& s = co_state(c);
+  const int good = s.luck_good, bad = s.luck_bad;
+  luck.lo = -bad;
+  luck.n = good + bad + 1;
+  luck.total = (good + 1) * (bad + 1);
+  std::fill(luck.weight, luck.weight + luck.n, 0);
+  for (int g = 0; g <= good; ++g) {
+    for (int b = 0; b <= bad; ++b) ++luck.weight[g - b + bad];
+  }
+}
 
 // Only direct units counterattack, and only against adjacent attackers.
 bool can_counter(const Combatant& def, const Combatant& att, int dist) {
@@ -97,9 +88,19 @@ int defense_value(const Combatant& def, const Combatant& att) {
   return v;
 }
 
-int damage(const Combatant& att, const Combatant& def, int luck, bool counter) {
+namespace {
+
+// The damage formula's parts that don't depend on luck.
+struct Strike {
+  bool hits = false;
+  int64_t offense = 0;  // B * ATK; luck adds 100 per point
+  int64_t scale = 0;    // attacker's displayed HP * (200 - (DEF + stars * defender's displayed HP))
+};
+
+Strike strike(const Combatant& att, const Combatant& def, bool counter) {
+  Strike s;
   const Weapon w = choose_weapon(att, def.type);
-  if (w == kNoWeapon) return 0;
+  if (w == kNoWeapon) return s;
   const int base = (w == kPrimaryWeapon ? kPrimaryDamage : kSecondaryDamage)[att.type][def.type];
   // awbw.fandom.com/wiki/Damage_Formula, with displayed HPs:
   //   raw = (B * ATK / 100 + luck) * (attacker HP / 10) * (200 - (DEF + stars * defender HP)) / 100
@@ -109,11 +110,30 @@ int damage(const Combatant& att, const Combatant& def, int luck, bool counter) {
   // A counterattack bonus (Sonja, Kanbei's SCOP) adds to the attack value; it
   // doesn't scale luck (checked against internal HPs in replays).
   const int atk = attack_value(att, def) + (counter ? co_state(att).counter - 100 : 0);
-  const int64_t offense = int64_t{base} * atk + 100 * int64_t{luck};
   const int64_t defense = 200 - defense_value(def, att) - defense_stars(def) * displayed_hp(def.hp);
-  if (offense <= 0 || defense <= 0) return 0;
-  const int64_t n = offense * displayed_hp(att.hp) * defense;
-  return static_cast<int>(std::min<int64_t>((n + 5000) / 100000, 255));
+  if (defense <= 0) return s;
+  s.hits = true;
+  s.offense = int64_t{base} * atk;
+  s.scale = displayed_hp(att.hp) * defense;
+  return s;
+}
+
+int strike_damage(const Strike& s, int luck) {
+  const int64_t offense = s.offense + 100 * int64_t{luck};
+  if (!s.hits || offense <= 0) return 0;
+  return static_cast<int>(std::min<int64_t>((offense * s.scale + 5000) / 100000, 255));
+}
+
+}  // namespace
+
+int damage(const Combatant& att, const Combatant& def, int luck, bool counter) {
+  return strike_damage(strike(att, def, counter), luck);
+}
+
+void luck_damages(const Combatant& att, const Combatant& def, bool counter, const Luck& luck,
+                  int* out) {
+  const Strike s = strike(att, def, counter);
+  for (int i = 0; i < luck.n; ++i) out[i] = strike_damage(s, luck.lo + i);
 }
 
 bool combat_outcomes(const Combatant& att, const Combatant& def, int dist,
@@ -137,13 +157,14 @@ bool combat_outcomes(const Combatant& att, const Combatant& def, int dist,
 
   // Damage is monotone in luck, so equal results from the first strike are
   // contiguous: group them, then expand each group by the reply's luck.
+  int da[256], db[256];
+  luck_damages(a, b, a_counter, la, da);
   int i = 0;
   while (i < la.n) {
-    const int b_hp = std::max(0, b.hp - damage(a, b, la.lo + i, a_counter));
+    const int b_hp = std::max(0, b.hp - da[i]);
     int weight = 0;
     int j = i;
-    while (j < la.n && std::max(0, b.hp - damage(a, b, la.lo + j, a_counter)) == b_hp)
-      weight += la.weight[j++];
+    while (j < la.n && std::max(0, b.hp - da[j]) == b_hp) weight += la.weight[j++];
     const double p = static_cast<double>(weight) / la.total;
     i = j;
     if (b_hp == 0 || !b_counters) {
@@ -153,13 +174,13 @@ bool combat_outcomes(const Combatant& att, const Combatant& def, int dist,
     }
     Combatant b2 = b;
     b2.hp = static_cast<uint8_t>(b_hp);
+    luck_damages(b2, a, b_counter, lb, db);
     int k = 0;
     while (k < lb.n) {
-      const int a_hp = std::max(0, a.hp - damage(b2, a, lb.lo + k, b_counter));
+      const int a_hp = std::max(0, a.hp - db[k]);
       int w2 = 0;
       int m = k;
-      while (m < lb.n && std::max(0, a.hp - damage(b2, a, lb.lo + m, b_counter)) == a_hp)
-        w2 += lb.weight[m++];
+      while (m < lb.n && std::max(0, a.hp - db[m]) == a_hp) w2 += lb.weight[m++];
       k = m;
       const double q = p * w2 / lb.total;
       out.push_back(first_is_def

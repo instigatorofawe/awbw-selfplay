@@ -33,6 +33,7 @@ endif()
 # Engine core: plain C++20, no Python dependency.
 add_library(awbw_core STATIC
   src/core/actions.cpp
+  src/core/belief.cpp
   src/core/combat.cpp
   src/core/encode.cpp
   src/core/map.cpp
@@ -88,6 +89,7 @@ if(AWBW_BUILD_TESTS)
   enable_testing()
   add_executable(awbw_tests
     tests/cpp/test_actions.cpp
+    tests/cpp/test_belief.cpp
     tests/cpp/test_combat.cpp
     tests/cpp/test_encode.cpp
     tests/cpp/test_map.cpp

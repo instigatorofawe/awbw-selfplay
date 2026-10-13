@@ -16,6 +16,10 @@ is reported at once.
 
 Turns are skipped while the engine lacks the rules they need: rain and snow
 move costs, and CO powers with immediate effects.
+
+``step_turn`` runs the same check from a given start state, to carry the
+engine's HP beliefs (what watching every turn tells players) into the next
+snapshot.
 """
 
 from __future__ import annotations
@@ -176,6 +180,8 @@ class _TurnStepper:
         self.next_player = self.index[nxt.player_id] if nxt is not None else -1
         # Missile aims by action index (the last search branch to pass a power overwrites).
         self.aims: dict[int, tuple[str, int, int]] = {}
+        # Each unit's (internal HP, HP belief) at the end of a turn that matched, by AWBW id.
+        self.end_beliefs: dict[int, tuple[int, list[int]]] | None = None
 
     # -- log -> steps ------------------------------------------------------
 
@@ -288,8 +294,9 @@ class _TurnStepper:
 
     # -- search ------------------------------------------------------------
 
-    def run(self) -> None:
-        state = engine.state_from_turn(self.replay, self.turn, self.md)
+    def run(self, start: _core.GameState | None = None) -> None:
+        """Step the turn from ``start`` (default: its snapshot); raises Diverged or _Skip."""
+        state = start.copy() if start is not None else engine.state_from_turn(self.replay, self.turn, self.md)
         self._run(0, state, {}, {}, _Ctx())
 
     def _run(self, i: int, state, alias: dict[int, int], deps: dict[int, frozenset[int]], ctx: _Ctx) -> None:
@@ -633,6 +640,10 @@ class _TurnStepper:
             self._expect(f"unit flags: {name}", (uid, g[8] & _FLAGS), (uid, w[8] & _FLAGS), n)
             cargo = tuple(awbw_id.get(c, c) for c in g[9:11])
             self._expect(f"unit cargo: {name}", (uid, cargo), (uid, tuple(w[9:11])), n)
+        self.end_beliefs = {
+            awbw_id.get(r[0], r[0]): (r[5], state.hp_belief(slot))
+            for r, slot in zip(state.unit_rows(), state.unit_slots(), strict=True)
+        }
 
 
 class _Skip(Exception):
@@ -675,6 +686,37 @@ def check_turns(replay: Replay, md: _core.MapData) -> list[tuple[TurnCheck, int]
                 res.category = f"snapshot: {e}"
         out.append((res, n))
     return out
+
+
+def step_turn(
+    replay: Replay, md: _core.MapData, k: int, start: _core.GameState
+) -> tuple[_core.GameState, dict[int, tuple[int, list[int]]] | None, str]:
+    """Step turn ``k`` of a replay from ``start`` (its snapshot, with HP beliefs) and
+    check it against turn ``k + 1``'s snapshot.
+
+    Returns that snapshot's state; each unit's internal HP and HP belief at the
+    end of turn ``k`` by AWBW unit id, or None if the turn couldn't be stepped
+    or didn't match; and why not ("" if it matched). Raises ValueError if the
+    next snapshot can't be loaded.
+    """
+    turn, nxt = replay.turns[k], replay.turns[k + 1]
+    order = replay.player_ids
+    j = (order.index(turn.player_id) + 1) % len(order)
+    stepper = _TurnStepper(replay, md, turn, nxt)
+    assert stepper.expected is not None
+    if turn.actions is None:
+        return stepper.expected, None, "no actions logged"
+    if (nxt.day, nxt.player_id) != (turn.day + (j == 0), order[j]):
+        return stepper.expected, None, "next snapshot missing"
+    try:
+        stepper.run(start)
+    except _Skip as e:
+        return stepper.expected, None, str(e)
+    except Diverged as e:
+        return stepper.expected, None, e.category
+    except (KeyError, TypeError, ValueError, IndexError) as e:  # a log entry missing what the checker reads
+        return stepper.expected, None, f"unreadable log ({type(e).__name__})"
+    return stepper.expected, stepper.end_beliefs, ""
 
 
 def check_file(path: Path) -> StepReport:

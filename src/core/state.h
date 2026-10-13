@@ -15,6 +15,8 @@ inline constexpr uint8_t kNoOwner = 0xFF;
 inline constexpr uint8_t kDraw = 2;  // GameState::winner
 inline constexpr int kFullCapture = 20;
 inline constexpr int kFullSeamHp = 99;
+// Internal HPs that share a displayed HP (see GameState::hp_belief).
+inline constexpr int kHpBins = 10;
 
 enum UnitFlag : uint8_t {
   kMoved = 1,       // has acted this turn
@@ -88,6 +90,11 @@ struct GameState {
   // into rubble), 1/0 for a loaded/fired silo.
   uint8_t prop_owner[kMaxProps];
   uint8_t prop_points[kMaxProps];
+  // What a player who watched every turn knows of each unit's internal HP:
+  // players see only displayed HP, so hp_belief[slot][k] (0..255, the most
+  // likely 255) weighs internal HP 10 * (displayed - 1) + 1 + k. Never 0 at
+  // the unit's own HP. The engine keeps it up to date (core/belief.h).
+  uint8_t hp_belief[kMaxUnits][kHpBins];
   uint64_t rng[2];
 };
 static_assert(std::is_trivially_copyable_v<GameState>);
@@ -98,7 +105,8 @@ void init_state(const MapData& map, GameState& s);
 
 // Lowest free slot, or -1 if the state holds kMaxUnits units.
 int alloc_unit(const GameState& s);
-// Put a new uncarried unit on an empty tile. Returns its slot, or -1.
+// Put a new uncarried unit on an empty tile, its HP known to both players.
+// Returns its slot, or -1.
 int add_unit(GameState& s, const Unit& u);
 // Remove a unit and everything it carries.
 void remove_unit(GameState& s, int slot);

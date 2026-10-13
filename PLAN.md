@@ -65,7 +65,7 @@ C++ releases the GIL for all heavy work.
 
 ### Dynamic: `GameState`, POD with no pointers
 
-`src/core/state.h`; 4,000 bytes.
+`src/core/state.h`; 5,280 bytes.
 
 ```cpp
 struct Unit {                 // 16 bytes
@@ -104,6 +104,7 @@ struct GameState {
   uint8_t  unit_at[kMaxTiles];             // occupancy grid; check_state() verifies it
   uint8_t  prop_owner[kMaxProps];          // 128; player index or none
   uint8_t  prop_points[kMaxProps];         // capture points / seam HP / silo loaded
+  uint8_t  hp_belief[kMaxUnits][10];       // what players know of each internal HP (below)
   uint64_t rng[2];            // luck RNG lives in the state
 };
 static_assert(std::is_trivially_copyable_v<GameState>);
@@ -114,6 +115,11 @@ static_assert(std::is_trivially_copyable_v<GameState>);
   has 72).
 - **Dynamic terrain:** a seam at 0 HP is pipe rubble and a fired silo is
   empty; `terrain_kind` / `terrain_stars` / `move_cost` read the state.
+- **HP beliefs** (`src/core/belief.h`): players see only displayed HP, so
+  each unit also carries the posterior over the 10 internal HPs its display
+  allows, as weights 0–255 (the likeliest 255, never 0 at the true HP;
+  `check_state` enforces it). The engine updates it wherever HP changes,
+  so self-play and search keep it for free; see §6.
 - **Zobrist hash:** not yet; added for the transposition table (§8).
 
 - **Cloning:** a memcpy (35 ns).
@@ -462,11 +468,17 @@ static_assert(std::is_trivially_copyable_v<GameState>);
      - a city whose capture points drop to 0 with no capture logged;
      - three turns whose fight results take more tries than the search budget.
 7. **Extract samples** (`awbw.replay.extract`):
-   - **v0 (`awbw dataset`; needs only snapshots, not engine stepping):**
-     the state at the start of every turn, labelled with the result for
-     the player to move. On the 20,576 replays cached on 2026-10-13: 17,108
-     games pass the filter, giving 520,297 samples (124 MB, built in 70 s on
-     12 cores). No game is a draw; the first mover wins 49%.
+   - **v0 (`awbw dataset`):** the state at the start of every turn,
+     labelled with the result for the player to move. On the 20,576 replays
+     cached on 2026-10-13: 17,108 games pass the filter, giving 520,297
+     samples. No game is a draw; the first mover wins 49%.
+     - **HP beliefs:** each state is the turn's snapshot, but its units'
+       HP beliefs (§6) come from the engine stepping through every turn
+       before, as `check-turns` does (`step_check.step_turn`), carried to
+       the next snapshot by unit id. A turn the engine can't step (76 of
+       520k, the known oddities below) leaves each unit whose HP changed
+       knowing only its display (625 units). Built in 109 s on 12 cores
+       (70 s from snapshots alone).
    - Ratings come from the mooo index, which lists players in turn order:
      its loser matched the replay's `GameOver` in all 17,108 games.
    - **v1 (verified replays only):** every idle-phase state + outcome, plus
@@ -514,7 +526,7 @@ static_assert(std::is_trivially_copyable_v<GameState>);
 Shipping C×H×W float32 one-hots per leaf is too heavy: about 600 KB per leaf
 at 40×40, around 600 MB per batch of 1024. Instead:
 
-`src/core/encode.h` (version 2), `encode_batch` in Python. Everything is
+`src/core/encode.h` (version 3), `encode_batch` in Python. Everything is
 from the side of the player to move ("me"), with owners relative, and `me`
 knows what a player who watched every turn knows:
 
@@ -524,15 +536,47 @@ knows what a player who watched every turn knows:
   as AWBW's game page does: both players saw them built.
 - Cargo shows with its transport. AWBW doesn't show what's in an enemy
   transport, but every load happened in plain sight.
-- **HP (to come, encoder v3):** players see only displayed HP (1–10), their
-  own units' too. Power meters and Sasha's War Bonds funds count displayed
-  HP, so nothing leaks the rest. Damage depends only on displayed
-  HPs and luck, so someone who watched every fight can keep each unit's
-  posterior over the 10 internal HPs its display allows, and the posteriors
-  of different units stay independent. The encoder should give that
-  posterior instead of the internal HP; v2 still gives the internal HP.
+- **HP is what players know (encoder v3):** players see only displayed HP
+  (1–10), their own units' too. Power meters, Sasha's War Bonds and the
+  army value count displayed HP, so nothing gives the rest away. Damage
+  depends only on the displayed HPs and luck, so someone who watched every
+  fight knows each unit's internal HP as a posterior over the 10 values
+  its display allows, and different units' posteriors are independent.
+  `GameState::hp_belief` keeps it (`src/core/belief.h`):
+  - builds, Sensei's footsoldiers and joins have a known HP (a join sets
+    10 × the summed display);
+  - heals, repairs and the damage of powers, bombs and silos shift it by a
+    seen amount, clamped to 1–100 (a clamp piles it onto 1 or 100);
+  - a strike conditions it on the display seen afterwards, by Bayes' rule
+    over the attacker's luck rolls; the counterattack is a second strike
+    at the defender's new display. Weights are rescaled to a top of 255,
+    and anything possible keeps at least 1.
+  - Tested against brute force (every pair of internal HPs through
+    `combat_outcomes`, including Sonja's Counter Break and Nell's and
+    Flak's luck), and on replays: over 322,740 (unit, internal HP) pairs
+    with a spread-out belief, the probability given to the true HP
+    (from the next snapshot) is calibrated, e.g. 0.137 predicted vs 0.137
+    seen, 0.334 vs 0.341, 0.512 vs 0.506. In 60 recent games 24% of units
+    are not known to be at full HP; for those, the posterior mean is off
+    by 0.98 internal HP on average, against 2.79 for the middle of the
+    display.
+  - Left out: AWBW aims Rachel's and Von Bolt's missiles by internal HP,
+    so where they land hints at the HPs around them.
+  - **Sonja hides her units' HP from her opponent** (they show "?"); the
+    belief treats it as seen. Power meters give most of it back: a fight
+    charges each player's meter by the displayed HP lost (× cost) unless
+    that player's power is on or the meter is full, so the opponent can
+    read the Sonja unit's displayed drop. Once a display is known,
+    repairs, joins and powers move it in plain sight (funds and the rules
+    are public). Over 15,174 fights with a Sonja unit in 150 games, 2,063
+    (13.6%) moved neither meter. To do: an opponent-side belief over the
+    display of Sonja's units, narrowed by meters, counterattack damage,
+    capture points and repair costs.
+  - The live tool can't yet step a game's history, so a live unit below
+    10 knows only its display (every internal HP behind it equally
+    likely).
 
-- **11 `uint8` planes `[11, H, W]`** (11 KB per state at 32×32). `PLANES`
+- **21 `uint8` planes `[21, H, W]`** (21 KB per state at 32×32). `PLANES`
   gives each one's name, number of values and whether it is an index to
   embed or a quantity:
   - `terrain` (index): 0 off the board, else the terrain kind now (broken
@@ -540,9 +584,11 @@ knows what a player who watched every turn knows:
     67 values
   - `points` (quantity): capture points left (20 untouched), pipe seam HP
   - `unit` (index): type joined with owner, 51 values
-  - `hp` (internal 1..100), `fuel`, `ammo` (quantities); `flags` (index:
-    moved, hidden, stunned, capturing)
-  - `cargo1`, `cargo2` (index: type), `cargo1_hp`, `cargo2_hp`
+  - `hp` (displayed 1..10), `hp_p0`..`hp_p9` (255 × the probability that
+    the internal HP is 10 × (displayed − 1) + 1 + k), `fuel`, `ammo`
+    (quantities); `flags` (index: moved, hidden, stunned, capturing)
+  - `cargo1`, `cargo2` (index: type), `cargo1_hp`, `cargo2_hp` (expected
+    internal HP, rounded)
   - To come with the policy: the pending selection and reachable /
     attackable masks.
 - **104 globals (`float32`)**, named in `GLOBAL_NAMES`: for me, then the
@@ -612,7 +658,14 @@ knows what a player who watched every turn knows:
   | coin flip | 0.693 | | | | | | | |
   | logistic regression on the 104 globals | 0.550 | 0.690 | 0.682 | 0.632 | 0.500 | 0.344 | 0.269 | 0.212 |
   | critic without pre-norm, 2 epochs | 0.542 | 0.691 | 0.683 | 0.628 | 0.482 | 0.321 | 0.255 | 0.203 |
-  | critic, 2 epochs (default) | **0.532** | 0.689 | 0.678 | 0.616 | 0.463 | 0.300 | 0.248 | 0.199 |
+  | critic, 2 epochs (default; encoder v2, exact HP) | **0.532** | 0.689 | 0.678 | 0.616 | 0.463 | 0.300 | 0.248 | 0.199 |
+  | critic, 2 epochs, encoder v3 (HP beliefs) | 0.533 | 0.691 | 0.682 | 0.619 | 0.462 | 0.298 | 0.243 | 0.201 |
+
+  - **Encoder v3** gives the critic what players know of HP (§6) instead of
+    the exact HP: 0.533 against 0.532 on the same games (accuracy 68.8%,
+    Brier 0.184, calibration error 0.016), about seed noise. Exact HP was
+    worth almost nothing to it, so the v3 critic loses little by not
+    seeing what players can't.
 
   - Accuracy 68.9%, Brier 0.184, calibration error 0.012 (without
     pre-norm: 68.3%, 0.187, 0.022, slightly under-confident at the

@@ -48,7 +48,9 @@ def test_planes_and_globals_from_each_side(md):
     unit = PLANE["unit"]
     assert mine[unit, 1, 1] == 1 + U["Tank"] and mine[unit, 0, 3] == 1 + len(U) + U["Infantry"]
     assert theirs[unit, 1, 1] == 1 + len(U) + U["Tank"] and theirs[unit, 0, 3] == 1 + U["Infantry"]
-    assert mine[PLANE["hp"], 1, 1] == 73 and mine[PLANE["fuel"], 1, 1] == 50
+    assert mine[PLANE["hp"], 1, 1] == 8 and mine[PLANE["fuel"], 1, 1] == 50  # displayed HP
+    probs = [mine[PLANE[f"hp_p{k}"], 1, 1] for k in range(_core.HP_BINS)]
+    assert probs == [0, 0, 255, 0, 0, 0, 0, 0, 0, 0]  # a snapshot's HP is known: 7.3
     terrain = PLANE["terrain"]
     assert mine[terrain, 0, 0] == 1 + KIND["hq"] + N_KINDS  # my HQ
     assert theirs[terrain, 0, 0] == 1 + KIND["hq"] + 2 * N_KINDS
@@ -58,6 +60,19 @@ def test_planes_and_globals_from_each_side(md):
     assert g[0, GLOBAL["me.funds"]] == pytest.approx(0.3) and g[1, GLOBAL["me.funds"]] == pytest.approx(0.8)
     assert g[0, GLOBAL["opp.co.Max"]] == 1 and g[1, GLOBAL["me.co.Max"]] == 1
     assert g[0, GLOBAL["moved_first"]] == 1 and g[1, GLOBAL["moved_first"]] == 0
+
+
+def test_hp_belief_gives_the_hp_planes(md):
+    s = state(md)
+    tank = s.unit_at(1, 1)
+    assert s.hp_belief(tank) == [0, 0, 255, 0, 0, 0, 0, 0, 0, 0]
+    s.set_hp_belief(tank, [0, 85, 255, 0, 0, 0, 0, 0, 0, 0])  # 7.2 or, three times as likely, 7.3
+    (planes,), _ = encode(rows(s), 8)
+    assert [planes[PLANE[f"hp_p{k}"], 1, 1] for k in range(3)] == [0, 64, 191]
+    with pytest.raises(ValueError, match="rules out"):
+        s.set_hp_belief(tank, [0, 255] + [0] * 8)
+    s.set_hp_unknown(tank)
+    assert s.hp_belief(tank) == [255] * 10
 
 
 def test_bad_inputs_raise(md):

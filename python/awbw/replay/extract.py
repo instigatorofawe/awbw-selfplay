@@ -1,8 +1,10 @@
 """Training samples from replays.
 
-v0 is one sample per turn: the state at the start of the turn (a snapshot,
-so it needs no engine stepping), labelled with the game's result from the
-side of the player to move.
+v0 is one sample per turn: the state at the start of the turn, labelled with
+the game's result from the side of the player to move. The state is the
+turn's snapshot, with each unit's HP belief (what a player who watched every
+turn knows of its internal HP; see ``core/belief.h``) carried over from the
+engine stepping through the turns before, as ``check-turns`` does.
 """
 
 from __future__ import annotations
@@ -12,9 +14,10 @@ from pathlib import Path
 
 import numpy as np
 
-from .. import engine
+from .. import _core, engine
 from .parse import ReplayFormatError, load_replay
 from .stats import summarize_replay, v1_rejection
+from .step_check import step_turn
 
 DRAW = 2  # GameSamples.winner when nobody won
 
@@ -30,6 +33,10 @@ class GameSamples:
     states: np.ndarray  # uint8 [turns, STATE_BYTES]: each turn's starting state, in order
     to_play: np.ndarray  # uint8 [turns]: player to move in each state
     day: np.ndarray  # int16 [turns]
+    # Turns the engine couldn't step (see step_turn), and the units after them whose
+    # beliefs had to restart knowing only their displayed HP.
+    unstepped: int = 0
+    hp_unknown: int = 0
 
     @property
     def outcome(self) -> np.ndarray:
@@ -53,16 +60,26 @@ def extract_v0(path: str | Path) -> GameSamples | str:
     winners = [order[p] for p in over.winners if p in order]
     md = engine.map_data(r.game.map_id)
     rows, to_play, day = [], [], []
-    for turn in r.turns:
-        try:
-            s = engine.state_from_turn(r, turn, md)
-        except ValueError:
-            return "snapshot rejected"
+    unstepped = hp_unknown = 0
+    try:
+        s = engine.state_from_turn(r, r.turns[0], md)
+    except ValueError:
+        return "snapshot rejected"
+    for k in range(len(r.turns)):
         if s.check():
             return "snapshot rejected"
         rows.append(np.frombuffer(s.to_bytes(), np.uint8))
         to_play.append(s.active)
         day.append(s.day)
+        if k + 1 == len(r.turns):
+            break
+        try:
+            nxt, beliefs, why = step_turn(r, md, k, s)
+        except ValueError:
+            return "snapshot rejected"
+        unstepped += bool(why)
+        hp_unknown += carry_beliefs(nxt, beliefs, s)
+        s = nxt
     by_order = sorted(r.turns[0].players, key=lambda p: p.order)
     return GameSamples(
         game_id=r.game.id,
@@ -74,4 +91,31 @@ def extract_v0(path: str | Path) -> GameSamples | str:
         states=np.stack(rows),
         to_play=np.array(to_play, dtype=np.uint8),
         day=np.array(day, dtype=np.int16),
+        unstepped=unstepped,
+        hp_unknown=hp_unknown,
     )
+
+
+def carry_beliefs(
+    state: _core.GameState, beliefs: dict[int, tuple[int, list[int]]] | None, before: _core.GameState
+) -> int:
+    """Give each unit of ``state`` (a turn's snapshot) its HP belief from the end of the
+    turn before, ``beliefs`` (by AWBW unit id, from step_turn).
+
+    Without them (that turn couldn't be stepped), a unit keeps its belief from
+    ``before`` (the previous turn's start) if its HP is unchanged; a new unit at
+    full HP was built; any other unit knows only its displayed HP. Returns how
+    many units that leaves knowing only their display.
+    """
+    if beliefs is None:
+        beliefs = {before.unit(slot).id: (before.unit(slot).hp, before.hp_belief(slot)) for slot in before.unit_slots()}
+    unknown = 0
+    for slot in state.unit_slots():
+        u = state.unit(slot)
+        hp, w = beliefs.get(u.id, (-1, []))
+        if hp == u.hp:
+            state.set_hp_belief(slot, w)
+        elif u.id in beliefs or u.hp < 100:
+            state.set_hp_unknown(slot)
+            unknown += 1
+    return unknown

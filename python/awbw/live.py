@@ -10,7 +10,10 @@ A spectator is shown less than a replay records:
 
 * HP is the displayed 1-10, not the exact value. A unit showing d gets 10d - 4,
   about the average exact HP behind that display in replays, or 100 for a 10.
-  Sonja's units show "?" outside her team and count as full.
+  Below 10 its HP belief (what the critic reads) allows every internal HP
+  behind the display equally; a player who watched every fight would know
+  more, as the replay datasets do, but stepping a live game's history isn't
+  done yet. Sonja's units show "?" outside her team and count as full.
 * Hidden Subs and Stealths are left out unless the other player can see them,
   but each player's unit count and army value include them. Each one left out
   is put back, hidden, on a tile out of the other player's sight, with the HP
@@ -215,6 +218,7 @@ class LiveTurn:
     unplaced: Counter[tuple[int, str]] = field(default_factory=Counter)  # (player id, unit) left out, not put back
     estimated_hp: int = 0  # damaged units whose HP comes from the displayed HP
     unknown_hp: int = 0  # units whose HP is hidden (Sonja), counted as full
+    display_only: set[int] = field(default_factory=set)  # ids of units known only by their displayed HP
 
 
 def hp_from_display(shown: Any) -> int | None:
@@ -348,6 +352,8 @@ def _put_back_hidden(lt: LiveTurn, counts: dict[str, Any], info: MapInfo, hp_kno
             next_id += 1
             units.append(u)
             lt.put_back.append(u)
+            if hp < 100:
+                lt.display_only.add(u.id)
 
 
 def live_turn(index: int, data: dict[str, Any], info: MapInfo) -> LiveTurn:
@@ -357,7 +363,7 @@ def live_turn(index: int, data: dict[str, Any], info: MapInfo) -> LiveTurn:
     buildings = [
         BuildingState.from_php(_strip(b, "buildings_")) for column in gs["buildings"].values() for b in column.values()
     ]
-    units, estimated, unknown, hp_known = [], 0, 0, {}
+    units, estimated, unknown, hp_known, display_only = [], 0, 0, {}, set()
     for raw in gs["units"].values() if isinstance(gs["units"], dict) else ():  # [] when there are none
         f = _strip(raw, "units_")
         hp = hp_from_display(f["hit_points"])
@@ -366,6 +372,7 @@ def live_turn(index: int, data: dict[str, Any], info: MapInfo) -> LiveTurn:
             hp_known[int(f["players_id"])] = False
         elif hp < 100 and float(f["hit_points"]).is_integer():
             estimated += 1
+            display_only.add(int(f["id"]))
         units.append(UnitState.from_php(f | {"hit_points": hp / 10}))
     weather = str(gs["gameWeather"]["code"])
     turn = Turn(
@@ -377,7 +384,7 @@ def live_turn(index: int, data: dict[str, Any], info: MapInfo) -> LiveTurn:
         units=units,
         weather_start=_weather_owner(weather, players),
     )
-    lt = LiveTurn(index=index, turn=turn, estimated_hp=estimated, unknown_hp=unknown)
+    lt = LiveTurn(index=index, turn=turn, estimated_hp=estimated, unknown_hp=unknown, display_only=display_only)
     _put_back_hidden(lt, gs.get("players_units_count") or {}, info, hp_known)
     return lt
 
@@ -386,6 +393,9 @@ def state(game: LiveGame, lt: LiveTurn) -> _core.GameState:
     """The engine state at the start of a live turn."""
     md = engine.map_data(game.game.map_id)
     s = engine.state_from_turn(Replay(game.game, [lt.turn]), lt.turn, md, game.settings())
+    for slot in s.unit_slots():
+        if s.unit(slot).id in lt.display_only:
+            s.set_hp_unknown(slot)
     if problem := s.check():
         raise LiveUnavailable(f"game {game.game.id} turn {lt.index}: the engine rejects the state ({problem})")
     return s

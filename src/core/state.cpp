@@ -2,6 +2,8 @@
 
 #include <cstring>
 
+#include "core/belief.h"
+
 namespace awbw {
 
 void init_state(const MapData& map, GameState& s) {
@@ -44,6 +46,7 @@ int add_unit(GameState& s, const Unit& u) {
   if (n.id == 0) n.id = s.next_id;
   if (n.id >= s.next_id) s.next_id = n.id + 1;
   s.unit_at[n.tile] = static_cast<uint8_t>(slot);
+  belief_exact(s, slot);
   return slot;
 }
 
@@ -62,6 +65,7 @@ void remove_unit(GameState& s, int slot) {
   }
   std::memset(&u, 0, sizeof u);
   u.cargo[0] = u.cargo[1] = u.carrier = kNoUnit;
+  std::memset(s.hp_belief[slot], 0, kHpBins);
 }
 
 void relocate_unit(GameState& s, int slot, int tile) {
@@ -168,6 +172,8 @@ std::string check_state(const MapData& m, const GameState& s) {
     if (u.type >= kNumUnitTypes) return unit_msg(i, "bad type");
     if (u.owner >= kMaxPlayers) return unit_msg(i, "bad owner");
     if (u.hp < 1 || u.hp > 100) return unit_msg(i, "HP out of range");
+    if (s.hp_belief[i][u.hp - hp_bin_base(u.hp)] == 0)
+      return unit_msg(i, "HP belief rules out its HP");
     if (u.tile >= m.n_tiles) return unit_msg(i, "off the map");
     const UnitSpec& spec = kUnits[u.type];
     if (u.fuel > spec.fuel) return unit_msg(i, "fuel above max");

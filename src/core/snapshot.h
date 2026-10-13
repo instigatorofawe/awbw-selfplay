@@ -52,8 +52,10 @@ struct Snapshot {
 };
 
 // Build a GameState from a snapshot. Units are placed in id order, so slot
-// order is creation order. Returns false with a message in `error` if the
-// snapshot does not fit the map or the engine's limits.
+// order is creation order, and every unit's HP is known exactly (snapshots give
+// internal HP; see belief.h for what players know). Returns false with a
+// message in `error` if the snapshot does not fit the map or the engine's
+// limits.
 bool load_snapshot(const MapData& m, const Snapshot& snap, GameState& s, std::string& error);
 
 }  // namespace awbw

@@ -408,11 +408,14 @@ def _dataset(args, http: Http) -> int:
     rejected: Counter = Counter()
     ratings_seen: Counter = Counter()
     ends: Counter = Counter()
+    unstepped = hp_unknown = 0
     with ProcessPoolExecutor(args.workers) as pool:
         for n, g in enumerate(pool.map(extract_v0, paths, chunksize=16), 1):
             if isinstance(g, str):
                 rejected[g] += 1
             else:
+                unstepped += g.unstepped
+                hp_unknown += g.hp_unknown
                 ratings = (UNKNOWN_RATING, UNKNOWN_RATING)
                 if (entry := index.get(g.game_id)) is None:
                     ratings_seen["not in an index"] += 1
@@ -426,7 +429,9 @@ def _dataset(args, http: Http) -> int:
             if n % 2000 == 0:
                 print(f"[{n}/{len(paths)}] kept {n - rejected.total()}", file=sys.stderr)
     meta = writer.close(
-        kind="v0: the state at the start of every turn, labelled with the result",
+        kind="v0: the state at the start of every turn, labelled with the result; HP beliefs from stepping every turn",
+        unstepped_turns=unstepped,
+        hp_beliefs_reset=hp_unknown,
         built=datetime.date.today().isoformat(),
         replays=len(paths),
         min_days=MIN_DAYS,
@@ -439,6 +444,7 @@ def _dataset(args, http: Http) -> int:
     print(f"{meta['games']} games, {meta['samples']} samples in {shards} shards ({size / 1e6:.0f} MB) -> {out}")
     print(f"rejected: {meta['rejected']}")
     print(f"ratings: {meta['ratings']}; ended by: {meta['ended_by']}")
+    print(f"turns the engine couldn't step: {unstepped}; HP beliefs restarted after them: {hp_unknown}")
     return 0
 
 

@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "core/actions.h"
+#include "core/belief.h"
 #include "core/combat.h"
 #include "core/config.h"
 #include "core/encode.h"
@@ -181,6 +182,7 @@ NB_MODULE(_core, m) {
   m.attr("MAX_PLAYERS") = awbw::kMaxPlayers;
   m.attr("MAX_UNITS") = awbw::kMaxUnits;
   m.attr("MAX_PROPS") = awbw::kMaxProps;
+  m.attr("HP_BINS") = awbw::kHpBins;
   m.attr("STATE_BYTES") = sizeof(awbw::GameState);
   m.attr("NO_UNIT") = awbw::kNoUnit;
   m.attr("NO_OWNER") = awbw::kNoOwner;
@@ -341,6 +343,38 @@ NB_MODULE(_core, m) {
             return s.units[slot];
           },
           "slot"_a)
+      .def(
+          "hp_belief",
+          [](const awbw::GameState& s, int slot) {
+            check_slot(s, slot);
+            return std::vector<int>(s.hp_belief[slot], s.hp_belief[slot] + awbw::kHpBins);
+          },
+          "slot"_a,
+          "What a player who watched every turn knows of the unit's internal HP: HP_BINS\n"
+          "weights (0..255, the largest 255), the k-th for internal HP 10 * (displayed - 1) + 1 + "
+          "k.")
+      .def(
+          "set_hp_belief",
+          [](awbw::GameState& s, int slot, const std::vector<int>& w) {
+            check_slot(s, slot);
+            if (w.size() != awbw::kHpBins) throw nb::value_error("need HP_BINS weights");
+            const int hp = s.units[slot].hp;
+            for (int v : w) {
+              if (v < 0 || v > awbw::kBeliefMax) throw nb::value_error("weights run 0..255");
+            }
+            if (w[hp - awbw::hp_bin_base(hp)] == 0)
+              throw nb::value_error("the belief rules out the unit's own HP");
+            for (int k = 0; k < awbw::kHpBins; ++k)
+              s.hp_belief[slot][k] = static_cast<uint8_t>(w[k]);
+          },
+          "slot"_a, "weights"_a, "Replace the unit's HP belief (see hp_belief).")
+      .def(
+          "set_hp_unknown",
+          [](awbw::GameState& s, int slot) {
+            check_slot(s, slot);
+            awbw::belief_unknown(s, slot);
+          },
+          "slot"_a, "Make every internal HP the unit's display allows equally likely.")
       .def(
           "unit_slots",
           [](const awbw::GameState& s) {

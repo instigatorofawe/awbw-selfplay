@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <vector>
 
+#include "core/belief.h"
 #include "core/movegen.h"
 
 namespace awbw {
@@ -121,7 +122,7 @@ void destroy(const MapData& m, GameState& s, int slot) {
 }
 
 // Damage from powers, bombs and silos never destroys: units keep at least 1 HP.
-void hurt(Unit& u, int amount) { u.hp = static_cast<uint8_t>(std::max(1, u.hp - amount)); }
+void hurt(GameState& s, int slot, int amount) { change_hp(s, slot, -amount); }
 
 struct MovePlan {
   int n = 0;  // tiles on the path, the start included
@@ -247,6 +248,7 @@ Status fire(const MapData& m, GameState& s, const Action& a, const Detail& d, co
   if (ap.co == kCoSasha && ap.power_on == 2) ap.funds += static_cast<int32_t>(lost_def / 20);
   if (dp.co == kCoSasha && dp.power_on == 2) dp.funds += static_cast<int32_t>(lost_att / 20);
 
+  fight_beliefs(s, a.unit, ti, att, def, dist, o);
   u.hp = o.att_hp;
   t.hp = o.def_hp;
   u.flags |= kMoved;
@@ -321,6 +323,7 @@ Status join(const MapData& m, GameState& s, const Action& a, const MovePlan& mp)
   const int shown = displayed_hp(mover.hp) + displayed_hp(into.hp);
   if (shown > 10) s.players[into.owner].funds += (shown - 10) * kUnits[into.type].cost / 10;
   into.hp = static_cast<uint8_t>(10 * std::min(10, shown));  // displayed HPs add up
+  belief_exact(s, ti);
   into.fuel = static_cast<uint8_t>(std::min<int>(kUnits[into.type].fuel, mover.fuel + into.fuel));
   into.ammo = static_cast<uint8_t>(std::min<int>(kUnits[into.type].ammo, mover.ammo + into.ammo));
   into.flags |= kMoved;
@@ -384,7 +387,7 @@ Status repair(const MapData& m, GameState& s, const Action& a, const MovePlan& m
   const int hp = std::min(100, t.hp + 10);
   const int price = (displayed_hp(hp) - displayed_hp(t.hp)) * kUnits[t.type].cost / 10;
   if (price <= p.funds) {
-    t.hp = static_cast<uint8_t>(hp);
+    change_hp(s, ti, 10);
     p.funds -= price;
   }
   resupply(t);
@@ -431,7 +434,8 @@ Status explode(const MapData& m, GameState& s, const Action& a, const MovePlan& 
   const int owner = u.owner;
   for (int i = 0; i < kMaxUnits; ++i) {
     Unit& v = s.units[i];
-    if (i != a.unit && v.alive() && !v.has(kCarried) && m.distance(v.tile, dest) <= 3) hurt(v, 50);
+    if (i != a.unit && v.alive() && !v.has(kCarried) && m.distance(v.tile, dest) <= 3)
+      hurt(s, i, 50);
   }
   destroy(m, s, a.unit);
   check_rout(s, owner);
@@ -447,8 +451,9 @@ Status launch(const MapData& m, GameState& s, const Action& a, const MovePlan& m
     return kErrBadAction;
   if (!free_for(s, dest, a.unit)) return kErrOccupied;
   execute_move(m, s, a.unit, mp, true);
-  for (Unit& v : s.units) {
-    if (v.alive() && !v.has(kCarried) && m.distance(v.tile, a.target) <= 2) hurt(v, 30);
+  for (int i = 0; i < kMaxUnits; ++i) {
+    const Unit& v = s.units[i];
+    if (v.alive() && !v.has(kCarried) && m.distance(v.tile, a.target) <= 2) hurt(s, i, 30);
   }
   s.prop_points[prop] = 0;
   s.units[a.unit].flags |= kMoved;
@@ -562,15 +567,16 @@ bool is_urban(int kind) {
   }
 }
 
-void heal(Unit& u, int amount) { u.hp = static_cast<uint8_t>(std::min(100, u.hp + amount)); }
+void heal(GameState& s, int slot, int amount) { change_hp(s, slot, amount); }
 
-// Apply `f` to every unit of `player`, or only the uncarried ones. Replays:
-// Andy's heals reach units in transports; Hawke's heals and all power damage
-// don't.
+// Apply `f` to the slot of every unit of `player`, or only the uncarried ones.
+// Replays: Andy's heals reach units in transports; Hawke's heals and all power
+// damage don't.
 template <typename F>
 void for_units_of(GameState& s, int player, bool carried, F&& f) {
-  for (Unit& u : s.units) {
-    if (u.alive() && u.owner == player && (carried || !u.has(kCarried))) f(u);
+  for (int i = 0; i < kMaxUnits; ++i) {
+    const Unit& u = s.units[i];
+    if (u.alive() && u.owner == player && (carried || !u.has(kCarried))) f(i);
   }
 }
 
@@ -685,12 +691,12 @@ Status power(const MapData& m, GameState& s, const Action& a, const Detail& d) {
   Player& foe = s.players[enemy];
   switch (p.co) {
     case kCoAndy:  // Hyper Repair, Hyper Upgrade
-      for_units_of(s, me, true, [&](Unit& u) { heal(u, super ? 50 : 20); });
+      for_units_of(s, me, true, [&](int i) { heal(s, i, super ? 50 : 20); });
       break;
     case kCoDrake:  // Tsunami, Typhoon
-      for_units_of(s, enemy, false, [&](Unit& u) {
-        hurt(u, super ? 20 : 10);
-        u.fuel = static_cast<uint8_t>((u.fuel + 1) / 2);
+      for_units_of(s, enemy, false, [&](int i) {
+        hurt(s, i, super ? 20 : 10);
+        s.units[i].fuel = static_cast<uint8_t>((s.units[i].fuel + 1) / 2);
       });
       if (super) {
         s.weather = kRain;
@@ -698,7 +704,7 @@ Status power(const MapData& m, GameState& s, const Action& a, const Detail& d) {
       }
       break;
     case kCoOlaf:  // Blizzard, Winter Fury
-      if (super) for_units_of(s, enemy, false, [&](Unit& u) { hurt(u, 20); });
+      if (super) for_units_of(s, enemy, false, [&](int i) { hurt(s, i, 20); });
       s.weather = kSnow;
       s.weather_owner = static_cast<uint8_t>(me);
       break;
@@ -711,8 +717,8 @@ Status power(const MapData& m, GameState& s, const Action& a, const Detail& d) {
       }
       break;
     case kCoHawke:  // Black Wave, Black Storm
-      for_units_of(s, me, false, [&](Unit& u) { heal(u, super ? 20 : 10); });
-      for_units_of(s, enemy, false, [&](Unit& u) { hurt(u, super ? 20 : 10); });
+      for_units_of(s, me, false, [&](int i) { heal(s, i, super ? 20 : 10); });
+      for_units_of(s, enemy, false, [&](int i) { hurt(s, i, super ? 20 : 10); });
       break;
     case kCoSensei: {  // Copter Command, Airborne Assault: 9 HP footsoldiers on empty cities
       for (int prop = 0; prop < m.n_props; ++prop) {
@@ -752,8 +758,8 @@ Status power(const MapData& m, GameState& s, const Action& a, const Detail& d) {
       break;
     case kCoKindle:  // Urban Blight
       if (!super) {
-        for_units_of(s, enemy, false, [&](Unit& u) {
-          if (is_urban(terrain_kind(m, s, u.tile))) hurt(u, 30);
+        for_units_of(s, enemy, false, [&](int i) {
+          if (is_urban(terrain_kind(m, s, s.units[i].tile))) hurt(s, i, 30);
         });
       }
       break;
@@ -770,9 +776,10 @@ Status power(const MapData& m, GameState& s, const Action& a, const Detail& d) {
       const int centre = centres[i];
       if (centre == kNoTile) continue;
       // Missiles hit every unit in reach, the user's own included.
-      for (Unit& u : s.units) {
+      for (int k = 0; k < kMaxUnits; ++k) {
+        Unit& u = s.units[k];
         if (!u.alive() || u.has(kCarried) || m.distance(u.tile, centre) > kMissileRadius) continue;
-        hurt(u, damage);
+        hurt(s, k, damage);
         if (p.co == kCoVonBolt) u.flags |= kStunned;
       }
     }
@@ -827,7 +834,7 @@ void start_turn(const MapData& m, GameState& s) {
     const int price = (displayed_hp(hp) - displayed_hp(u.hp)) * kUnits[u.type].cost / 10;
     if (price <= p.funds) {
       p.funds -= price;
-      u.hp = static_cast<uint8_t>(hp);
+      change_hp(s, slot, gain);
     }
   }
 

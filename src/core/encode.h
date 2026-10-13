@@ -18,23 +18,27 @@ namespace awbw {
 // board, since where they went is unknown, but the unit count and army value
 // include them, as AWBW's game page does: both players saw them built. Cargo
 // shows with its transport: AWBW hides an enemy transport's cargo, but every
-// load happened in plain sight.
+// load happened in plain sight. HP is what players see, the displayed HP, and
+// the posterior over internal HP that watching every fight gives
+// (GameState::hp_belief).
 //
 // Bump kEncodeVersion whenever a plane or global changes meaning.
-inline constexpr int kEncodeVersion = 2;
+inline constexpr int kEncodeVersion = 3;
 
 enum Plane : uint8_t {
   kPlaneTerrain,  // 0 off the board; else 1 + terrain kind now + kNumTerrainKinds * side,
                   // side 0 for terrain and unowned properties, 1 mine, 2 the opponent's
   kPlanePoints,   // capture points left on a capturable property (20 untouched), pipe seam HP
   kPlaneUnit,     // 0 none; 1 + type for mine, 1 + kNumUnitTypes + type for the opponent's
-  kPlaneHp,       // internal HP 1..100
-  kPlaneFuel,
+  kPlaneHp,       // displayed HP 1..10
+  kPlaneHpProb,   // kHpBins planes: 255 x the probability that the internal HP is
+                  // 10 * (displayed - 1) + 1 + k, for plane kPlaneHpProb + k
+  kPlaneFuel = kPlaneHpProb + kHpBins,
   kPlaneAmmo,
   kPlaneFlags,   // UnitFlag bits: moved, hidden, stunned, capturing
   kPlaneCargo1,  // 0 empty; 1 + type of the unit in cargo slot 1
   kPlaneCargo2,
-  kPlaneCargo1Hp,
+  kPlaneCargo1Hp,  // expected internal HP of the unit in cargo slot 1, rounded
   kPlaneCargo2Hp,
   kNumPlanes
 };
@@ -49,7 +53,17 @@ inline constexpr PlaneSpec kPlanes[kNumPlanes] = {
     {"terrain", 1 + 3 * kNumTerrainKinds, true},
     {"points", 100, false},
     {"unit", 1 + 2 * kNumUnitTypes, true},
-    {"hp", 101, false},
+    {"hp", 11, false},
+    {"hp_p0", 256, false},
+    {"hp_p1", 256, false},
+    {"hp_p2", 256, false},
+    {"hp_p3", 256, false},
+    {"hp_p4", 256, false},
+    {"hp_p5", 256, false},
+    {"hp_p6", 256, false},
+    {"hp_p7", 256, false},
+    {"hp_p8", 256, false},
+    {"hp_p9", 256, false},
     {"fuel", 100, false},
     {"ammo", 10, false},
     {"flags", 32, true},

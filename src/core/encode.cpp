@@ -1,8 +1,10 @@
 #include "core/encode.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
+#include "core/belief.h"
 #include "core/combat.h"
 #include "core/movegen.h"
 
@@ -103,7 +105,12 @@ void encode(const MapData& m, const GameState& s, uint8_t* planes, int h, int w,
     }
     if (carried || (!seen && side == 1)) continue;
     cell(kPlaneUnit, u.tile) = static_cast<uint8_t>(1 + u.type + kNumUnitTypes * side);
-    cell(kPlaneHp, u.tile) = u.hp;
+    cell(kPlaneHp, u.tile) = static_cast<uint8_t>(displayed_hp(u.hp));
+    const uint8_t* w = s.hp_belief[i];
+    int total = 0;
+    for (int k = 0; k < kHpBins; ++k) total += w[k];
+    for (int k = 0; k < kHpBins; ++k)
+      cell(kPlaneHpProb + k, u.tile) = static_cast<uint8_t>((w[k] * 255 + total / 2) / total);
     cell(kPlaneFuel, u.tile) = clamp_u8(u.fuel, kPlanes[kPlaneFuel].values - 1);
     cell(kPlaneAmmo, u.tile) = clamp_u8(u.ammo, kPlanes[kPlaneAmmo].values - 1);
     cell(kPlaneFlags, u.tile) =
@@ -112,7 +119,8 @@ void encode(const MapData& m, const GameState& s, uint8_t* planes, int h, int w,
       if (u.cargo[c] == kNoUnit) continue;
       const Unit& k = s.units[u.cargo[c]];
       cell(kPlaneCargo1 + c, u.tile) = static_cast<uint8_t>(1 + k.type);
-      cell(kPlaneCargo1Hp + c, u.tile) = k.hp;
+      cell(kPlaneCargo1Hp + c, u.tile) =
+          static_cast<uint8_t>(std::lround(belief_mean(s, u.cargo[c])));
     }
   }
 

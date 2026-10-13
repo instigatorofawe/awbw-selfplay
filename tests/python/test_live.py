@@ -168,6 +168,9 @@ def test_live_turn_puts_back_hidden_units(info):
     g = live.parse_page(page())
     s = live.state(g, lt)
     assert s.active == 1 and s.weather_owner == 0 and s.unit(s.unit_at(1, 0)).hp == 66
+    assert s.hp_belief(s.unit_at(1, 0)) == [255] * 10  # anything behind the 7 shown
+    assert s.hp_belief(s.unit_at(4, 2)) == [0] * 9 + [255]  # a 10 is taken as full
+    assert s.hp_belief(s.unit_at(back.x, back.y)) == [255] * 10
     planes, globals_ = encode(np.frombuffer(s.to_bytes(), np.uint8)[None], 8)
     assert planes[0, UNIT_PLANE, back.y, back.x] == 0  # Blue Moon can't see it
     assert globals_[0, GLOBAL["opp.hidden_stealths"]] == pytest.approx(0.1)

@@ -19,7 +19,9 @@ MAX_UNITS: int = 128
 
 MAX_PROPS: int = 128
 
-STATE_BYTES: int = 4000
+HP_BINS: int = 10
+
+STATE_BYTES: int = 5280
 
 NO_UNIT: int = 255
 
@@ -41,9 +43,9 @@ WEATHERS: tuple = ('clear', 'rain', 'snow')
 
 ACTIONS: dict = ...
 
-ENCODE_VERSION: int = 2
+ENCODE_VERSION: int = 3
 
-NUM_PLANES: int = 11
+NUM_PLANES: int = 21
 
 NUM_GLOBALS: int = 104
 
@@ -243,6 +245,18 @@ class GameState:
     def players(self) -> list[Player]: ...
 
     def unit(self, slot: int) -> Unit: ...
+
+    def hp_belief(self, slot: int) -> list[int]:
+        """
+        What a player who watched every turn knows of the unit's internal HP: HP_BINS
+        weights (0..255, the largest 255), the k-th for internal HP 10 * (displayed - 1) + 1 + k.
+        """
+
+    def set_hp_belief(self, slot: int, weights: Sequence[int]) -> None:
+        """Replace the unit's HP belief (see hp_belief)."""
+
+    def set_hp_unknown(self, slot: int) -> None:
+        """Make every internal HP the unit's display allows equally likely."""
 
     def unit_slots(self) -> list[int]:
         """Slots holding a unit, in slot order."""

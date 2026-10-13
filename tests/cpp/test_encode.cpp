@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "core/belief.h"
 #include "core/encode.h"
 #include "test_util.h"
 
@@ -89,7 +90,8 @@ TEST_F(EncodeTest, UnitsAndCargo) {
 
   const Encoded e(m, s);
   EXPECT_EQ(e.at(kPlaneUnit, 1, 0), 1 + kTank);
-  EXPECT_EQ(e.at(kPlaneHp, 1, 0), 64);
+  EXPECT_EQ(e.at(kPlaneHp, 1, 0), 7);  // displayed
+  for (int k = 0; k < kHpBins; ++k) EXPECT_EQ(e.at(kPlaneHpProb + k, 1, 0), k == 3 ? 255 : 0);
   EXPECT_EQ(e.at(kPlaneFuel, 1, 0), 41);
   EXPECT_EQ(e.at(kPlaneAmmo, 1, 0), 3);
   EXPECT_EQ(e.at(kPlaneFlags, 1, 0), kMoved);
@@ -107,6 +109,21 @@ TEST_F(EncodeTest, UnitsAndCargo) {
   const Encoded flipped(m, s);
   EXPECT_EQ(flipped.at(kPlaneUnit, 1, 0), 1 + kNumUnitTypes + kTank);
   EXPECT_EQ(flipped.at(kPlaneUnit, 1, 2), 1 + kApc);
+}
+
+TEST_F(EncodeTest, HpIsWhatPlayersKnow) {
+  const int tank = put(s, m, kTank, 0, 1, 0, 64);
+  const int apc = put(s, m, kApc, 0, 1, 2);
+  const int inf = put(s, m, kInfantry, 0, 0, 2, 35);
+  load_unit(s, inf, apc);
+  const uint8_t two[kHpBins] = {0, 0, 0, 255, 255, 0, 0, 0, 0, 0};  // 6.4 or 6.5
+  std::copy(two, two + kHpBins, s.hp_belief[tank]);
+  belief_unknown(s, inf);  // 3.1 to 4.0
+  const Encoded e(m, s);
+  EXPECT_EQ(e.at(kPlaneHp, 1, 0), 7);
+  for (int k = 0; k < kHpBins; ++k)
+    EXPECT_EQ(e.at(kPlaneHpProb + k, 1, 0), k == 3 || k == 4 ? 128 : 0);
+  EXPECT_EQ(e.at(kPlaneCargo1Hp, 1, 2), 36);  // 35.5, rounded
 }
 
 TEST_F(EncodeTest, HiddenEnemiesStayOffTheBoardButCount) {

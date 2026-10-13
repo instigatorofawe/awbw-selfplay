@@ -9,6 +9,7 @@ import pytest
 from awbw.net import cache_dir
 from awbw.replay import load_replay
 from awbw.replay.combat_check import check_file
+from awbw.replay.extract import extract_v0
 from awbw.replay.move_check import check_replay as check_moves
 from awbw.replay.step_check import check_file as check_turns
 
@@ -117,3 +118,18 @@ def test_turns_replay_exactly(path):
     replay = load_replay(path)
     bad = [e for kind in rep.diverged for e in rep.examples[kind] if not known_oddity(replay, int(e.split()[2]))]
     assert not bad, bad[:3]
+
+
+@pytest.mark.skipif(not PATHS, reason="no cached replays")
+@pytest.mark.parametrize("path", PATHS, ids=[p.stem for p in PATHS])
+def test_hp_beliefs_carry_through_every_turn(path):
+    """Extraction steps every turn, so each snapshot's HPs are ones the beliefs
+    carried into it allow (extract_v0 rejects a state that breaks that)."""
+    g = extract_v0(path)
+    if isinstance(g, str):
+        pytest.skip(g)
+    if g.unstepped:
+        replay = load_replay(path)
+        assert any(known_oddity(replay, t.day) for t in replay.turns), f"{g.unstepped} turns not stepped"
+    else:
+        assert g.hp_unknown == 0
