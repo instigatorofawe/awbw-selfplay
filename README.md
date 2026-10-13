@@ -7,8 +7,10 @@ C++, bound to Python with nanobind. It is for:
 2. deep MCTS self-play.
 
 See [PLAN.md](PLAN.md) for the design and milestones. Current status: **M1,
-the C++ rules engine**. Replay ingestion (M0) is done, and the combat core
-reproduces every attack logged in the cached replays.
+the C++ rules engine**. Replay ingestion (M0) is done. The combat core
+reproduces every attack logged in the cached replays. Every turn-start snapshot
+loads into the engine's `GameState`, and its movement rules accept every
+logged move they can check.
 
 ## Setup
 
@@ -18,6 +20,17 @@ Requires [uv](https://docs.astral.sh/uv/), CMake ≥ 3.27 and a C++20 compiler.
 uv sync                      # builds the C++ extension; rebuilds when src/ changes
 uv run pre-commit install    # ruff, clang-format and hygiene hooks
 uv run pytest
+```
+
+C++ unit tests (googletest) and micro-benchmarks (Google Benchmark) build
+with plain CMake; both libraries are fetched at pinned versions:
+
+```sh
+cmake -S . -B build/cpp -DAWBW_BUILD_TESTS=ON -DAWBW_BUILD_BENCHMARKS=ON
+cmake --build build/cpp -j
+ctest --test-dir build/cpp       # or build/cpp/awbw_tests
+build/cpp/awbw_bench
+# -DAWBW_SANITIZE=ON -DCMAKE_BUILD_TYPE=Debug for ASan/UBSan
 ```
 
 ## Replay data
@@ -36,6 +49,7 @@ uv run awbw stats             # settings, endings and v1-filter counts over the 
 uv run awbw fetch-map 176376  # map terrain from AWBW's public map API
 uv run awbw league --fetch-maps   # snapshot the Global League std rotation + settings
 uv run awbw check-combat      # every logged attack vs the engine's damage formula
+uv run awbw check-moves       # load every snapshot into the engine; check logged moves
 ```
 
 Requests are rate-limited (`--rate`, default one per second). Please keep it
@@ -51,8 +65,10 @@ with `username=` and `password=` lines.
 ```
 src/core/        C++ engine (no Python dependency); tables.h is generated
 src/bindings/    nanobind module awbw._core
-python/awbw/     Python package: replay parsing, sources, maps, CLI
+python/awbw/     Python package: replay parsing, sources, maps, engine glue, CLI
 python/awbw/rules/  rules tables (JSON): units, terrain, damage, COs
 tools/           gen_tables.py: rules JSON -> src/core/tables.h
+tests/cpp/       googletest unit tests for the engine core
+bench/           Google Benchmark micro-benchmarks
 tests/python/    pytest; tests over real replays run on whatever is cached
 ```

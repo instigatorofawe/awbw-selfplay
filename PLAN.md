@@ -28,17 +28,20 @@ awbw-selfplay/
   tools/gen_tables.py         # rules JSON -> src/core/tables.h (pre-commit checks it is current)
   src/core/                   # C++20, no Python dependency
     tables.h                  # generated constexpr tables
-    map.h  state.h  movegen.cpp  apply.cpp  combat.cpp  turn.cpp  cos.cpp
-    hash.cpp  encode.cpp  snapshot.cpp
+    map  state  snapshot  movegen  combat   # done (.h/.cpp each)
+    apply  turn  cos  hash  encode          # to come
     search/                   # batched Gumbel MCTS
   src/bindings/module.cpp     # thin nanobind layer
   python/awbw/
     rules/    maps.py
-    replay/   download.py  parse.py  combat_check.py  validate.py  extract.py
+    engine.py                 # replay snapshot -> GameState glue
+    replay/   sources.py  parse.py  combat_check.py  move_check.py  validate.py  extract.py
     data/     shards.py  loader.py
     nn/       model.py  train_critic.py  selfplay.py
     render.py  agents/
-  tests/{cpp,python}/   bench/
+  tests/cpp/                  # googletest, fetched by CMake (AWBW_BUILD_TESTS)
+  tests/python/               # pytest
+  bench/                      # Google Benchmark, fetched by CMake (AWBW_BUILD_BENCHMARKS)
   cache/                      # gitignored: raw replays, maps, shards
 ```
 
@@ -50,65 +53,81 @@ C++ releases the GIL for all heavy work.
 
 ### Static: `MapData`, immutable and shared through a process-wide registry
 
-- dimensions, terrain id per tile
-- move-cost tables precomputed per `[move_type][weather][tile]`
-- defense stars per tile
-- tile → property index; property list
+`src/core/map.h`. Tiles are numbered `y * width + x`.
+
+- dimensions, AWBW terrain id, terrain kind and defense stars per tile
+- move costs precomputed per `[weather][move_type][tile]`
 - neighbor table
+- the property list: every tile with per-game state (capturable properties,
+  pipe seams, loaded silos), with its kind and starting country; tile →
+  property index
 
 ### Dynamic: `GameState`, POD with no pointers
 
+`src/core/state.h`; 3,996 bytes.
+
 ```cpp
 struct Unit {                 // 16 bytes
-  uint32_t seq;               // creation order; AWBW tie-breaks follow unit-id order
-  uint16_t tile;              // or kCarried
-  uint8_t  type;              // 25 unit types; kNone = free slot
-  uint8_t  owner;
+  uint32_t id;                // creation order (AWBW unit id from replays); 0 = free slot
+  uint16_t tile;              // carried units: their transport's tile
+  uint8_t  type, owner;
   uint8_t  hp;                // internal 1..100; displayed = (hp + 9) / 10
   uint8_t  fuel, ammo;
-  uint8_t  flags;             // moved | hidden (sub/stealth) | stunned | ...
-  uint8_t  cargo[2];          // unit slots (Lander/Cruiser/Carrier hold 2)
-  uint8_t  _pad[2];
+  uint8_t  flags;             // moved | hidden | carried | stunned | capturing
+  uint8_t  cargo[2];          // slots of loaded units
+  uint8_t  carrier;           // slot of the transport carrying it
+  uint8_t  _pad;
 };
 
-struct Player {
-  int32_t funds, power_charge;
-  uint8_t co, power_active, power_uses, alive;
-  uint8_t co_scratch[8];      // CO-specific state
+struct Player {               // 24 bytes
+  int32_t funds, power;       // power meter in AWBW units (co_power)
+  int32_t cop_cost, scop_cost;  // co_max_power / co_max_spower
+  uint8_t co, country, power_on, power_uses, eliminated, _pad;
+  int16_t power_atk;          // attack % fixed when a power starts (Colin's SCOP)
 };
 
-struct GameSettings {         // varies per AWBW game; needed for exact match
-  int32_t  starting_funds;
-  uint16_t funds_per_property, day_limit;
-  uint8_t  capture_limit, unit_limit;
-  uint32_t banned_units;      // bitmask
+struct Settings {             // varies per AWBW game
+  uint16_t funds_per_property, capture_win, day_limit;
+  uint8_t  unit_limit, use_powers;
+  uint32_t banned_units;      // bit per unit type
 };
 
 struct GameState {
-  uint32_t     map_id;        // resolved via MapRegistry; keeps state bytes position-independent
-  GameSettings settings;
-  Unit         units[MAX_UNITS];
-  uint8_t      unit_at[MAX_TILES];             // occupancy grid, debug-asserted in sync
-  uint8_t      prop_owner[MAX_PROPS], prop_capture[MAX_PROPS];
-  Player       players[2];
-  uint16_t     day;
-  uint8_t      active, weather;
-  uint64_t     zobrist;       // maintained incrementally
-  uint64_t     rng[2];        // luck RNG lives in the state
-  Pending      pending;       // partially chosen unit action (see §3)
+  uint32_t map_id;            // resolved via the map registry
+  Settings settings;
+  uint32_t next_id;           // id of the next unit built
+  uint16_t day;
+  uint8_t  active, weather, winner;
+  uint8_t  pending;           // transport that unloaded and may unload again
+  Player   players[2];
+  Unit     units[kMaxUnits];               // 128
+  uint8_t  unit_at[kMaxTiles];             // occupancy grid; check_state() verifies it
+  uint8_t  prop_owner[kMaxProps];          // 128; player index or none
+  uint8_t  prop_points[kMaxProps];         // capture points / seam HP / silo loaded
+  uint64_t rng[2];            // luck RNG lives in the state
 };
 static_assert(std::is_trivially_copyable_v<GameState>);
 ```
 
-- **Size:** about 4–5 KB at `MAX_W = MAX_H = 40`. Check this against the map
-  pool; maps that don't fit are filtered out.
-- **Cloning:** a memcpy.
+- **Limits:** 40×40 tiles, 128 units (Global League caps each player at 50;
+  the most seen in a snapshot is 93), 128 properties (the largest cached map
+  has 72).
+- **Dynamic terrain:** a seam at 0 HP is pipe rubble and a fired silo is
+  empty; `terrain_kind` / `terrain_stars` / `move_cost` read the state.
+- **Zobrist hash:** not yet; added for the transposition table (§8).
+
+- **Cloning:** a memcpy (35 ns).
 - **Serialization:** the raw bytes. The same bytes are what the datasets store.
 - **Derived data stays out of the state.** Reachable tiles, threat maps and
   similar data are computed on demand into per-thread scratch memory.
-- **Exact AWBW match needs AWBW's ordering.** Repair order, CO-power
-  targeting, etc. follow unit creation order, so `seq` is kept and the order
-  of units within a turn is never "normalized".
+- **Exact AWBW match may need AWBW's ordering** (repair order when funds run
+  short, CO-power targeting), so units keep their creation `id`.
+  `load_snapshot` puts units in slots in id order; new units take the lowest
+  free slot but still get the next id.
+- **Snapshots** (`src/core/snapshot.h`, Python glue in `awbw/engine.py`):
+  owners come from each building's terrain country, carried units from the
+  transports' cargo lists. A unit marked moved at turn start was stunned by
+  Von Bolt's SCOP (all 198 such units in 800 replays).
 
 ## 3. Action space: micro-steps
 
@@ -145,11 +164,24 @@ static_assert(std::is_trivially_copyable_v<GameState>);
     AWDS numbers, still unverified.
   - COs: modifiers from AWBW's `co.php`; star costs from snapshot
     `co_max_power` / `co_max_spower`.
-- **Movement:** Dijkstra with a bucket queue (costs are small integers).
-  Enemy units block; friendly units can be passed through. The fuel cap
-  applies.
+- **Movement** (`src/core/movegen.cpp`): Dijkstra over small integer costs
+  (about 0.4 µs per unit on a 30×30 map). Movement points = unit move + CO
+  bonus for the current power state, capped by fuel. Enemy units block;
+  friendly units can be passed through. Sturm (always) and Lash (powers) pay 1
+  per passable tile. A broken seam moves like pipe rubble.
+  - **Verified** (`awbw check-moves`, 2,000 replays): 55,022 snapshots load
+    with no errors, and all 176,783 checkable logged moves pass. The path is
+    legal, its cost equals the fuel spent, and the search finds no cheaper
+    route. For each of the 50 (unit, CO, power) combinations with ≥ 300 moves,
+    the longest logged move reaches the engine's movement points exactly.
+  - Until `apply` exists, moves are checked against the turn-start state up
+    to the first action that can change movement (Fire, Power, AttackSeam,
+    Supply, Repair).
+  - Turns in snow (Olaf's powers) or rain (Drake's SCOP) are skipped: 5,268
+    moves. Those move costs are not tabulated yet, and the 253 snow-turn moves
+    spend more fuel than clear-weather costs predict.
 - **Combat** (`src/core/combat.cpp`; [wiki formula](https://awbw.fandom.com/wiki/Damage_Formula)),
-  in exact integer math. **Verified: all 126,149 attacks logged in 1,515
+  in exact integer math. **Verified: all 168,210 attacks logged in 2,000
   cached replays are in `combat_outcomes()`** (`awbw check-combat`).
   - raw = (B·ATK/100 + luck − bad luck) · HP_att/10 · (200 − (DEF + stars·HP_def))/100,
     with displayed HPs.
@@ -273,6 +305,13 @@ static_assert(std::is_trivially_copyable_v<GameState>);
    `cache/index/`.
 2. **Download** to `cache/replays/<id>.zip` (`awbw fetch`), never re-fetched.
    Rate-limited (1 request/s by default) and polite.
+   - Cached so far: the 2,000 most recent 2p GL std games (to 2026-10-12),
+     all with clear weather, no fog, powers on, 1000 funds per property.
+     1,699 pass the v1 filter; 299 have no `GameOver` (timeouts and cancelled
+     games); 2 miss a mid-game turn in the log. They end by resignation
+     (1,589), capture (105), rout (7) and deletion (1). 41 have turns cut off
+     at the max turn length.
+     Extending to 10,000 games (`cache/index/2p_global_league_std_10k.jsonl`).
 3. **Parse** into a `Replay` object: settings, players, map id, per-turn
    snapshots, per-turn actions, result. Uses our own bytes-based PHP
    unserializer, since PHP string lengths count bytes.
@@ -281,7 +320,8 @@ static_assert(std::is_trivially_copyable_v<GameState>);
      1000 funds per property, no starting funds, map ≤ `MAX_W × MAX_H`
    - keep: a `GameOver` in the log (this drops timeout losses and cancelled
      games), and every turn logged
-   - still to decide: a minimum game length
+   - proposed, not yet applied: a minimum game length of 6 days. Of 1,699
+     accepted games (median 14 days), 46 end by resignation within 5 days.
 5. **Convert** each snapshot to a `GameState` (C++ `from_snapshot`) and run
    invariant checks.
 6. **Validate** (once the engine runs): apply the logged actions with forced
@@ -421,7 +461,9 @@ while training:
 
 ## 10. Testing & benchmarks
 
-- **C++ (doctest):** movement, damage, turn start, every CO power.
+- **C++ (googletest, `tests/cpp/`):** maps, state bookkeeping, snapshots,
+  movement, damage; turn start and every CO power to come. CI runs them on
+  Linux and macOS, in Release and under ASan/UBSan.
 - **Damage formula across all logged attacks:** every logged combat result
   must be in `outcomes()`. This checks the formula over the whole replay
   archive.
@@ -433,10 +475,11 @@ while training:
   - HP and funds stay in range
   - the legal-action mask is non-empty until the game ends
   - the incremental Zobrist hash equals a hash recomputed from scratch
-- **Benchmarks:**
+- **Benchmarks** (Google Benchmark, `bench/`; current numbers on an Apple
+  M-series laptop in parentheses):
   - random games/sec
-  - clone (ns)
-  - `outcomes` (ns)
+  - clone (35 ns), `check_state` (0.6 µs), `reachable` (0.4 µs per unit)
+  - `damage` (3.5 ns), `combat_outcomes` (0.7 µs for tank vs tank)
   - `encode_batch` (µs per state)
   - MCTS simulations/sec, with a dummy net and with the real net
 
@@ -445,7 +488,7 @@ while training:
 | # | Milestone | Exit criteria |
 |---|---|---|
 | M0 | Replay ingestion (Python): download + cache, parser, rules JSON | Thousands of replays parsed; settings/filter stats known |
-| M1 | C++ core + bindings: state, `from_snapshot`, movegen, all actions except CO powers, `outcomes`, turn start, `encode_batch` | Every logged attack in `outcomes()` (**done** for the combat core); v0 dataset → **critic v0** |
+| M1 | C++ core + bindings: state, `from_snapshot`, movegen, all actions except CO powers, `outcomes`, turn start, `encode_batch` | Every logged attack in `outcomes()` (**done**); state, snapshots, movegen (**done**); apply, turn start, `encode_batch`; v0 dataset → **critic v0** |
 | M2 | Exact match: full replay stepping, all COs/powers, edge cases | ≥ 99% of filtered replays fully verified; benchmarks in CI |
 | M3 | v1 datasets: all idle-phase states + action labels | **Critic v1** + policy prior (behavior cloning); baselines: random, greedy, critic-greedy 1-ply |
 | M4 | Batched Gumbel MCTS with chance nodes, `collect`/`submit` | Search + critic beats critic-greedy; sims/sec measured |

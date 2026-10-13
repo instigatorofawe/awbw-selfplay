@@ -74,7 +74,8 @@ def _view(obj: Any) -> Any:
     """AWBW logs a copy of most payloads per viewer ("global" plus player ids).
 
     Return the global copy, with fields it hides ("?", as for Sonja's HP)
-    filled in from the players' copies.
+    filled in from the players' copies. A hidden Stealth's move has no global
+    copy and an empty string for the opponent, so empty values are filled too.
     """
     if not (isinstance(obj, dict) and obj and all(k == "global" or str(k).isdigit() for k in obj)):
         return obj
@@ -90,7 +91,7 @@ def _fill(a: Any, b: Any) -> Any:
         return {k: _fill(a.get(k), b.get(k)) if k in b else a[k] for k in a} | {
             k: v for k, v in b.items() if k not in a
         }
-    return b if a in ("?", None) else a
+    return b if a in ("?", "", None) else a
 
 
 def _displayed(hp: int) -> int:

@@ -42,3 +42,26 @@ jobs:
           enable-cache: true
       - run: uv sync --locked
       - run: uv run pytest -v
+
+  cpp:
+    name: cpp (${{ matrix.os }}, ${{ matrix.config }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        config: [sanitize, release]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure
+        run: |
+          if [ "${{ matrix.config }}" = sanitize ]; then
+            cmake -S . -B build/cpp -DCMAKE_BUILD_TYPE=Debug -DAWBW_SANITIZE=ON -DAWBW_BUILD_TESTS=ON
+          else
+            cmake -S . -B build/cpp -DCMAKE_BUILD_TYPE=Release -DAWBW_BUILD_TESTS=ON -DAWBW_BUILD_BENCHMARKS=ON
+          fi
+      - run: cmake --build build/cpp --parallel 4
+      - run: ctest --test-dir build/cpp --output-on-failure
+      - name: Benchmarks (smoke run)
+        if: matrix.config == 'release'
+        run: build/cpp/awbw_bench --benchmark_min_time=0.05s

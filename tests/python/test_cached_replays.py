@@ -9,6 +9,7 @@ import pytest
 from awbw.net import cache_dir
 from awbw.replay import load_replay
 from awbw.replay.combat_check import check_file
+from awbw.replay.move_check import check_replay as check_moves
 
 PATHS = sorted((cache_dir() / "replays").glob("*.zip"))[:200]
 
@@ -40,11 +41,12 @@ def test_replay_invariants(path):
     if over is not None:
         assert set(over.winners) | set(over.losers) <= set(order)
         assert not set(over.winners) & set(over.losers)
-    # Multiplayer logs have gaps (timed-out turns, mid-game resignations), so only
-    # 2-player games must log every turn. Exceptions: a turn cut off at the max
-    # turn length has no End, and a timeout loss leaves the final turn unlogged.
+    # Multiplayer logs have gaps (timed-out turns, mid-game resignations). In
+    # 2-player games a timeout loss leaves the final turn unlogged, and rarely
+    # (2 of 2,000 cached games) a mid-game turn has no entry either; the v1
+    # filter drops those games.
     if len(order) == 2:
-        assert all(turn.actions is not None for turn in r.turns[:-1])
+        assert sum(turn.actions is None for turn in r.turns[:-1]) <= 1
 
 
 @pytest.mark.skipif(not PATHS, reason="no cached replays")
@@ -53,3 +55,11 @@ def test_logged_attacks_match_engine(path):
     checks, _ = check_file(path)
     bad = [c for c in checks if c.ok is False]
     assert not bad, bad[:3]
+
+
+@pytest.mark.skipif(not PATHS, reason="no cached replays")
+@pytest.mark.parametrize("path", PATHS, ids=[p.stem for p in PATHS])
+def test_snapshots_load_and_logged_moves_are_legal(path):
+    rep = check_moves(path)
+    assert not rep.snapshot_errors, rep.snapshot_errors[:3]
+    assert not rep.failures, rep.failures[:3]

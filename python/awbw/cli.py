@@ -14,6 +14,8 @@ from .maps import fetch_map
 from .net import Http, cache_dir
 from .replay import load_replay
 from .replay.combat_check import check_file
+from .replay.move_check import MoveReport
+from .replay.move_check import check_replay as check_moves
 from .replay.sources import (
     AwbwSession,
     ReplayUnavailable,
@@ -62,6 +64,11 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--workers", type=int)
     c.add_argument("--show", type=int, default=10, help="print this many mismatches (default 10)")
 
+    mv = sub.add_parser("check-moves", help="load every snapshot into the engine and check logged moves")
+    mv.add_argument("dir", nargs="?", type=Path)
+    mv.add_argument("--workers", type=int)
+    mv.add_argument("--show", type=int, default=10, help="print this many failures (default 10)")
+
     args = p.parse_args(argv)
     http = Http(min_interval=args.rate)
     commands = {
@@ -72,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
         "inspect": _inspect,
         "stats": _stats,
         "check-combat": _check_combat,
+        "check-moves": _check_moves,
     }
     return commands[args.cmd](args, http)
 
@@ -218,6 +226,23 @@ def _check_combat(args, http: Http) -> int:
                 f"logged {c.logged}, engine {c.predicted[:6]} {c.detail}"
             )
     return 0 if not bad else 1
+
+
+def _check_moves(args, http: Http) -> int:
+    root = args.dir or cache_dir() / "replays"
+    paths = sorted(root.glob("*.zip"))
+    total = MoveReport()
+    with ProcessPoolExecutor(args.workers) as pool:
+        for rep in pool.map(check_moves, paths, chunksize=8):
+            total.add(rep)
+    print(f"{len(paths)} replays; skipped: {dict(total.skipped)}")
+    print(f"{total.snapshots} snapshots loaded, {len(total.snapshot_errors)} rejected")
+    print(f"{total.moves} moves checked: {total.moves_ok} ok, {len(total.failures)} failed")
+    for line in total.snapshot_errors[: args.show]:
+        print(f"  snapshot {line}")
+    for line in total.failures[: args.show]:
+        print(f"  move {line}")
+    return 0 if not total.failures and not total.snapshot_errors else 1
 
 
 if __name__ == "__main__":

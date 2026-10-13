@@ -1,15 +1,86 @@
 #include <nanobind/nanobind.h>
+#include <nanobind/ndarray.h>
+#include <nanobind/stl/string.h>
 #include <nanobind/stl/tuple.h>
 #include <nanobind/stl/vector.h>
 
+#include <cstring>
+#include <memory>
+#include <string>
 #include <tuple>
 #include <vector>
 
 #include "core/combat.h"
 #include "core/config.h"
+#include "core/map.h"
+#include "core/movegen.h"
+#include "core/snapshot.h"
+#include "core/state.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
+
+namespace {
+
+template <typename T, size_t Cols>
+using Rows = nb::ndarray<const T, nb::shape<-1, Cols>, nb::c_contig, nb::device::cpu>;
+
+const awbw::MapData& map_for(const awbw::GameState& s) {
+  const awbw::MapData* m = awbw::find_map(s.map_id);
+  if (!m) throw nb::value_error(("map " + std::to_string(s.map_id) + " is not registered").c_str());
+  return *m;
+}
+
+void check_slot(const awbw::GameState& s, int slot) {
+  if (slot < 0 || slot >= awbw::kMaxUnits || !s.units[slot].alive())
+    throw nb::index_error(("no unit in slot " + std::to_string(slot)).c_str());
+}
+
+awbw::GameState load_snapshot(const awbw::MapData& m, const awbw::Settings& settings, int day,
+                              int active, Rows<int64_t, 8> players, Rows<int64_t, 4> buildings,
+                              Rows<int64_t, 11> units) {
+  if (players.shape(0) != awbw::kMaxPlayers) throw nb::value_error("players must have 2 rows");
+  awbw::Snapshot snap{};
+  snap.settings = settings;
+  snap.day = day;
+  snap.active = active;
+  auto pv = players.view();
+  for (int i = 0; i < awbw::kMaxPlayers; ++i) {
+    auto c = [&](int j) { return static_cast<int>(pv(i, j)); };
+    snap.players[i] = awbw::SnapshotPlayer{c(0), c(1), c(2), c(3), c(4), c(5), c(6), c(7)};
+  }
+  std::vector<awbw::SnapshotBuilding> b(buildings.shape(0));
+  auto bv = buildings.view();
+  for (size_t i = 0; i < b.size(); ++i) {
+    b[i] = {static_cast<int>(bv(i, 0)), static_cast<int>(bv(i, 1)), static_cast<int>(bv(i, 2)),
+            static_cast<int>(bv(i, 3))};
+  }
+  std::vector<awbw::SnapshotUnit> u(units.shape(0));
+  auto uv = units.view();
+  for (size_t i = 0; i < u.size(); ++i) {
+    auto c = [&](int j) { return static_cast<int>(uv(i, j)); };
+    u[i] = {static_cast<uint32_t>(uv(i, 0)),
+            c(1),
+            c(2),
+            c(3),
+            c(4),
+            c(5),
+            c(6),
+            c(7),
+            c(8),
+            {static_cast<uint32_t>(uv(i, 9)), static_cast<uint32_t>(uv(i, 10))}};
+  }
+  snap.buildings = b.data();
+  snap.n_buildings = static_cast<int>(b.size());
+  snap.units = u.data();
+  snap.n_units = static_cast<int>(u.size());
+  awbw::GameState s;
+  std::string error;
+  if (!awbw::load_snapshot(m, snap, s, error)) throw nb::value_error(error.c_str());
+  return s;
+}
+
+}  // namespace
 
 NB_MODULE(_core, m) {
   m.doc() = "AWBW engine core (C++)";
@@ -17,6 +88,206 @@ NB_MODULE(_core, m) {
   m.attr("MAX_HEIGHT") = awbw::kMaxHeight;
   m.attr("MAX_TILES") = awbw::kMaxTiles;
   m.attr("MAX_PLAYERS") = awbw::kMaxPlayers;
+  m.attr("MAX_UNITS") = awbw::kMaxUnits;
+  m.attr("MAX_PROPS") = awbw::kMaxProps;
+  m.attr("STATE_BYTES") = sizeof(awbw::GameState);
+  m.attr("NO_UNIT") = awbw::kNoUnit;
+  m.attr("NO_OWNER") = awbw::kNoOwner;
+  m.attr("UNIT_MOVED") = static_cast<int>(awbw::kMoved);
+  m.attr("UNIT_HIDDEN") = static_cast<int>(awbw::kHidden);
+  m.attr("UNIT_CARRIED") = static_cast<int>(awbw::kCarried);
+  m.attr("UNIT_STUNNED") = static_cast<int>(awbw::kStunned);
+  m.attr("UNIT_CAPTURING") = static_cast<int>(awbw::kCapturing);
+
+  nb::class_<awbw::MapData>(m, "MapData", "A map's static data, shared by every game on it.")
+      .def_ro("id", &awbw::MapData::id)
+      .def_ro("width", &awbw::MapData::width)
+      .def_ro("height", &awbw::MapData::height)
+      .def_ro("n_props", &awbw::MapData::n_props)
+      .def(
+          "props",
+          [](const awbw::MapData& md) {
+            std::vector<std::tuple<int, int, int, int>> out;
+            for (int p = 0; p < md.n_props; ++p) {
+              out.emplace_back(md.x_of(md.prop_tile[p]), md.y_of(md.prop_tile[p]), md.prop_kind[p],
+                               md.prop_country[p]);
+            }
+            return out;
+          },
+          "(x, y, terrain kind, starting country) for each tile with per-game state.")
+      .def("tile", &awbw::MapData::tile, "x"_a, "y"_a);
+
+  m.def(
+      "register_map",
+      [](uint32_t id,
+         nb::ndarray<const int16_t, nb::ndim<2>, nb::c_contig, nb::device::cpu> terrain) {
+        auto md = std::make_unique<awbw::MapData>();
+        std::string error;
+        if (!awbw::build_map(id, static_cast<int>(terrain.shape(1)),
+                             static_cast<int>(terrain.shape(0)), terrain.data(), *md, error))
+          throw nb::value_error(error.c_str());
+        const awbw::MapData* reg = awbw::register_map(*md, error);
+        if (!reg) throw nb::value_error(error.c_str());
+        return reg;
+      },
+      "map_id"_a, "terrain"_a, nb::rv_policy::reference,
+      "Build a map from AWBW terrain ids [height, width] and register it under `map_id`.");
+  m.def("find_map", &awbw::find_map, "map_id"_a, nb::rv_policy::reference,
+        "The registered map with this id, or None.");
+
+  nb::class_<awbw::Settings>(m, "Settings", "Game options that vary between AWBW games.")
+      .def(nb::init<>())
+      .def_rw("funds_per_property", &awbw::Settings::funds_per_property)
+      .def_rw("capture_win", &awbw::Settings::capture_win)
+      .def_rw("day_limit", &awbw::Settings::day_limit)
+      .def_rw("unit_limit", &awbw::Settings::unit_limit)
+      .def_rw("use_powers", &awbw::Settings::use_powers)
+      .def_rw("banned_units", &awbw::Settings::banned_units);
+
+  nb::class_<awbw::Unit>(m, "Unit")
+      .def_ro("id", &awbw::Unit::id)
+      .def_ro("tile", &awbw::Unit::tile)
+      .def_ro("type", &awbw::Unit::type)
+      .def_ro("owner", &awbw::Unit::owner)
+      .def_ro("hp", &awbw::Unit::hp)
+      .def_ro("fuel", &awbw::Unit::fuel)
+      .def_ro("ammo", &awbw::Unit::ammo)
+      .def_ro("flags", &awbw::Unit::flags)
+      .def_ro("carrier", &awbw::Unit::carrier)
+      .def_prop_ro("cargo", [](const awbw::Unit& u) {
+        std::vector<int> out;
+        for (uint8_t c : u.cargo) {
+          if (c != awbw::kNoUnit) out.push_back(c);
+        }
+        return out;
+      });
+
+  nb::class_<awbw::Player>(m, "Player")
+      .def_ro("funds", &awbw::Player::funds)
+      .def_ro("power", &awbw::Player::power)
+      .def_ro("cop_cost", &awbw::Player::cop_cost)
+      .def_ro("scop_cost", &awbw::Player::scop_cost)
+      .def_ro("co", &awbw::Player::co)
+      .def_ro("country", &awbw::Player::country)
+      .def_ro("power_on", &awbw::Player::power_on)
+      .def_ro("eliminated", &awbw::Player::eliminated);
+
+  nb::class_<awbw::GameState>(m, "GameState", "A game position: a fixed-size plain value.")
+      .def("copy", [](const awbw::GameState& s) { return s; })
+      .def("to_bytes",
+           [](const awbw::GameState& s) {
+             return nb::bytes(reinterpret_cast<const char*>(&s), sizeof s);
+           })
+      .def_static(
+          "from_bytes",
+          [](nb::bytes b) {
+            if (b.size() != sizeof(awbw::GameState))
+              throw nb::value_error("wrong size for a GameState");
+            awbw::GameState s;
+            std::memcpy(&s, b.c_str(), sizeof s);
+            return s;
+          },
+          "data"_a)
+      .def_ro("map_id", &awbw::GameState::map_id)
+      .def_ro("settings", &awbw::GameState::settings)
+      .def_ro("day", &awbw::GameState::day)
+      .def_ro("active", &awbw::GameState::active)
+      .def_ro("winner", &awbw::GameState::winner)
+      .def_prop_ro("players",
+                   [](const awbw::GameState& s) {
+                     return std::vector<awbw::Player>(s.players, s.players + awbw::kMaxPlayers);
+                   })
+      .def(
+          "unit",
+          [](const awbw::GameState& s, int slot) {
+            check_slot(s, slot);
+            return s.units[slot];
+          },
+          "slot"_a)
+      .def(
+          "unit_slots",
+          [](const awbw::GameState& s) {
+            std::vector<int> out;
+            for (int i = 0; i < awbw::kMaxUnits; ++i) {
+              if (s.units[i].alive()) out.push_back(i);
+            }
+            return out;
+          },
+          "Slots holding a unit, in slot order.")
+      .def(
+          "unit_at",
+          [](const awbw::GameState& s, int x, int y) {
+            const awbw::MapData& md = map_for(s);
+            if (x < 0 || y < 0 || x >= md.width || y >= md.height)
+              throw nb::index_error("off the map");
+            const int slot = s.unit_at[md.tile(x, y)];
+            return slot == awbw::kNoUnit ? -1 : slot;
+          },
+          "x"_a, "y"_a, "Slot of the uncarried unit on a tile, or -1.")
+      .def(
+          "prop_owner", [](const awbw::GameState& s, int p) { return s.prop_owner[p]; }, "prop"_a)
+      .def(
+          "prop_points", [](const awbw::GameState& s, int p) { return s.prop_points[p]; }, "prop"_a)
+      .def(
+          "check", [](const awbw::GameState& s) { return awbw::check_state(map_for(s), s); },
+          "Consistency problems, or '' if the state is sound.")
+      .def("__getstate__",
+           [](const awbw::GameState& s) {
+             return nb::bytes(reinterpret_cast<const char*>(&s), sizeof s);
+           })
+      .def("__setstate__", [](awbw::GameState& s, nb::bytes b) {
+        if (b.size() != sizeof(awbw::GameState))
+          throw nb::value_error("wrong size for a GameState");
+        new (&s) awbw::GameState;
+        std::memcpy(&s, b.c_str(), sizeof s);
+      });
+
+  m.def("load_snapshot", &load_snapshot, "map"_a, "settings"_a, "day"_a, "active"_a, "players"_a,
+        "buildings"_a, "units"_a,
+        "GameState from a flattened AWBW snapshot. players: [2, 8] (co, country, funds, power, "
+        "cop_cost, scop_cost, power_on, eliminated); buildings: [n, 4] (x, y, terrain_id, "
+        "capture); units: [n, 11] (id, type, owner, x, y, hp, fuel, ammo, flags, cargo1_id, "
+        "cargo2_id).");
+
+  m.def(
+      "reachable",
+      [](const awbw::GameState& s, int slot) {
+        check_slot(s, slot);
+        const awbw::MapData& md = map_for(s);
+        auto r = std::make_unique<awbw::Reach>();
+        awbw::reachable(md, s, slot, *r);
+        std::vector<std::tuple<int, int, int>> out;
+        out.reserve(r->n);
+        for (int i = 0; i < r->n; ++i) {
+          const int t = r->tiles[i];
+          out.emplace_back(md.x_of(t), md.y_of(t), r->cost[t]);
+        }
+        return out;
+      },
+      "state"_a, "slot"_a,
+      "(x, y, cost) of every tile the unit can move through this turn, cheapest first.");
+  m.def(
+      "path_cost",
+      [](const awbw::GameState& s, int slot, const std::vector<std::tuple<int, int>>& path) {
+        check_slot(s, slot);
+        const awbw::MapData& md = map_for(s);
+        std::vector<uint16_t> tiles;
+        for (auto [x, y] : path) {
+          if (x < 0 || y < 0 || x >= md.width || y >= md.height) return -1;
+          tiles.push_back(static_cast<uint16_t>(md.tile(x, y)));
+        }
+        return awbw::path_cost(md, s, slot, tiles.data(), static_cast<int>(tiles.size()));
+      },
+      "state"_a, "slot"_a, "path"_a,
+      "Movement cost of a path of (x, y) starting on the unit's tile, or -1 if it is not a legal "
+      "move.");
+  m.def(
+      "move_points",
+      [](const awbw::GameState& s, int slot) {
+        check_slot(s, slot);
+        return awbw::move_points(s, s.units[slot]);
+      },
+      "state"_a, "slot"_a, "Movement points with CO bonuses, before the fuel cap.");
 
   nb::class_<awbw::Combatant>(
       m, "Combatant",
