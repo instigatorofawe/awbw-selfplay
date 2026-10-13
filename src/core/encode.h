@@ -20,19 +20,23 @@ namespace awbw {
 // shows with its transport: AWBW hides an enemy transport's cargo, but every
 // load happened in plain sight. HP is what players see, the displayed HP, and
 // the posterior over internal HP that watching every fight gives
-// (GameState::hp_belief).
+// (GameState::hp_belief). Sonja's opponent doesn't see her units' displayed
+// HP: one they can't tell shows as HP 0 with the probability planes over its
+// display (GameState::hp_hidden), and the army value counts the expected
+// display.
 //
 // Bump kEncodeVersion whenever a plane or global changes meaning.
-inline constexpr int kEncodeVersion = 3;
+inline constexpr int kEncodeVersion = 4;
 
 enum Plane : uint8_t {
   kPlaneTerrain,  // 0 off the board; else 1 + terrain kind now + kNumTerrainKinds * side,
                   // side 0 for terrain and unowned properties, 1 mine, 2 the opponent's
   kPlanePoints,   // capture points left on a capturable property (20 untouched), pipe seam HP
   kPlaneUnit,     // 0 none; 1 + type for mine, 1 + kNumUnitTypes + type for the opponent's
-  kPlaneHp,       // displayed HP 1..10
+  kPlaneHp,       // displayed HP 1..10, or 0 if I can't tell it (Sonja's units)
   kPlaneHpProb,   // kHpBins planes: 255 x the probability that the internal HP is
-                  // 10 * (displayed - 1) + 1 + k, for plane kPlaneHpProb + k
+                  // 10 * (displayed - 1) + 1 + k, for plane kPlaneHpProb + k; for
+                  // an HP of 0, that the displayed HP is k + 1
   kPlaneFuel = kPlaneHpProb + kHpBins,
   kPlaneAmmo,
   kPlaneFlags,   // UnitFlag bits: moved, hidden, stunned, capturing
@@ -88,7 +92,7 @@ enum SideGlobal : uint8_t {
   kGProps,           // capturable properties owned, / 30
   kGComtowers,       // / 10
   kGUnits,           // all units, hidden and carried ones included, / 50
-  kGArmyValue,       // cost x displayed HP / 10 of those units, / 100,000
+  kGArmyValue,       // cost x displayed HP / 10 of those units (expected, if hidden), / 100,000
   kGHiddenSubs,      // Subs the other player can't see, / 10
   kGHiddenStealths,  // Stealths the other player can't see, / 10
   kGHiddenValue,     // army value of the units the other player can't see, / 100,000

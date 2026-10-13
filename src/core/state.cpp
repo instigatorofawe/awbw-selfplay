@@ -47,6 +47,7 @@ int add_unit(GameState& s, const Unit& u) {
   if (n.id >= s.next_id) s.next_id = n.id + 1;
   s.unit_at[n.tile] = static_cast<uint8_t>(slot);
   belief_exact(s, slot);
+  hidden_exact(s, slot);
   return slot;
 }
 
@@ -66,6 +67,7 @@ void remove_unit(GameState& s, int slot) {
   std::memset(&u, 0, sizeof u);
   u.cargo[0] = u.cargo[1] = u.carrier = kNoUnit;
   std::memset(s.hp_belief[slot], 0, kHpBins);
+  std::memset(s.hp_hidden[slot], 0, kHpBins);
 }
 
 void relocate_unit(GameState& s, int slot, int tile) {
@@ -174,6 +176,8 @@ std::string check_state(const MapData& m, const GameState& s) {
     if (u.hp < 1 || u.hp > 100) return unit_msg(i, "HP out of range");
     if (s.hp_belief[i][u.hp - hp_bin_base(u.hp)] == 0)
       return unit_msg(i, "HP belief rules out its HP");
+    if (hides_hp(s, u.owner) && s.hp_hidden[i][displayed_hp(u.hp) - 1] == 0)
+      return unit_msg(i, "hidden-HP belief rules out its displayed HP");
     if (u.tile >= m.n_tiles) return unit_msg(i, "off the map");
     const UnitSpec& spec = kUnits[u.type];
     if (u.fuel > spec.fuel) return unit_msg(i, "fuel above max");

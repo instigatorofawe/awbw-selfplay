@@ -35,6 +35,10 @@ from .combat_check import _view, unit_id
 from .model import Replay, Turn
 from .parse import ReplayFormatError, load_replay
 
+# A unit's internal HP, HP belief and hidden-HP belief (GameState.hp_belief and
+# hidden_belief), by AWBW unit id.
+Beliefs = tuple[int, list[int], list[int]]
+
 A = _core.ACTIONS
 _FLAGS = _core.UNIT_MOVED | _core.UNIT_HIDDEN | _core.UNIT_CAPTURING
 _SEARCH_BUDGET = 100_000  # fight results tried per turn
@@ -181,7 +185,7 @@ class _TurnStepper:
         # Missile aims by action index (the last search branch to pass a power overwrites).
         self.aims: dict[int, tuple[str, int, int]] = {}
         # Each unit's (internal HP, HP belief) at the end of a turn that matched, by AWBW id.
-        self.end_beliefs: dict[int, tuple[int, list[int]]] | None = None
+        self.end_beliefs: dict[int, Beliefs] | None = None
 
     # -- log -> steps ------------------------------------------------------
 
@@ -641,7 +645,7 @@ class _TurnStepper:
             cargo = tuple(awbw_id.get(c, c) for c in g[9:11])
             self._expect(f"unit cargo: {name}", (uid, cargo), (uid, tuple(w[9:11])), n)
         self.end_beliefs = {
-            awbw_id.get(r[0], r[0]): (r[5], state.hp_belief(slot))
+            awbw_id.get(r[0], r[0]): (r[5], state.hp_belief(slot), state.hidden_belief(slot))
             for r, slot in zip(state.unit_rows(), state.unit_slots(), strict=True)
         }
 
@@ -690,11 +694,11 @@ def check_turns(replay: Replay, md: _core.MapData) -> list[tuple[TurnCheck, int]
 
 def step_turn(
     replay: Replay, md: _core.MapData, k: int, start: _core.GameState
-) -> tuple[_core.GameState, dict[int, tuple[int, list[int]]] | None, str]:
+) -> tuple[_core.GameState, dict[int, Beliefs] | None, str]:
     """Step turn ``k`` of a replay from ``start`` (its snapshot, with HP beliefs) and
     check it against turn ``k + 1``'s snapshot.
 
-    Returns that snapshot's state; each unit's internal HP and HP belief at the
+    Returns that snapshot's state; each unit's internal HP and HP beliefs at the
     end of turn ``k`` by AWBW unit id, or None if the turn couldn't be stepped
     or didn't match; and why not ("" if it matched). Raises ValueError if the
     next snapshot can't be loaded.

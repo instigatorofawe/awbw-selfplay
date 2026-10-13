@@ -97,6 +97,22 @@ void charge(Player& p, int64_t amount) {
   p.power = static_cast<int32_t>(std::max<int64_t>(p.power, std::min(p.power + amount, cap)));
 }
 
+// The power meters and funds a fight leaves its attacker's and defender's
+// owners with, given the value (displayed HP x cost) each unit lost.
+struct FightGain {
+  int32_t power[2], funds[2];
+  bool operator==(const FightGain&) const = default;
+};
+FightGain fight_gain(Player ap, Player dp, int64_t lost_att, int64_t lost_def) {
+  charge(ap, lost_att + lost_def / 2);
+  charge(dp, lost_def + lost_att / 2);
+  // War Bonds: Sasha earns half the value of the damage her units deal, in
+  // her attacks and in their counterattacks.
+  if (ap.co == kCoSasha && ap.power_on == 2) ap.funds += static_cast<int32_t>(lost_def / 20);
+  if (dp.co == kCoSasha && dp.power_on == 2) dp.funds += static_cast<int32_t>(lost_att / 20);
+  return {{ap.power, dp.power}, {ap.funds, dp.funds}};
+}
+
 void eliminate(GameState& s, int player) {
   s.players[player].eliminated = 1;
   if (s.winner == kNoOwner) s.winner = static_cast<uint8_t>(1 - player);  // two players
@@ -235,18 +251,25 @@ Status fire(const MapData& m, GameState& s, const Action& a, const Detail& d, co
   if (att_struck && choose_weapon(att, def.type) == kPrimaryWeapon) --u.ammo;
   if (def_struck && choose_weapon(def, att.type) == kPrimaryWeapon) --t.ammo;
 
-  const int64_t lost_att =
-      int64_t{displayed_hp(u.hp) - displayed_hp(o.att_hp)} * kUnits[u.type].cost;
-  const int64_t lost_def =
-      int64_t{displayed_hp(t.hp) - displayed_hp(o.def_hp)} * kUnits[t.type].cost;
-  charge(s.players[u.owner], lost_att + lost_def / 2);
-  charge(s.players[t.owner], lost_def + lost_att / 2);
-  // War Bonds: Sasha earns half the value of the damage her units deal, in
-  // her attacks and in their counterattacks.
+  const int64_t cost_att = kUnits[u.type].cost, cost_def = kUnits[t.type].cost;
+  const int drop_att = displayed_hp(u.hp) - displayed_hp(o.att_hp);
+  const int drop_def = displayed_hp(t.hp) - displayed_hp(o.def_hp);
   Player& ap = s.players[u.owner];
   Player& dp = s.players[t.owner];
-  if (ap.co == kCoSasha && ap.power_on == 2) ap.funds += static_cast<int32_t>(lost_def / 20);
-  if (dp.co == kCoSasha && dp.power_on == 2) dp.funds += static_cast<int32_t>(lost_att / 20);
+  const FightGain gain = fight_gain(ap, dp, drop_att * cost_att, drop_def * cost_def);
+  if (hides_hp(s, u.owner) || hides_hp(s, t.owner)) {
+    // Which losses of each unit the meters and funds agree with, given the other's.
+    bool att_ok[kHpBins + 1], def_ok[kHpBins + 1];
+    for (int k = 0; k <= kHpBins; ++k) {
+      att_ok[k] = fight_gain(ap, dp, k * cost_att, drop_def * cost_def) == gain;
+      def_ok[k] = fight_gain(ap, dp, drop_att * cost_att, k * cost_def) == gain;
+    }
+    hidden_fight(s, a.unit, ti, att, def, dist, o, att_ok, def_ok);
+  }
+  ap.power = gain.power[0];
+  dp.power = gain.power[1];
+  ap.funds = gain.funds[0];
+  dp.funds = gain.funds[1];
 
   fight_beliefs(s, a.unit, ti, att, def, dist, o);
   u.hp = o.att_hp;
@@ -271,10 +294,21 @@ Status capture(const MapData& m, GameState& s, const Action& a, const MovePlan& 
 
   execute_move(m, s, a.unit, mp, true);
   const Player& p = s.players[u.owner];
-  int amount = displayed_hp(u.hp) * co_state(s, u.owner).capture / 100;
-  if (p.co == kCoSami && p.power_on == 2) amount = kFullCapture;  // Victory March
+  auto amount_at = [&](int shown) {
+    if (p.co == kCoSami && p.power_on == 2) return kFullCapture;  // Victory March
+    return shown * co_state(s, u.owner).capture / 100;
+  };
+  const int amount = amount_at(displayed_hp(u.hp));
   u.flags |= kMoved | kCapturing;
   const int left = s.prop_points[prop] - amount;
+  if (hides_hp(s, u.owner)) {  // the points taken give the display away
+    bool ok[kHpBins];
+    for (int d = 1; d <= kHpBins; ++d) {
+      const int l = s.prop_points[prop] - amount_at(d);
+      ok[d - 1] = l > 0 ? l == left : left <= 0;
+    }
+    hidden_restrict(s, a.unit, ok);
+  }
   if (left > 0) {
     s.prop_points[prop] = static_cast<uint8_t>(left);
     return kOk;
@@ -321,7 +355,9 @@ Status join(const MapData& m, GameState& s, const Action& a, const MovePlan& mp)
   Unit& mover = s.units[a.unit];
   Unit& into = s.units[ti];
   const int shown = displayed_hp(mover.hp) + displayed_hp(into.hp);
-  if (shown > 10) s.players[into.owner].funds += (shown - 10) * kUnits[into.type].cost / 10;
+  const int refund = std::max(0, shown - 10) * kUnits[into.type].cost / 10;
+  s.players[into.owner].funds += refund;
+  if (hides_hp(s, into.owner)) hidden_join(s, a.unit, ti, refund);
   into.hp = static_cast<uint8_t>(10 * std::min(10, shown));  // displayed HPs add up
   belief_exact(s, ti);
   into.fuel = static_cast<uint8_t>(std::min<int>(kUnits[into.type].fuel, mover.fuel + into.fuel));
@@ -386,10 +422,12 @@ Status repair(const MapData& m, GameState& s, const Action& a, const MovePlan& m
   // +1 HP, paid per displayed HP gained (topping up 9.6 to 10 is free).
   const int hp = std::min(100, t.hp + 10);
   const int price = (displayed_hp(hp) - displayed_hp(t.hp)) * kUnits[t.type].cost / 10;
+  const int funds = p.funds;
   if (price <= p.funds) {
-    change_hp(s, ti, 10);
+    repair_hp(s, ti, 10);
     p.funds -= price;
   }
+  if (hides_hp(s, u.owner)) hidden_repairs(s, &ti, 1, 10, funds, funds - p.funds);
   resupply(t);
   s.units[a.unit].flags |= kMoved;
   return kOk;
@@ -823,6 +861,8 @@ void start_turn(const MapData& m, GameState& s) {
   // buildings. A unit whose whole repair costs more than the funds left gets
   // none and the next one is tried (the only two such turns in replays).
   const int gain = 20 + co.repair_bonus;
+  const int funds = p.funds;
+  int repaired[kMaxUnits], n_repaired = 0;
   for (int i = 0; i < m.n_props; ++i) {
     const int prop = m.prop_by_column[i];
     const int slot = s.unit_at[m.prop_tile[prop]];
@@ -830,13 +870,15 @@ void start_turn(const MapData& m, GameState& s) {
     Unit& u = s.units[slot];
     if (u.owner != me || s.prop_owner[prop] != me || !services(m.prop_kind[prop], u.type)) continue;
     resupply(u);
+    repaired[n_repaired++] = slot;
     const int hp = std::min(100, u.hp + gain);
     const int price = (displayed_hp(hp) - displayed_hp(u.hp)) * kUnits[u.type].cost / 10;
     if (price <= p.funds) {
       p.funds -= price;
-      change_hp(s, slot, gain);
+      repair_hp(s, slot, gain);
     }
   }
+  if (hides_hp(s, me)) hidden_repairs(s, repaired, n_repaired, gain, funds, funds - p.funds);
 
   // APCs resupply the units next to them.
   for (const Unit& t : s.units) {

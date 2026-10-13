@@ -88,13 +88,13 @@ void encode(const MapData& m, const GameState& s, uint8_t* planes, int h, int w,
   // Units. The board shows mine and the opponent's that I can see, cargo with
   // its transport; the totals count every unit.
   int units[2] = {}, hidden_subs[2] = {}, hidden_stealths[2] = {};
-  int64_t value[2] = {}, hidden_value[2] = {};
+  double value[2] = {}, hidden_value[2] = {};
   for (int i = 0; i < kMaxUnits; ++i) {
     const Unit& u = s.units[i];
     if (!u.alive()) continue;
     const bool carried = u.has(kCarried);
     const int side = side_of(u.owner);
-    const int64_t worth = int64_t{kUnits[u.type].cost} * displayed_hp(u.hp) / 10;
+    const double worth = kUnits[u.type].cost * display_mean_for(s, i, me) / 10;
     ++units[side];
     value[side] += worth;
     const bool seen = visible_to(m, s, carried ? u.carrier : i, 1 - u.owner);
@@ -105,8 +105,11 @@ void encode(const MapData& m, const GameState& s, uint8_t* planes, int h, int w,
     }
     if (carried || (!seen && side == 1)) continue;
     cell(kPlaneUnit, u.tile) = static_cast<uint8_t>(1 + u.type + kNumUnitTypes * side);
-    cell(kPlaneHp, u.tile) = static_cast<uint8_t>(displayed_hp(u.hp));
-    const uint8_t* w = s.hp_belief[i];
+    // A display I don't know shows as 0, with its distribution in the
+    // probability planes.
+    const bool shown = display_known_to(s, i, me);
+    cell(kPlaneHp, u.tile) = shown ? static_cast<uint8_t>(displayed_hp(u.hp)) : 0;
+    const uint8_t* w = shown ? s.hp_belief[i] : s.hp_hidden[i];
     int total = 0;
     for (int k = 0; k < kHpBins; ++k) total += w[k];
     for (int k = 0; k < kHpBins; ++k)
@@ -120,7 +123,7 @@ void encode(const MapData& m, const GameState& s, uint8_t* planes, int h, int w,
       const Unit& k = s.units[u.cargo[c]];
       cell(kPlaneCargo1 + c, u.tile) = static_cast<uint8_t>(1 + k.type);
       cell(kPlaneCargo1Hp + c, u.tile) =
-          static_cast<uint8_t>(std::lround(belief_mean(s, u.cargo[c])));
+          static_cast<uint8_t>(std::lround(hp_mean_for(s, u.cargo[c], me)));
     }
   }
 
@@ -142,10 +145,10 @@ void encode(const MapData& m, const GameState& s, uint8_t* planes, int h, int w,
     f[kGProps] = props[side] / 30.0f;
     f[kGComtowers] = towers[side] / 10.0f;
     f[kGUnits] = units[side] / 50.0f;
-    f[kGArmyValue] = static_cast<float>(value[side]) / 100000.0f;
+    f[kGArmyValue] = static_cast<float>(value[side] / 100000.0);
     f[kGHiddenSubs] = hidden_subs[side] / 10.0f;
     f[kGHiddenStealths] = hidden_stealths[side] / 10.0f;
-    f[kGHiddenValue] = static_cast<float>(hidden_value[side]) / 100000.0f;
+    f[kGHiddenValue] = static_cast<float>(hidden_value[side] / 100000.0);
     f[kGCo + p.co] = 1.0f;
   }
 

@@ -126,6 +126,37 @@ TEST_F(EncodeTest, HpIsWhatPlayersKnow) {
   EXPECT_EQ(e.at(kPlaneCargo1Hp, 1, 2), 36);  // 35.5, rounded
 }
 
+// Sonja's opponent sees her units' displays only as a distribution; she sees
+// them as anyone's.
+TEST_F(EncodeTest, SonjasHpIsHiddenFromHerOpponent) {
+  s.players[1].co = 18;
+  const int tank = put(s, m, kTank, 1, 1, 0, 64);
+  const int apc = put(s, m, kApc, 1, 1, 2);
+  const int inf = put(s, m, kInfantry, 1, 0, 2, 35);
+  load_unit(s, inf, apc);
+  const int known = put(s, m, kMech, 1, 3, 2, 50);
+  const uint8_t two[kHpBins] = {0, 0, 0, 0, 0, 255, 255, 0, 0, 0};  // 6 or 7
+  std::copy(two, two + kHpBins, s.hp_hidden[tank]);
+  const uint8_t inf_hidden[kHpBins] = {0, 0, 255, 85, 0, 0, 0, 0, 0, 0};  // 3, or less likely 4
+  std::copy(inf_hidden, inf_hidden + kHpBins, s.hp_hidden[inf]);
+  const Encoded e(m, s);
+  EXPECT_EQ(e.at(kPlaneHp, 1, 0), 0);
+  for (int k = 0; k < kHpBins; ++k)
+    EXPECT_EQ(e.at(kPlaneHpProb + k, 1, 0), k == 5 || k == 6 ? 128 : 0);
+  EXPECT_EQ(e.at(kPlaneCargo1Hp, 1, 2), 28);  // 3/4 x 2.55 + 1/4 x 3.55
+  EXPECT_EQ(e.at(kPlaneHp, 3, 2), 5);         // a display they know
+  EXPECT_EQ(e.at(kPlaneHpProb + 9, 3, 2), 255);
+  const double value = 7000 * 6.5 / 10 + 5000 + 1000 * 3.25 / 10 + 3000 * 5 / 10;
+  EXPECT_NEAR(e.opp(kGArmyValue), value / 100000.0, 1e-6);
+
+  s.active = 1;
+  const Encoded mine(m, s);
+  EXPECT_EQ(mine.at(kPlaneHp, 1, 0), 7);
+  EXPECT_EQ(mine.at(kPlaneHpProb + 3, 1, 0), 255);
+  EXPECT_EQ(mine.at(kPlaneCargo1Hp, 1, 2), 35);
+  EXPECT_NEAR(mine.me(kGArmyValue), (4900 + 5000 + 400 + 1500) / 100000.0, 1e-6);
+}
+
 TEST_F(EncodeTest, HiddenEnemiesStayOffTheBoardButCount) {
   const int sub = put(s, m, kSub, 1, 4, 0, 55);
   s.units[sub].flags |= kHidden;

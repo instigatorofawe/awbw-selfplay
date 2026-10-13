@@ -95,6 +95,11 @@ struct GameState {
   // likely 255) weighs internal HP 10 * (displayed - 1) + 1 + k. Never 0 at
   // the unit's own HP. The engine keeps it up to date (core/belief.h).
   uint8_t hp_belief[kMaxUnits][kHpBins];
+  // Sonja's opponent doesn't see her units' displayed HP either: for the units
+  // of a player who hides HP (hides_hp), hp_hidden[slot][d - 1] (0..255, the
+  // most likely 255) weighs displayed HP d as that player's opponent knows it.
+  // Never 0 at the unit's own display; unused for other units.
+  uint8_t hp_hidden[kMaxUnits][kHpBins];
   uint64_t rng[2];
 };
 static_assert(std::is_trivially_copyable_v<GameState>);

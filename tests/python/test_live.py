@@ -182,9 +182,11 @@ def test_live_turn_hidden_hp_and_unexplained_gaps(info):
     units = [unit(11, OS, "Infantry", 1, 0, "?"), unit(12, BM, "Tank", 4, 2, 10)]
     counts = {str(OS): {"total": 2, "value": 1000, "count": {"Infantry": 1, "Recon": 1}}}
     lt = live.live_turn(0, turn_data(units, counts, os_co=SONJA, power_on="N", weather="C"), info)
-    assert lt.unknown_hp == 1 and lt.turn.units[0].hp == 100
+    assert lt.unknown_hp == 1 and lt.turn.units[0].hp == 100 and lt.hidden_hp == {11}
     assert lt.unplaced == {(OS, "Recon"): 1} and not lt.put_back  # only Subs and Stealths hide
     assert lt.turn.weather_start is None
+    s = live.state(live.parse_page(page()), lt)
+    assert s.hidden_belief(s.unit_at(1, 0)) == [255] * 10  # any display, to Blue Moon
 
 
 class FakeSite(Http):

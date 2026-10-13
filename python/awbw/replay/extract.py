@@ -17,7 +17,7 @@ import numpy as np
 from .. import _core, engine
 from .parse import ReplayFormatError, load_replay
 from .stats import summarize_replay, v1_rejection
-from .step_check import step_turn
+from .step_check import Beliefs, step_turn
 
 DRAW = 2  # GameSamples.winner when nobody won
 
@@ -96,26 +96,32 @@ def extract_v0(path: str | Path) -> GameSamples | str:
     )
 
 
-def carry_beliefs(
-    state: _core.GameState, beliefs: dict[int, tuple[int, list[int]]] | None, before: _core.GameState
-) -> int:
-    """Give each unit of ``state`` (a turn's snapshot) its HP belief from the end of the
-    turn before, ``beliefs`` (by AWBW unit id, from step_turn).
+def carry_beliefs(state: _core.GameState, beliefs: dict[int, Beliefs] | None, before: _core.GameState) -> int:
+    """Give each unit of ``state`` (a turn's snapshot) its HP beliefs from the end of
+    the turn before, ``beliefs`` (by AWBW unit id, from step_turn).
 
-    Without them (that turn couldn't be stepped), a unit keeps its belief from
+    Without them (that turn couldn't be stepped), a unit keeps its beliefs from
     ``before`` (the previous turn's start) if its HP is unchanged; a new unit at
-    full HP was built; any other unit knows only its displayed HP. Returns how
-    many units that leaves knowing only their display.
+    full HP was built; any other unit knows only its displayed HP, or, if its
+    owner hides HP, nothing to the opponent. Returns how many units that leaves
+    knowing only their display.
     """
     if beliefs is None:
-        beliefs = {before.unit(slot).id: (before.unit(slot).hp, before.hp_belief(slot)) for slot in before.unit_slots()}
+        beliefs = {
+            before.unit(slot).id: (before.unit(slot).hp, before.hp_belief(slot), before.hidden_belief(slot))
+            for slot in before.unit_slots()
+        }
     unknown = 0
     for slot in state.unit_slots():
         u = state.unit(slot)
-        hp, w = beliefs.get(u.id, (-1, []))
+        hp, w, hidden = beliefs.get(u.id, (-1, [], []))
         if hp == u.hp:
             state.set_hp_belief(slot, w)
+            if state.hides_hp(u.owner):
+                state.set_hidden_belief(slot, hidden)
         elif u.id in beliefs or u.hp < 100:
             state.set_hp_unknown(slot)
+            if state.hides_hp(u.owner):
+                state.set_hidden_unknown(slot)
             unknown += 1
     return unknown

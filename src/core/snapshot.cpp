@@ -123,6 +123,7 @@ bool load_snapshot(const MapData& m, const Snapshot& snap, GameState& s, std::st
     u.ammo = static_cast<uint8_t>(std::clamp<int>(su.ammo, 0, kUnits[su.type].ammo));
     u.flags = static_cast<uint8_t>(su.flags & ~kCarried);
     belief_exact(s, slot);  // the snapshot's HP; callers that know less replace it
+    hidden_exact(s, slot);
     if (is_carried(su.id)) {
       u.flags |= kCarried;
       continue;

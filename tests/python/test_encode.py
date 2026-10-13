@@ -20,8 +20,8 @@ def md():
     return _core.register_map(910002, TERRAIN)
 
 
-def state(md, active=0):
-    players = np.array([[1, 1, 3000, 0, 270000, 630000, 0, 0], [7, 2, 8000, 0, 270000, 540000, 0, 0]])
+def state(md, active=0, co1=7):
+    players = np.array([[1, 1, 3000, 0, 270000, 630000, 0, 0], [co1, 2, 8000, 0, 270000, 540000, 0, 0]])
     buildings = np.array([[0, 0, 42, 20], [3, 0, 34, 12], [4, 2, 47, 20]])
     # id, type, owner, x, y, hp, fuel, ammo, flags, cargo1, cargo2
     units = np.array(
@@ -73,6 +73,25 @@ def test_hp_belief_gives_the_hp_planes(md):
         s.set_hp_belief(tank, [0, 255] + [0] * 8)
     s.set_hp_unknown(tank)
     assert s.hp_belief(tank) == [255] * 10
+
+
+def test_sonjas_displays_are_hidden_from_her_opponent(md):
+    s = state(md, co1=18)
+    inf = s.unit_at(3, 0)
+    assert s.hides_hp(1) and not s.hides_hp(0)
+    assert s.hidden_belief(inf) == [0] * 9 + [255]  # a snapshot's display is known
+    (planes,), _ = encode(rows(s), 8)
+    assert planes[PLANE["hp"], 0, 3] == 10
+    s.set_hidden_belief(inf, [0] * 7 + [85, 0, 255])  # 10 or, a third as likely, 8
+    (planes, theirs), _ = encode(rows(s, state(md, 1, co1=18)), 8)
+    assert planes[PLANE["hp"], 0, 3] == 0  # not known to Andy
+    assert [planes[PLANE[f"hp_p{k}"], 0, 3] for k in range(_core.HP_BINS)] == [0] * 7 + [64, 0, 191]
+    assert theirs[PLANE["hp"], 0, 3] == 10  # Sonja sees her own
+    with pytest.raises(ValueError, match="rules out"):
+        s.set_hidden_belief(inf, [255] + [0] * 9)
+    s.set_hidden_unknown(inf)
+    assert s.hidden_belief(inf) == [255] * 10
+    assert not s.check()
 
 
 def test_bad_inputs_raise(md):

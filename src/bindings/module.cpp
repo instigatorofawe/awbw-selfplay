@@ -376,6 +376,44 @@ NB_MODULE(_core, m) {
           },
           "slot"_a, "Make every internal HP the unit's display allows equally likely.")
       .def(
+          "hides_hp",
+          [](const awbw::GameState& s, int player) {
+            if (player < 0 || player >= awbw::kMaxPlayers) throw nb::index_error("bad player");
+            return awbw::hides_hp(s, player);
+          },
+          "player"_a, "Whether the player's units show no HP to the other player (Sonja).")
+      .def(
+          "hidden_belief",
+          [](const awbw::GameState& s, int slot) {
+            check_slot(s, slot);
+            return std::vector<int>(s.hp_hidden[slot], s.hp_hidden[slot] + awbw::kHpBins);
+          },
+          "slot"_a,
+          "What the opponent of a player who hides HP knows of the unit's displayed HP:\n"
+          "HP_BINS weights (0..255, the largest 255), the k-th for displayed HP k + 1. Only\n"
+          "kept for units of a player who hides HP (hides_hp).")
+      .def(
+          "set_hidden_belief",
+          [](awbw::GameState& s, int slot, const std::vector<int>& w) {
+            check_slot(s, slot);
+            if (w.size() != awbw::kHpBins) throw nb::value_error("need HP_BINS weights");
+            for (int v : w) {
+              if (v < 0 || v > awbw::kBeliefMax) throw nb::value_error("weights run 0..255");
+            }
+            if (w[awbw::displayed_hp(s.units[slot].hp) - 1] == 0)
+              throw nb::value_error("the belief rules out the unit's own displayed HP");
+            for (int k = 0; k < awbw::kHpBins; ++k)
+              s.hp_hidden[slot][k] = static_cast<uint8_t>(w[k]);
+          },
+          "slot"_a, "weights"_a, "Replace the unit's hidden-HP belief (see hidden_belief).")
+      .def(
+          "set_hidden_unknown",
+          [](awbw::GameState& s, int slot) {
+            check_slot(s, slot);
+            awbw::hidden_unknown(s, slot);
+          },
+          "slot"_a, "Make every displayed HP equally likely to the unit's opponent.")
+      .def(
           "unit_slots",
           [](const awbw::GameState& s) {
             std::vector<int> out;

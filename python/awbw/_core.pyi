@@ -21,7 +21,7 @@ MAX_PROPS: int = 128
 
 HP_BINS: int = 10
 
-STATE_BYTES: int = 5280
+STATE_BYTES: int = 6560
 
 NO_UNIT: int = 255
 
@@ -43,7 +43,7 @@ WEATHERS: tuple = ('clear', 'rain', 'snow')
 
 ACTIONS: dict = ...
 
-ENCODE_VERSION: int = 3
+ENCODE_VERSION: int = 4
 
 NUM_PLANES: int = 21
 
@@ -257,6 +257,22 @@ class GameState:
 
     def set_hp_unknown(self, slot: int) -> None:
         """Make every internal HP the unit's display allows equally likely."""
+
+    def hides_hp(self, player: int) -> bool:
+        """Whether the player's units show no HP to the other player (Sonja)."""
+
+    def hidden_belief(self, slot: int) -> list[int]:
+        """
+        What the opponent of a player who hides HP knows of the unit's displayed HP:
+        HP_BINS weights (0..255, the largest 255), the k-th for displayed HP k + 1. Only
+        kept for units of a player who hides HP (hides_hp).
+        """
+
+    def set_hidden_belief(self, slot: int, weights: Sequence[int]) -> None:
+        """Replace the unit's hidden-HP belief (see hidden_belief)."""
+
+    def set_hidden_unknown(self, slot: int) -> None:
+        """Make every displayed HP equally likely to the unit's opponent."""
 
     def unit_slots(self) -> list[int]:
         """Slots holding a unit, in slot order."""

@@ -92,6 +92,7 @@ if(AWBW_BUILD_TESTS)
     tests/cpp/test_belief.cpp
     tests/cpp/test_combat.cpp
     tests/cpp/test_encode.cpp
+    tests/cpp/test_hidden_hp.cpp
     tests/cpp/test_map.cpp
     tests/cpp/test_movegen.cpp
     tests/cpp/test_powers.cpp

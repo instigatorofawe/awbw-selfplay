@@ -581,7 +581,7 @@ def _live(args, http: Http) -> int:
     if now.estimated_hp:
         print(f"  note: {now.estimated_hp} damaged units show whole HP only; their exact HP is estimated")
     if now.unknown_hp:
-        print(f"  note: {now.unknown_hp} units hide their HP (Sonja); counted as full")
+        print(f"  note: {now.unknown_hp} units hide their HP (Sonja): any display to her opponent, full to her")
     for u in now.put_back:
         owner, mover_id = who[u.players_id], now.turn.player_id
         where = "on its own board at a guessed tile" if u.players_id == mover_id else f"out of {who[mover_id]}'s sight"

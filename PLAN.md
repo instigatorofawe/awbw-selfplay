@@ -65,7 +65,7 @@ C++ releases the GIL for all heavy work.
 
 ### Dynamic: `GameState`, POD with no pointers
 
-`src/core/state.h`; 5,280 bytes.
+`src/core/state.h`; 6,560 bytes.
 
 ```cpp
 struct Unit {                 // 16 bytes
@@ -105,6 +105,7 @@ struct GameState {
   uint8_t  prop_owner[kMaxProps];          // 128; player index or none
   uint8_t  prop_points[kMaxProps];         // capture points / seam HP / silo loaded
   uint8_t  hp_belief[kMaxUnits][10];       // what players know of each internal HP (below)
+  uint8_t  hp_hidden[kMaxUnits][10];       // Sonja's opponent's belief over each display
   uint64_t rng[2];            // luck RNG lives in the state
 };
 static_assert(std::is_trivially_copyable_v<GameState>);
@@ -120,9 +121,13 @@ static_assert(std::is_trivially_copyable_v<GameState>);
   allows, as weights 0–255 (the likeliest 255, never 0 at the true HP;
   `check_state` enforces it). The engine updates it wherever HP changes,
   so self-play and search keep it for free; see §6.
+- **Hidden displays:** Sonja's opponent doesn't see her units' displayed HP
+  either, so `hp_hidden` holds their belief over each display 1–10 (same
+  weights; never 0 at the true display), used only for units of a player
+  who `hides_hp`.
 - **Zobrist hash:** not yet; added for the transposition table (§8).
 
-- **Cloning:** a memcpy (35 ns).
+- **Cloning:** a memcpy (65 ns).
 - **Serialization:** the raw bytes. The same bytes are what the datasets store.
 - **Derived data stays out of the state.** Reachable tiles, threat maps and
   similar data are computed on demand into per-thread scratch memory.
@@ -526,7 +531,7 @@ static_assert(std::is_trivially_copyable_v<GameState>);
 Shipping C×H×W float32 one-hots per leaf is too heavy: about 600 KB per leaf
 at 40×40, around 600 MB per batch of 1024. Instead:
 
-`src/core/encode.h` (version 3), `encode_batch` in Python. Everything is
+`src/core/encode.h` (version 4), `encode_batch` in Python. Everything is
 from the side of the player to move ("me"), with owners relative, and `me`
 knows what a player who watched every turn knows:
 
@@ -562,19 +567,36 @@ knows what a player who watched every turn knows:
     display.
   - Left out: AWBW aims Rachel's and Von Bolt's missiles by internal HP,
     so where they land hints at the HPs around them.
-  - **Sonja hides her units' HP from her opponent** (they show "?"); the
-    belief treats it as seen. Power meters give most of it back: a fight
-    charges each player's meter by the displayed HP lost (× cost) unless
-    that player's power is on or the meter is full, so the opponent can
-    read the Sonja unit's displayed drop. Once a display is known,
-    repairs, joins and powers move it in plain sight (funds and the rules
-    are public). Over 15,174 fights with a Sonja unit in 150 games, 2,063
-    (13.6%) moved neither meter. To do: an opponent-side belief over the
-    display of Sonja's units, narrowed by meters, counterattack damage,
-    capture points and repair costs.
+  - **Sonja hides her units' HP from her opponent (encoder v4).** They
+    show "?", and so does her army value: the live game API reports it as
+    0 for Sonja (her unit count, funds and power meter are shown).
+    `GameState::hp_hidden` is the opponent's belief over each Sonja unit's
+    display, and the engine narrows it with everything public:
+    - a fight: the opponent's own unit's display afterwards, who survived,
+      both power meters (a fight charges each meter by the displayed HP
+      lost × cost unless that player's power is on or the meter is full)
+      and Sasha's War Bonds. `hidden_fight` enumerates display × internal
+      HP within it × luck; within a display the weights are `hp_belief`
+      while the display is known, uniform otherwise;
+    - repairs, seen only through her funds: a joint enumeration over the
+      repaired units' price classes with funds spent in order;
+    - joins (the joined unit must have been at most 9; the refund is
+      public), capture points taken, and the shifts of powers and silos.
+    - Tested against brute force for 10 fight setups (meters moving, one
+      meter, full meters, Counter Break, Sonja mirrors, War Bonds) and for
+      repairs with binding funds. On 413 Sonja games in v0: the true
+      display was never ruled out; at her opponent's turn starts 98.0% of
+      her units' displays are known (107,487 pairs); the other 2,203
+      average 2.2 possible displays with P(true) 0.72 (argmax right
+      81%), slightly over-spread: predicted 0.09 → seen 0.06, 0.23 →
+      0.19, 0.40 → 0.41, 0.77 → 0.80, 0.90 → 0.94.
+    - The encoder shows a display the player to move doesn't know as HP
+      plane 0, with `hp_p0`..`hp_p9` holding P(display = k + 1); the
+      army value uses the expected display.
   - The live tool can't yet step a game's history, so a live unit below
     10 knows only its display (every internal HP behind it equally
-    likely).
+    likely), and Sonja's "?" units have a uniform display belief. With
+    Sonja to move, her own units show as full.
 
 - **21 `uint8` planes `[21, H, W]`** (21 KB per state at 32×32). `PLANES`
   gives each one's name, number of values and whether it is an index to
@@ -584,8 +606,9 @@ knows what a player who watched every turn knows:
     67 values
   - `points` (quantity): capture points left (20 untouched), pipe seam HP
   - `unit` (index): type joined with owner, 51 values
-  - `hp` (displayed 1..10), `hp_p0`..`hp_p9` (255 × the probability that
-    the internal HP is 10 × (displayed − 1) + 1 + k), `fuel`, `ammo`
+  - `hp` (displayed 1..10, or 0 if `me` doesn't know it), `hp_p0`..`hp_p9`
+    (255 × the probability that the internal HP is 10 × (displayed − 1) +
+    1 + k; for an unknown display, that it is k + 1), `fuel`, `ammo`
     (quantities); `flags` (index: moved, hidden, stunned, capturing)
   - `cargo1`, `cargo2` (index: type), `cargo1_hp`, `cargo2_hp` (expected
     internal HP, rounded)
@@ -660,12 +683,17 @@ knows what a player who watched every turn knows:
   | critic without pre-norm, 2 epochs | 0.542 | 0.691 | 0.683 | 0.628 | 0.482 | 0.321 | 0.255 | 0.203 |
   | critic, 2 epochs (default; encoder v2, exact HP) | **0.532** | 0.689 | 0.678 | 0.616 | 0.463 | 0.300 | 0.248 | 0.199 |
   | critic, 2 epochs, encoder v3 (HP beliefs) | 0.533 | 0.691 | 0.682 | 0.619 | 0.462 | 0.298 | 0.243 | 0.201 |
+  | critic, 2 epochs, encoder v4 (Sonja's displays hidden) | **0.531** | 0.689 | 0.675 | 0.615 | 0.460 | 0.299 | 0.247 | 0.208 |
 
   - **Encoder v3** gives the critic what players know of HP (§6) instead of
     the exact HP: 0.533 against 0.532 on the same games (accuracy 68.8%,
     Brier 0.184, calibration error 0.016), about seed noise. Exact HP was
     worth almost nothing to it, so the v3 critic loses little by not
     seeing what players can't.
+  - **Encoder v4** also hides Sonja's displays from her opponent: 0.531
+    (accuracy 69.1%, Brier 0.183, calibration error 0.013), within seed
+    noise of v3. The rebuilt v0 had 76 turns the engine couldn't step and
+    625 belief restarts after them.
 
   - Accuracy 68.9%, Brier 0.184, calibration error 0.012 (without
     pre-norm: 68.3%, 0.187, 0.022, slightly under-confident at the
@@ -790,11 +818,12 @@ while training:
 - **Benchmarks** (Google Benchmark, `bench/`; current numbers on an Apple
   M-series laptop in parentheses):
   - random games/sec
-  - clone (35 ns), `check_state` (0.6 µs), `reachable` (0.4 µs per unit)
+  - clone (65 ns), `check_state` (0.6 µs), `reachable` (0.4 µs per unit)
   - `damage` (3.5 ns), `combat_outcomes` (0.7 µs for tank vs tank)
   - copy + `apply`: a move (0.5 µs), a fight with rolled luck (0.2 µs), end
-    of turn on a 30×30 board with ~50 units (0.3 µs)
-  - `encode` (1.7 µs for that board in a 32×32 window)
+    of turn on a 30×30 board with ~50 units (0.3 µs); a fight with a Sonja
+    unit whose display the opponent doesn't know (0.7 µs)
+  - `encode` (2.1 µs for that board in a 32×32 window)
   - MCTS simulations/sec, with a dummy net and with the real net
 
 ## 11. Milestones

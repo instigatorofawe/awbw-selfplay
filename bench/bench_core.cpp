@@ -4,6 +4,7 @@
 
 #include <benchmark/benchmark.h>
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -169,6 +170,29 @@ void BM_ApplyFire(benchmark::State& st) {
   }
 }
 BENCHMARK(BM_ApplyFire);
+
+// The same duel against Sonja, whose opponent doesn't see her tank's HP, with
+// both meters full so they tell nothing and the hidden belief spreads.
+void BM_ApplyFireSonja(benchmark::State& st) {
+  const MapData m = make_map({"......", "......"});
+  GameState base = make_state(m, 1, 18);
+  for (Player& p : base.players) p.power = p.cop_cost = p.scop_cost = 90000;
+  const int tank = put(base, m, kTank, 0, 0, 0);
+  const int theirs = put(base, m, kTank, 1, 2, 0, 57);
+  std::fill(base.hp_hidden[theirs] + 3, base.hp_hidden[theirs] + 7, 255);  // 4 to 7
+  Action a;
+  a.kind = kActFire;
+  a.unit = static_cast<uint8_t>(tank);
+  a.to = static_cast<uint16_t>(m.tile(1, 0));
+  a.target = static_cast<uint16_t>(m.tile(2, 0));
+  auto s = std::make_unique<GameState>();
+  for (auto _ : st) {
+    *s = base;
+    rng_next(base.rng);
+    benchmark::DoNotOptimize(apply(m, *s, a));
+  }
+}
+BENCHMARK(BM_ApplyFireSonja);
 
 // Copy the board and end the turn: the next player's income, repairs and fuel.
 void BM_EndTurn(benchmark::State& st) {
