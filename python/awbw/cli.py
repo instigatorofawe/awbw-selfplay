@@ -1,0 +1,160 @@
+"""``awbw`` command line: build indexes, fetch replays and maps, inspect, summarize."""
+
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+
+from .maps import fetch_map
+from .net import Http, cache_dir
+from .replay import load_replay
+from .replay.sources import (
+    AwbwSession,
+    ReplayUnavailable,
+    fetch_replay,
+    read_index,
+    replay_path,
+    search_mooo,
+    write_index,
+)
+from .replay.stats import summarize, v1_rejection
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="awbw")
+    p.add_argument("--rate", type=float, default=1.0, help="seconds between HTTP requests (default 1.0)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    q = sub.add_parser("index", help="search awbw.mooo.com and save the results as JSONL")
+    q.add_argument("query")
+    q.add_argument("--max-pages", type=int)
+    q.add_argument("--out", type=Path)
+
+    f = sub.add_parser("fetch", help="download replays into the cache")
+    f.add_argument("game_ids", nargs="*", type=int)
+    f.add_argument("--index", type=Path, help="JSONL index from `awbw index`")
+    f.add_argument("--limit", type=int)
+    f.add_argument("--source", choices=["mooo", "awbw"], default="mooo")
+
+    m = sub.add_parser("fetch-map", help="download maps into the cache")
+    m.add_argument("map_ids", nargs="+", type=int)
+
+    i = sub.add_parser("inspect", help="print a summary of one replay")
+    i.add_argument("replay", help="path to a replay zip, or a cached game id")
+
+    s = sub.add_parser("stats", help="summarize every replay in a directory")
+    s.add_argument("dir", nargs="?", type=Path)
+    s.add_argument("--workers", type=int)
+
+    args = p.parse_args(argv)
+    http = Http(min_interval=args.rate)
+    return {"index": _index, "fetch": _fetch, "fetch-map": _fetch_map, "inspect": _inspect, "stats": _stats}[args.cmd](
+        args, http
+    )
+
+
+def _index(args, http: Http) -> int:
+    entries = search_mooo(args.query, http, max_pages=args.max_pages)
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", args.query).strip("_").lower() or "all"
+    out = args.out or cache_dir() / "index" / f"{slug}.jsonl"
+    write_index(out, entries)
+    print(f"{len(entries)} games -> {out}")
+    return 0
+
+
+def _fetch(args, http: Http) -> int:
+    ids = list(args.game_ids)
+    if args.index:
+        ids += [e.game_id for e in read_index(args.index)]
+    ids = list(dict.fromkeys(ids))[: args.limit]
+    session = None
+    if args.source == "awbw":
+        session = AwbwSession(Http(min_interval=args.rate))
+        session.login()
+    fetched = cached = failed = 0
+    for n, game_id in enumerate(ids, 1):
+        if replay_path(game_id).exists():
+            cached += 1
+            continue
+        try:
+            fetch_replay(game_id, http, source=args.source, session=session)
+            fetched += 1
+        except ReplayUnavailable as e:
+            failed += 1
+            print(e, file=sys.stderr)
+        if n % 50 == 0:
+            print(f"[{n}/{len(ids)}] fetched={fetched} cached={cached} failed={failed}", file=sys.stderr)
+    print(f"fetched={fetched} cached={cached} failed={failed}")
+    return 0 if not failed else 1
+
+
+def _fetch_map(args, http: Http) -> int:
+    for map_id in args.map_ids:
+        print(fetch_map(map_id, http))
+    return 0
+
+
+def _inspect(args, http: Http) -> int:
+    path = Path(args.replay)
+    if not path.exists() and args.replay.isdigit():
+        path = replay_path(int(args.replay))
+    r = load_replay(path)
+    g = r.game
+    print(f"game {g.id}: {g.name!r} on map {g.map_id}")
+    print(
+        f"  type={g.type} fog={g.fog} weather={g.weather_type} powers={g.use_powers} "
+        f"funds/property={g.funds_per_property} starting={g.starting_funds} capture_win={g.capture_win}"
+    )
+    by_id = {p.id: p for p in r.turns[0].players}
+    for pid in r.player_ids:
+        p = by_id[pid]
+        print(f"  player {pid}: order={p.order} country={p.countries_id} co={p.co_id} tag_co={p.tags_co_id}")
+    print(f"  {len(r.turns)} turns over {r.days} days; orphan action turns: {r.orphan_action_turns}")
+    kinds = Counter(a.get("action", "?") for t in r.turns for a in t.actions or [])
+    print("  actions:", dict(kinds.most_common()))
+    over = r.game_over()
+    print(f"  result: {over}" if over else "  result: none in log")
+    last = r.turns[-1]
+    print(f"  last snapshot: day {last.day}, {len(last.units)} units, {len(last.buildings)} buildings")
+    return 0
+
+
+def _stats(args, http: Http) -> int:
+    root = args.dir or cache_dir() / "replays"
+    paths = sorted(root.glob("*.zip"))
+    if not paths:
+        print(f"no replays in {root}")
+        return 1
+    with ProcessPoolExecutor(args.workers) as pool:
+        summaries = list(pool.map(summarize, paths, chunksize=16))
+
+    def show(title: str, counter: Counter, top: int = 12) -> None:
+        print(f"{title}:")
+        for key, n in counter.most_common(top):
+            print(f"  {n:7d}  {key}")
+
+    print(f"{len(summaries)} replays in {root}")
+    show("errors", Counter(s.error.split(":")[0] for s in summaries if s.error))
+    ok = [s for s in summaries if not s.error]
+    show("players", Counter(s.players for s in ok))
+    show("fog", Counter(s.fog for s in ok))
+    show("weather", Counter(s.weather_type for s in ok))
+    show("powers", Counter(s.use_powers for s in ok))
+    show("funds/property", Counter(s.funds_per_property for s in ok))
+    show("starting funds", Counter(s.starting_funds for s in ok))
+    show("capture win", Counter(s.capture_win for s in ok))
+    show("game type", Counter(s.type for s in ok))
+    show("ended by", Counter(s.end_action for s in ok))
+    show("days", Counter(min(s.days // 5 * 5, 40) for s in ok), top=20)
+    show("action kinds", sum((s.actions for s in ok), Counter()), top=30)
+    rejections = Counter(v1_rejection(s) or "ACCEPTED" for s in summaries)
+    show("v1 filter", rejections)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

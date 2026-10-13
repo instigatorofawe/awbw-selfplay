@@ -1,0 +1,15 @@
+# Local data: replays, maps, indexes, shards. Never committed.
+/cache/
+
+# Build outputs
+/build/
+/dist/
+*.so
+*.pyd
+*.egg-info/
+compile_commands.json
+
+# Python
+.venv/
+__pycache__/
+.pytest_cache/
