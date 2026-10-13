@@ -174,6 +174,12 @@ static_assert(std::is_trivially_copyable_v<GameState>);
   - Silos, Black Bomb explosions, Black Boat repairs.
   - Power-meter charging is based on funds value, and the cost per star rises
     with each use.
+- **Game start:** maps carry predeployed units. In standard play the second
+  player usually gets an extra infantry to offset the first-turn advantage.
+  - Replay-derived states get these from the turn-0 snapshot.
+  - Self-play games started from a map must place them, and must assign map
+    countries to turn order exactly as AWBW does, or the compensation goes to
+    the wrong player. Verify this against turn-0 snapshots.
 - **Game end:** HQ capture, rout, capture limit, resign, day limit.
   - Self-play also has a training-only day cap; results there are decided by
     army value plus properties.
@@ -288,7 +294,9 @@ at 40×40, around 600 MB per batch of 1024. Instead:
   - pending-selection and reachable/attackable masks
   - on-map mask
 - **Global vector:** funds, income, day, power meters and thresholds, power
-  active, CO ids, settings.
+  active, CO ids, settings, and whether the to-play player moved first.
+  Starting positions are deliberately unbalanced to compensate for moving
+  first, so the critic needs to know which side it is evaluating.
 - **Network input:** the first layer is embedding lookups summed per tile, on
   the GPU.
 - **Map sizes:** pad to size buckets (e.g. 24/32/40) and batch by bucket.
