@@ -1,7 +1,10 @@
 """Train the critic on a v0 dataset: turn-start positions labelled with the game's result.
 
 The loss is cross-entropy over (loss, draw, win) for the player to move.
-Each batch gets one of the 8 flips and transposes of its square bucket.
+Each batch gets one of the 8 flips and transposes of its square bucket, and
+each sample's ratings are hidden with probability ``rating_dropout`` (also
+when the dataset doesn't know them), so the network learns to value a
+position both ways; evaluations report both.
 Validation games are a fixed 5% (``loader.in_validation``), so metrics are
 comparable across runs and dataset rebuilds.
 
@@ -42,6 +45,7 @@ class TrainConfig:
     weight_decay: float = 0.01
     warmup_steps: int = 300
     min_rating: int = 0  # keep games whose players are both rated at least this
+    rating_dropout: float = 0.25  # chance of hiding a sample's ratings from the network
     augment: bool = True
     compile: bool = False  # torch.compile the network (faster on GPUs; compiles once per bucket)
     val_fraction: float = 0.05
@@ -100,11 +104,12 @@ def prefetch[T](items: Iterable[T], depth: int = 4) -> Iterator[T]:
         yield item
 
 
-def _to_device(b: Batch, device: torch.device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _to_device(b: Batch, device: torch.device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     planes = torch.from_numpy(b.planes).to(device)
     globals_ = torch.from_numpy(b.globals).to(device)
     target = torch.from_numpy(b.z.astype(np.int64) + 1).to(device)  # z -1/0/+1 -> LOSS/DRAW/WIN
-    return planes, globals_, target
+    rating = torch.from_numpy(b.rating.astype(np.int32)).to(device)
+    return planes, globals_, target, rating
 
 
 def calibration(p_win: np.ndarray, won: np.ndarray, bins: int = 10) -> list[tuple[float, float, int]]:
@@ -161,14 +166,16 @@ def predict(
     keep: Callable[[Shard], np.ndarray] | None = None,
     val_fraction: float = 0.05,
     batch_size: int = 1024,
+    ratings: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """(loss, draw, win) probabilities, results and days for every sample of ``split``."""
+    """(loss, draw, win) probabilities, results and days for every sample of ``split``;
+    without ``ratings``, the network isn't given the players' ratings."""
     was_training = net.training
     net.eval()
     probs, zs, days = [], [], []
     for b in prefetch(batches(ds, batch_size, split=split, val_fraction=val_fraction, keep=keep, shuffle=False)):
-        planes, globals_, _ = _to_device(b, device)
-        probs.append(net(planes, globals_).float().softmax(-1).cpu().numpy())
+        planes, globals_, _, rating = _to_device(b, device)
+        probs.append(net(planes, globals_, rating if ratings else None).float().softmax(-1).cpu().numpy())
         zs.append(b.z)
         days.append(b.day)
     net.train(was_training)
@@ -232,13 +239,22 @@ def train(
     last: dict[str, Any] = {}
 
     def evaluate() -> dict[str, Any]:
-        prob, z, day = predict(net, ds, device, keep=keep, val_fraction=cfg.val_fraction)
-        m = metrics(prob, z, day)
+        """Validation metrics with ratings; ``m["no_ratings"]`` has them without."""
+        m: dict[str, Any] = {}
+        for given in (True, False) if net.cfg.ratings else (True,):
+            prob, z, day = predict(net, ds, device, keep=keep, val_fraction=cfg.val_fraction, ratings=given)
+            r = metrics(prob, z, day)
+            what = "" if not net.cfg.ratings else " with ratings" if given else " without"
+            scores = f"loss {r['loss']:.4f} accuracy {r['accuracy'] or 0:.3f} brier {r['brier']:.4f} ece {r['ece']:.4f}"
+            log(f"  val{what}: {scores}")
+            log("    by day: " + "  ".join(f"{d['days']}: {d['loss']:.3f}" for d in r["by_day"]))
+            if given:
+                m = r
+            else:
+                m["no_ratings"] = r
         m.update(epoch=round(seen / n_train, 3), step=step, seen=seen, time=time.time())
         with (out / "metrics.jsonl").open("a") as f:
             f.write(json.dumps(m) + "\n")
-        log(f"  val: loss {m['loss']:.4f} accuracy {m['accuracy'] or 0:.3f} brier {m['brier']:.4f} ece {m['ece']:.4f}")
-        log("  by day: " + "  ".join(f"{d['days']}: {d['loss']:.3f}" for d in m["by_day"]))
         return m
 
     while epoch < cfg.epochs:
@@ -256,10 +272,12 @@ def train(
         for b in prefetch(stream):
             for group in opt.param_groups:
                 group["lr"] = _lr(cfg, step, seen / planned)
-            planes, globals_, target = _to_device(b, device)
+            planes, globals_, target, rating = _to_device(b, device)
             if cfg.augment:
                 planes = dihedral(planes, int(rng.integers(8)))
-            loss = F.cross_entropy(forward(planes, globals_).float(), target)
+            hide = torch.from_numpy(rng.random(len(target)) < cfg.rating_dropout).to(device)
+            rating = rating.masked_fill(hide[:, None], -1)
+            loss = F.cross_entropy(forward(planes, globals_, rating).float(), target)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)

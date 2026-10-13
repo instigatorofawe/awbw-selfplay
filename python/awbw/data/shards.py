@@ -14,8 +14,11 @@ player to move: +1 won, -1 lost, 0 draw).
 
 Per game (``g_`` prefix): ``g_id``, ``g_map``, ``g_winner`` (player index, 2 =
 draw), ``g_end`` (index into END_ACTIONS), ``g_days``, ``g_co`` [G, 2] (AWBW CO
-ids) and ``g_rating`` [G, 2] (ratings at match time; -1 unknown), both by
-player index (0 moves first), and ``g_start`` (its first sample).
+ids) and ``g_rating`` [G, 2], both by player index (0 moves first), and
+``g_start`` (its first sample). A rating is the player's rating when the game
+started (after their latest game that ended on an earlier day; -1 unknown):
+the mooo row of the game itself rates them after it, which gives the result
+away (``sources.RatingHistory``).
 
 States are stored, never features, so changing the encoder needs no rebuild;
 ``state_bytes`` in the metadata guards against a changed GameState layout.
@@ -36,7 +39,7 @@ from ..net import write_atomic
 from ..replay.extract import GameSamples
 
 FORMAT = "awbw-shards"
-VERSION = 1
+VERSION = 2  # 2: ratings from before the game (v1's were after it)
 END_ACTIONS = ("Resign", "Capt", "Fire", "Delete", "other")
 UNKNOWN_RATING = -1
 

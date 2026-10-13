@@ -30,6 +30,7 @@ class GameSamples:
     end_action: str  # what ended the game: "Resign", "Capt", ...
     days: int
     cos: tuple[int, int]  # AWBW CO ids, by player index
+    start_date: str | None  # "YYYY-MM-DD HH:MM:SS", as the replay records it
     states: np.ndarray  # uint8 [turns, STATE_BYTES]: each turn's starting state, in order
     to_play: np.ndarray  # uint8 [turns]: player to move in each state
     day: np.ndarray  # int16 [turns]
@@ -88,6 +89,7 @@ def extract_v0(path: str | Path) -> GameSamples | str:
         end_action=over.end_action,
         days=r.days,
         cos=(by_order[0].co_id, by_order[1].co_id),
+        start_date=r.game.start_date,
         states=np.stack(rows),
         to_play=np.array(to_play, dtype=np.uint8),
         day=np.array(day, dtype=np.int16),

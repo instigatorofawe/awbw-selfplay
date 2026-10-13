@@ -9,6 +9,12 @@ their convolutions spread off the board, and pooling only reads the board. So
 a board gets the same value in any bucket it fits and wherever it sits in it,
 which is what lets training flip and transpose whole buckets.
 
+With ``ratings`` the globals also get the players' ratings (``rating_features``):
+whether they are known, their mean and the mover's lead. Training hides them
+at random (``TrainConfig.rating_dropout``), so the same network values a
+position with ratings, for two given players, or without them, for players
+of unknown strength. Self-play can give both sides the same rating.
+
 Every few blocks also add a summary of the whole board (masked mean and max
 of some channels, as in KataGo's global pooling), since who is ahead depends
 on all of it.
@@ -36,6 +42,8 @@ from .. import _core
 TERRAIN = 0  # plane index; terrain 0 is off the board
 LOSS, DRAW, WIN = 0, 1, 2  # output classes, for the player to move
 _FAR = 1e4  # subtracted off the board before a max; fits in float16
+RATING_CENTER, RATING_SCALE = 900, 200  # Global League ratings: 5% below 706, 5% above 1,182
+NUM_RATING_FEATURES = 3
 
 
 @dataclass(frozen=True)
@@ -47,6 +55,20 @@ class CriticConfig:
     head_channels: int = 32
     head_hidden: int = 128
     prenorm: bool = True  # RMS-normalize each block's input
+    ratings: bool = True  # read the players' ratings
+
+
+def rating_features(rating: torch.Tensor | None, n: int, device: torch.device) -> torch.Tensor:
+    """[N, NUM_RATING_FEATURES] from ratings [N, 2] (the player to move's, then the
+    opponent's; negative = unknown) or None: 1 if both are known, then their scaled
+    mean and the mover's scaled lead; all 0 unless both are known."""
+    if rating is None:
+        return torch.zeros(n, NUM_RATING_FEATURES, device=device)
+    r = rating.to(device=device, dtype=torch.float32)
+    known = (r >= 0).all(1, keepdim=True).float()
+    mean = (r.mean(1, keepdim=True) - RATING_CENTER) / RATING_SCALE
+    lead = (r[:, :1] - r[:, 1:]) / RATING_SCALE
+    return torch.cat([known, mean, lead], 1) * known
 
 
 def board_mask(planes: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -85,7 +107,7 @@ class TileNorm(nn.Module):
 class Embed(nn.Module):
     """Planes and globals to [B, C, S, S] features, zero off the board."""
 
-    def __init__(self, channels: int):
+    def __init__(self, channels: int, num_globals: int = _core.NUM_GLOBALS):
         super().__init__()
         planes = [(int(n), bool(cat)) for _, n, cat in _core.PLANES]
         cat = [i for i, (_, c) in enumerate(planes) if c]
@@ -100,7 +122,7 @@ class Embed(nn.Module):
         self.table = nn.Embedding(sum(sizes), channels)
         nn.init.normal_(self.table.weight, std=0.5)
         self.qty = nn.Conv2d(len(qty), channels, 1, bias=False)
-        self.globals = nn.Linear(_core.NUM_GLOBALS, channels)
+        self.globals = nn.Linear(num_globals, channels)
 
     def forward(self, planes: torch.Tensor, globals_: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         idx = planes.index_select(1, self.cat_planes).long() + self.offsets
@@ -143,11 +165,11 @@ class Block(nn.Module):
 class ValueHead(nn.Module):
     """Win/draw/loss logits from the board summary and the globals."""
 
-    def __init__(self, cfg: CriticConfig):
+    def __init__(self, cfg: CriticConfig, num_globals: int = _core.NUM_GLOBALS):
         super().__init__()
         self.norm = ChannelNorm(cfg.channels)
         self.conv = nn.Conv2d(cfg.channels, cfg.head_channels, 1)
-        self.fc1 = nn.Linear(3 * cfg.head_channels + _core.NUM_GLOBALS, cfg.head_hidden)
+        self.fc1 = nn.Linear(3 * cfg.head_channels + num_globals, cfg.head_hidden)
         self.fc2 = nn.Linear(cfg.head_hidden, 3)
 
     def forward(self, x: torch.Tensor, globals_: torch.Tensor, mask: torch.Tensor, area: torch.Tensor) -> torch.Tensor:
@@ -157,19 +179,26 @@ class ValueHead(nn.Module):
 
 
 class CriticNet(nn.Module):
-    """Encoded states to win/draw/loss logits [B, 3] (LOSS, DRAW, WIN) for the player to move."""
+    """Encoded states, and optionally the players' ratings, to win/draw/loss logits
+    [B, 3] (LOSS, DRAW, WIN) for the player to move."""
 
     def __init__(self, cfg: CriticConfig | None = None):
         super().__init__()
         self.cfg = cfg = cfg or CriticConfig()
-        self.embed = Embed(cfg.channels)
+        num_globals = _core.NUM_GLOBALS + (NUM_RATING_FEATURES if cfg.ratings else 0)
+        self.embed = Embed(cfg.channels, num_globals)
         self.blocks = nn.ModuleList(
             Block(cfg.channels, cfg.pool_channels if (i + 1) % cfg.pool_every == 0 else 0, cfg.prenorm)
             for i in range(cfg.blocks)
         )
-        self.value = ValueHead(cfg)
+        self.value = ValueHead(cfg, num_globals)
 
-    def forward(self, planes: torch.Tensor, globals_: torch.Tensor) -> torch.Tensor:
+    def forward(self, planes: torch.Tensor, globals_: torch.Tensor, rating: torch.Tensor | None = None) -> torch.Tensor:
+        """``rating`` [B, 2]: the player to move's, then the opponent's (negative =
+        unknown); None = both unknown. Ignored without ``cfg.ratings``."""
+        if self.cfg.ratings:
+            extra = rating_features(rating, len(globals_), globals_.device).to(globals_.dtype)
+            globals_ = torch.cat([globals_, extra], 1)
         mask, area = board_mask(planes)
         x = self.embed(planes, globals_, mask)
         for block in self.blocks:

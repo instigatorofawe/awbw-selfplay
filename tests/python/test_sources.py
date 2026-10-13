@@ -1,6 +1,6 @@
 from awbw.net import Http
 from awbw.replay import sources
-from awbw.replay.sources import IndexEntry, parse_search_page
+from awbw.replay.sources import IndexEntry, IndexPlayer, RatingHistory, parse_search_page
 
 # One result row as served by awbw.mooo.com (including its stray </a> in rating cells).
 ROW = (
@@ -65,3 +65,19 @@ def test_next_slice_repeats_the_oldest_day_of_a_full_slice():
     one_day = [_entry(i, "2026-04-25") for i in range(sources.MOOO_MAX_RESULTS)]
     assert sources.next_slice_before(one_day, "2026-04-26") == "2026-04-25"
     assert sources.next_slice_before(full[:9000], "2026-07-17") is None
+
+
+def test_ratings_come_from_games_that_ended_on_an_earlier_day():
+    def game(game_id: int, date: str, a: int | None, b: int) -> IndexEntry:
+        players = [IndexPlayer("a", "jake", a, False), IndexPlayer("b", "adder", b, True)]
+        return IndexEntry(game_id=game_id, name="", map_id=1, map_name="", days=10, date=date, players=players)
+
+    h = RatingHistory(
+        [game(3, "2026-10-05", 910, 890), game(1, "2026-10-01", 900, 900), game(2, "2026-10-05", None, 880)]
+    )
+    assert h.before("a", "2026-10-01 09:00:00") is None  # nothing ended before that day
+    assert h.before("a", "2026-10-02") == 900
+    assert h.before("a", "2026-10-05 23:59:59") == 900  # games ending that day may have ended after it started
+    assert h.before("a", "2026-10-06") == 910
+    assert h.before("b", "2026-10-06") == 890  # same day: the later game id
+    assert h.before("c", "2026-10-06") is None

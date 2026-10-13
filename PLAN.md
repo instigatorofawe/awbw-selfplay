@@ -350,9 +350,20 @@ static_assert(std::is_trivially_copyable_v<GameState>);
 - **[awbw.mooo.com](http://awbw.mooo.com)** (primary, no login): a public
   replay archive. `search?q=...` returns 500 results per page (`&offset=501`,
   ...), with filters like `2p`, `global league std`, `rating>1500`, `nodraw`.
-  Each row gives game id, map id, both COs, both players' ratings at match
-  time, days, date, and which player lost; players are listed in turn order.
+  Each row gives game id, map id, both COs, both players' ratings, days,
+  the end date, and which player lost; players are listed in turn order.
   `replay/<id>.zip` serves the replay itself.
+  - **A row's ratings are from after its game, so they give the result
+    away.** In 61,700 rows of players with 20+ games, winners sat 9.6
+    points above the player's neighbouring games and losers 9.8 below.
+    Players in a game are usually close, so on 39,000 games the higher
+    shown rating won 83% (Elo log loss 0.552, about as good as the whole
+    critic). `sources.RatingHistory` instead takes each player's rating
+    after their latest game that ended on a day before this one started:
+    on v0, the higher of those won 61% (log loss 0.653), and 88% of games
+    have both. (Taking the latest game ending before this one *ended* does
+    better, 0.640, but uses results from during the game, like a player
+    who stopped playing and lost several games at once.)
 - **awbw.amarriner.com** (fallback): `replay_download.php?games_id=N` needs a
   logged-in session (`logincheck.php`, `PHPSESSID` cookie). The map API
   `api/map/map_info.php?maps_id=N` is public JSON; its terrain grid is
@@ -494,7 +505,8 @@ static_assert(std::is_trivially_copyable_v<GameState>);
    used, so a dataset needs no replay cache) and `meta.json`.
    - Per sample: `state` (raw `GameState` bytes), `game`, `turn`, `day`,
      `to_play`, `z`. Per game: id, map, winner, how it ended, days, both
-     COs and both ratings.
+     COs and both players' ratings from before the game (shard format v2;
+     v1 stored the leaky ones).
    - zlib (`savez_compressed`) shrinks a state from 4,000 bytes to about
      240 and decompresses at about 3 GB/s; zstd would save 15% more, not
      worth a dependency.
@@ -518,7 +530,11 @@ static_assert(std::is_trivially_copyable_v<GameState>);
   Player swap is already covered by the relative encoding.
 - **Known biases:**
   - Human resignation thresholds vary.
-  - Results correlate with player skill: weight or filter by rating.
+  - Results depend on player skill and on future misplays, which no
+    position shows: even a perfect critic has a ceiling (the Bayes error).
+    The critic gets both players' ratings as an input (§7) so the skill
+    gap isn't noise to it, and self-play can ask for the value between
+    two equal players.
 - **Distribution shift:** the critic will see off-distribution positions once
   search uses it, so mix self-play data in over time.
 - **Snapshot timing (checked in M0):** snapshots are taken *after*
@@ -659,12 +675,22 @@ knows what a player who watched every turn knows:
   - **Head:** a 1×1 conv to 32 channels, masked pooling, concatenated with
     the raw globals, then an MLP to loss/draw/win logits. Value =
     P(win) − P(loss).
+  - **Ratings** (`ratings=True`, the default): the globals get three more
+    features: 1 if both players' pre-game ratings are known, their mean
+    and the mover's lead (centred on 900, over 200), all 0 when unknown.
+    Training hides a sample's ratings with probability 0.25
+    (`--rating-dropout`), so one network values positions with ratings and
+    without. `Critic.wdl(states, ratings)` takes (mover's, opponent's) or
+    nothing; self-play can pass the same rating for both sides; `awbw value`
+    and `awbw live` take `--ratings P1 P2`. Critics from before load with
+    `ratings=False`.
 - **Training** (`awbw train-critic`, `nn/train_critic.py`): cross-entropy
   on the result, AdamW (no decay on biases or embeddings), linear warmup
   then cosine decay over the planned samples, gradient clipping at 1.0,
   one random flip/transpose per batch. Validation each epoch; checkpoints
   per epoch, `best.pt`, and `last.pt` + `optimizer.pt` for `--resume`.
-  `--min-rating` keeps games whose players are both rated at least that.
+  `--min-rating` keeps games whose players were both rated at least that
+  before the game. Evaluations report metrics with and without ratings.
 - **Checkpoints** record the encoder signature (version, planes, global
   names); loading refuses a mismatch. `Critic.load(path).value(states)`
   values raw states for MCTS and analysis; `awbw value CKPT GAME` prints a
@@ -683,7 +709,9 @@ knows what a player who watched every turn knows:
   | critic without pre-norm, 2 epochs | 0.542 | 0.691 | 0.683 | 0.628 | 0.482 | 0.321 | 0.255 | 0.203 |
   | critic, 2 epochs (default; encoder v2, exact HP) | **0.532** | 0.689 | 0.678 | 0.616 | 0.463 | 0.300 | 0.248 | 0.199 |
   | critic, 2 epochs, encoder v3 (HP beliefs) | 0.533 | 0.691 | 0.682 | 0.619 | 0.462 | 0.298 | 0.243 | 0.201 |
-  | critic, 2 epochs, encoder v4 (Sonja's displays hidden) | **0.531** | 0.689 | 0.675 | 0.615 | 0.460 | 0.299 | 0.247 | 0.208 |
+  | critic, 2 epochs, encoder v4 (Sonja's displays hidden) | 0.531 | 0.689 | 0.675 | 0.615 | 0.460 | 0.299 | 0.247 | 0.208 |
+  | critic with ratings (default), given none | 0.531 | 0.688 | 0.677 | 0.616 | 0.460 | 0.297 | 0.243 | 0.204 |
+  | critic with ratings (default), given both players' | **0.492** | 0.629 | 0.619 | 0.570 | 0.438 | 0.285 | 0.231 | 0.199 |
 
   - **Encoder v3** gives the critic what players know of HP (§6) instead of
     the exact HP: 0.533 against 0.532 on the same games (accuracy 68.8%,
@@ -694,6 +722,16 @@ knows what a player who watched every turn knows:
     (accuracy 69.1%, Brier 0.183, calibration error 0.013), within seed
     noise of v3. The rebuilt v0 had 76 turns the engine couldn't step and
     625 belief restarts after them.
+  - **Ratings** (pre-game, known for both players in 88% of games): 0.492
+    given them (accuracy 73.7%, Brier 0.166, calibration error 0.022) and
+    0.531 without, the same as a critic that never saw them, so hiding
+    them in a quarter of training costs nothing. The gain is mostly early:
+    on validation positions with both rated, days 1–3 score 0.620 with
+    ratings, 0.626 for a logistic model of the rating gap alone, and 0.687
+    without; by days 7–9 the board adds more (0.573 vs 0.625 and 0.625).
+    The fitted gap model is steeper than Elo's 400 scale: 1.68 logits per
+    200 points (a 200-point favourite wins 84%, where Elo says 76%), and
+    at equal ratings the first player wins 47.3% (logit −0.108).
 
   - Accuracy 68.9%, Brier 0.184, calibration error 0.012 (without
     pre-norm: 68.3%, 0.187, 0.022, slightly under-confident at the

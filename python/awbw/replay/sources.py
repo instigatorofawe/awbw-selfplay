@@ -1,18 +1,21 @@
 """Where replays come from.
 
 * awbw.mooo.com: a public replay archive with a search index (no login).
-  Search results carry ratings and the loser of each game.
+  Search results carry ratings (after the game; see RatingHistory) and the
+  loser of each game.
 * awbw.amarriner.com: the official site. Replay downloads need a logged-in
   session; credentials come from the environment or a local file, never code.
 """
 
 from __future__ import annotations
 
+import bisect
 import datetime
 import json
 import os
 import re
 import urllib.parse
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
@@ -224,6 +227,33 @@ def write_index(path: Path, entries: list[IndexEntry]) -> None:
 
 def read_index(path: Path) -> list[IndexEntry]:
     return [IndexEntry.from_json(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+class RatingHistory:
+    """Each player's rating over time, from mooo index rows.
+
+    A row shows ratings after its game: in 61,700 rows of players with 20+
+    games, winners sat 9.6 points above their neighbouring games and losers
+    9.8 below. Players in a game are usually close, so the higher shown
+    rating won 83% of 39,000 games; of v0's games, the higher rating from
+    before the game started won 61%. ``before`` reads only earlier games.
+    """
+
+    def __init__(self, entries: Iterable[IndexEntry]):
+        seen: dict[str, dict[int, tuple[str, int]]] = {}
+        for e in entries:
+            for p in e.players:
+                if p.rating is not None and e.date:
+                    seen.setdefault(p.name, {})[e.game_id] = (e.date, p.rating)
+        # By end date, then game id: the order games on the same day ended in is unknown.
+        self._games = {name: sorted((d, g, r) for g, (d, r) in games.items()) for name, games in seen.items()}
+
+    def before(self, name: str, date: str) -> int | None:
+        """``name``'s rating after their latest game that ended on a day before ``date``
+        (YYYY-MM-DD, anything after it ignored), or None."""
+        games = self._games.get(name, [])
+        i = bisect.bisect_left(games, (date[:10],))
+        return games[i - 1][2] if i else None
 
 
 # --- awbw.amarriner.com ------------------------------------------------------

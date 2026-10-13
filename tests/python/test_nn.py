@@ -12,7 +12,7 @@ from awbw.cli import main
 from awbw.data.loader import encode, in_validation, state_map_ids
 from awbw.data.shards import ShardWriter
 from awbw.nn.critic import Critic, load_critic, save_critic
-from awbw.nn.model import LOSS, WIN, CriticConfig, CriticNet, value_of
+from awbw.nn.model import LOSS, RATING_SCALE, WIN, CriticConfig, CriticNet, rating_features, value_of
 from awbw.nn.train_critic import TrainConfig, dihedral, metrics, train
 from awbw.replay.extract import extract_v0
 
@@ -51,6 +51,32 @@ def test_value_ignores_padding_placement_and_batch(game):
     assert not torch.allclose(a[0], a[1])  # the two sides' views differ
     v = value_of(a)
     assert ((v >= -1) & (v <= 1)).all()
+
+
+def test_rating_features_need_both_ratings():
+    f = rating_features(torch.tensor([[1100, 900], [900, 1100], [1000, -1], [-1, -1]]), 4, torch.device("cpu"))
+    assert f[0].tolist() == pytest.approx([1, 100 / RATING_SCALE, 200 / RATING_SCALE])
+    assert f[1].tolist() == pytest.approx([1, 100 / RATING_SCALE, -200 / RATING_SCALE])
+    assert f[2:].abs().sum() == 0
+    assert rating_features(None, 2, torch.device("cpu")).abs().sum() == 0
+
+
+def test_ratings_move_the_value_and_unknown_means_none(game):
+    net = _random_net()
+    planes, globals_ = (torch.from_numpy(a) for a in encode(game.states, 16))
+    with torch.no_grad():
+        none = net(planes, globals_)
+        unknown = net(planes, globals_, torch.tensor([[1000, -1], [-1, -1]]))
+        rated = net(planes, globals_, torch.tensor([[1200, 800], [800, 1200]]))
+    torch.testing.assert_close(none, unknown)
+    assert not torch.allclose(none, rated)
+    critic = Critic(net)
+    np.testing.assert_allclose(
+        critic.wdl(game.states, [[1200, 800], [800, 1200]]), rated.softmax(-1).numpy(), rtol=1e-5
+    )
+    np.testing.assert_allclose(critic.wdl(game.states, (-1, -1)), critic.wdl(game.states), rtol=1e-6)
+    equal = critic.wdl(game.states, (1100, 1100))  # broadcast to every state
+    assert equal.shape == (2, 3) and not np.allclose(equal, critic.wdl(game.states))
 
 
 def test_dihedral_gives_eight_distinct_boards():
@@ -98,6 +124,9 @@ def test_train_checkpoints_resumes_and_evaluates(game, tmp_path):
     assert last["step"] == 12
     rows = [json.loads(line) for line in (out / "metrics.jsonl").read_text().splitlines()]
     assert [r["step"] for r in rows] == [4, 8, 12]
+    assert all(r["no_ratings"]["n"] == r["n"] for r in rows)
+    assert any(line.startswith("  val with ratings") for line in lines)
+    assert any(line.startswith("  val without") for line in lines)
 
     critic = Critic.load(out / "best.pt", "cpu")
     p = critic.wdl(game.states)
@@ -119,15 +148,18 @@ def test_load_refuses_another_encoder(game, tmp_path):
         load_critic(path)
 
 
-def test_load_reads_checkpoints_from_before_prenorm(game, tmp_path):
+def test_load_reads_checkpoints_from_before_prenorm_and_ratings(game, tmp_path):
     path = tmp_path / "c.pt"
-    old = CriticNet(dataclasses.replace(TINY, prenorm=False))
+    old = CriticNet(dataclasses.replace(TINY, prenorm=False, ratings=False))
     save_critic(path, old)
     ck = torch.load(path, weights_only=True)
-    del ck["config"]["prenorm"]
+    del ck["config"]["prenorm"], ck["config"]["ratings"]
     torch.save(ck, path)
     net, _ = load_critic(path)
     assert not net.cfg.prenorm and not any("norm" in n for n, _ in net.blocks.named_parameters())
+    assert not net.cfg.ratings
+    critic = Critic(net)
+    np.testing.assert_array_equal(critic.wdl(game.states, (1200, 800)), critic.wdl(game.states))  # ignored
 
 
 def test_critic_needs_registered_maps(game):
@@ -144,10 +176,13 @@ def test_cli_values_a_replay_and_evaluates(game, replay_cache, tmp_path, capsys)
     out = capsys.readouterr().out.splitlines()
     assert out[0].endswith("P1 won (Resign, day 1)")
     assert len(out) == 2 + len(game.states)
+    assert main(["value", str(ckpt), str(replay_cache), "--ratings", "1200", "800", "--device", "cpu"]) == 0
+    assert capsys.readouterr().out.splitlines()[2:] != out[2:]
 
     writer = ShardWriter(tmp_path / "ds")
     writer.add(game)
     writer.close()
     args = ["eval-critic", str(ckpt), "--data", str(tmp_path / "ds"), "--split", "all", "--device", "cpu"]
     assert main(args) == 0
-    assert "2 all samples" in capsys.readouterr().out
+    printed = capsys.readouterr().out
+    assert "2 all samples" in printed and "without ratings" in printed

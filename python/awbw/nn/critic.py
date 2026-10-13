@@ -13,6 +13,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from numpy.typing import ArrayLike
 
 from .. import _core
 from ..data.loader import bucket_for, encode, state_map_ids
@@ -66,7 +67,8 @@ def load_critic(path: Path, device: torch.device | str = "cpu") -> tuple[CriticN
             f"{path}: trained on encoder v{ck['encoder']['version']} features, but the engine's "
             f"encoder (v{_core.ENCODE_VERSION}) differs; retrain"
         )
-    net = CriticNet(CriticConfig(**({"prenorm": False} | ck["config"])))  # saved before prenorm existed
+    # Defaults for checkpoints saved before these options existed.
+    net = CriticNet(CriticConfig(**({"prenorm": False, "ratings": False} | ck["config"])))
     net.load_state_dict(ck["state_dict"])
     return net.to(device).eval(), ck["info"]
 
@@ -89,11 +91,19 @@ class Critic:
         return cls(net, dev)
 
     @torch.no_grad()
-    def wdl(self, states: np.ndarray, batch_size: int = 1024) -> np.ndarray:
-        """Probabilities [N, 3] of (loss, draw, win) for each state's player to move."""
+    def wdl(self, states: np.ndarray, ratings: ArrayLike | None = None, batch_size: int = 1024) -> np.ndarray:
+        """Probabilities [N, 3] of (loss, draw, win) for each state's player to move.
+
+        ``ratings`` [N, 2] or [2]: the player to move's rating, then the
+        opponent's (-1 unknown), e.g. ``(1100, 1100)`` for two equal players;
+        None: both unknown. A critic trained without ratings ignores them.
+        """
         states = np.ascontiguousarray(states, dtype=np.uint8)
         if states.ndim != 2 or states.shape[1] != _core.STATE_BYTES:
             raise ValueError(f"states must be [N, {_core.STATE_BYTES}] bytes")
+        rating = None
+        if ratings is not None:
+            rating = np.broadcast_to(np.asarray(ratings, dtype=np.int32), (len(states), 2))
         ids = state_map_ids(states)
         bucket = {}
         for m in np.unique(ids):
@@ -108,11 +118,14 @@ class Critic:
             for b in range(0, len(rows), batch_size):
                 sel = rows[b : b + batch_size]
                 planes, globals_ = encode(states[sel], int(size))
-                logits = self.net(torch.from_numpy(planes).to(self.device), torch.from_numpy(globals_).to(self.device))
+                r = None if rating is None else torch.from_numpy(np.ascontiguousarray(rating[sel])).to(self.device)
+                logits = self.net(
+                    torch.from_numpy(planes).to(self.device), torch.from_numpy(globals_).to(self.device), r
+                )
                 out[sel] = logits.float().softmax(-1).cpu().numpy()
         return out
 
-    def value(self, states: np.ndarray, batch_size: int = 1024) -> np.ndarray:
-        """Expected result in [-1, 1] for each state's player to move."""
-        p = self.wdl(states, batch_size)
+    def value(self, states: np.ndarray, ratings: ArrayLike | None = None, batch_size: int = 1024) -> np.ndarray:
+        """Expected result in [-1, 1] for each state's player to move (``ratings`` as in ``wdl``)."""
+        p = self.wdl(states, ratings, batch_size)
         return p[:, WIN] - p[:, LOSS]

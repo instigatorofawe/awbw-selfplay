@@ -21,6 +21,8 @@ from .replay.move_check import MoveReport
 from .replay.move_check import check_replay as check_moves
 from .replay.sources import (
     AwbwSession,
+    IndexEntry,
+    RatingHistory,
     ReplayUnavailable,
     fetch_replay,
     next_slice_before,
@@ -101,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
     tr.add_argument("--lr", type=float)
     tr.add_argument("--weight-decay", type=float)
     tr.add_argument("--min-rating", type=int, help="keep games whose players are both rated at least this")
+    tr.add_argument("--rating-dropout", type=float, help="chance of hiding a sample's ratings (default 0.25)")
     tr.add_argument("--eval-every", type=int, help="steps between evaluations (default: once per epoch)")
     tr.add_argument("--seed", type=int)
     tr.add_argument("--no-augment", dest="augment", action="store_false", default=None)
@@ -120,12 +123,14 @@ def main(argv: list[str] | None = None) -> int:
     va = sub.add_parser("value", help="a saved critic's view of a replay, turn by turn")
     va.add_argument("checkpoint", type=Path)
     va.add_argument("replay", help="path to a replay zip, or a cached game id")
+    va.add_argument("--ratings", type=int, nargs=2, metavar=("P1", "P2"), help="the players' ratings (default unknown)")
     va.add_argument("--device", default="auto")
 
     lv = sub.add_parser("live", help="a saved critic's view of a game in progress on awbw.amarriner.com")
     lv.add_argument("checkpoint", type=Path)
     lv.add_argument("game", help="game id or game page URL")
     lv.add_argument("--history", action="store_true", help="every turn so far, not just the current one")
+    lv.add_argument("--ratings", type=int, nargs=2, metavar=("P1", "P2"), help="the players' ratings (default unknown)")
     lv.add_argument("--device", default="auto")
 
     args = p.parse_args(argv)
@@ -385,15 +390,11 @@ if __name__ == "__main__":
     sys.exit(main())
 
 
-def _ratings_by_game() -> dict[int, tuple[tuple[int, int], tuple[bool, bool]]]:
-    """Game id -> (ratings, lost flags) from every cached index; mooo lists players in turn order."""
-    out = {}
-    for path in sorted((cache_dir() / "index").glob("*.jsonl")):
-        for e in read_index(path):
-            if len(e.players) == 2:
-                r0, r1 = (UNKNOWN_RATING if p.rating is None else p.rating for p in e.players)
-                out[e.game_id] = ((r0, r1), (e.players[0].lost, e.players[1].lost))
-    return out
+def _cached_index() -> tuple[dict[int, IndexEntry], RatingHistory]:
+    """Every cached index row of a 2-player game by game id (mooo lists players in
+    turn order), and the players' rating histories."""
+    entries = [e for path in sorted((cache_dir() / "index").glob("*.jsonl")) for e in read_index(path)]
+    return {e.game_id: e for e in entries if len(e.players) == 2}, RatingHistory(entries)
 
 
 def _dataset(args, http: Http) -> int:
@@ -404,7 +405,7 @@ def _dataset(args, http: Http) -> int:
         for old in [*out.glob("shard-*.npz"), out / "maps.npz", out / "meta.json"]:
             old.unlink(missing_ok=True)
     writer = ShardWriter(out, games_per_shard=args.games_per_shard)
-    index = _ratings_by_game()
+    index, history = _cached_index()
     rejected: Counter = Counter()
     ratings_seen: Counter = Counter()
     ends: Counter = Counter()
@@ -419,11 +420,14 @@ def _dataset(args, http: Http) -> int:
                 ratings = (UNKNOWN_RATING, UNKNOWN_RATING)
                 if (entry := index.get(g.game_id)) is None:
                     ratings_seen["not in an index"] += 1
-                elif g.winner != DRAW and entry[1] != (g.winner != 0, g.winner != 1):
+                elif g.winner != DRAW and tuple(p.lost for p in entry.players) != (g.winner != 0, g.winner != 1):
                     ratings_seen["index result disagrees; dropped"] += 1
                 else:
-                    ratings, _ = entry
-                    ratings_seen["known"] += 1
+                    # The index's own row rates players after the game; take their rating from before it.
+                    before = [history.before(p.name, g.start_date) if g.start_date else None for p in entry.players]
+                    r0, r1 = (UNKNOWN_RATING if r is None else r for r in before)
+                    ratings = (r0, r1)
+                    ratings_seen["known" if None not in before else "a player has no earlier indexed game"] += 1
                 ends[g.end_action] += 1
                 writer.add(g, ratings)
             if n % 2000 == 0:
@@ -482,6 +486,10 @@ def _eval_critic(args, http: Http) -> int:
     m = metrics(prob, z, day)
     print(f"{args.checkpoint}: {m['n']:,} {args.split} samples")
     print(f"  loss {m['loss']:.4f}  accuracy {m['accuracy'] or 0:.3f}  brier {m['brier']:.4f}  ece {m['ece']:.4f}")
+    if net.cfg.ratings:
+        prob, z, day = predict(net, ds, device, split=args.split, keep=keep, val_fraction=val_fraction, ratings=False)
+        b = metrics(prob, z, day)
+        print(f"  without ratings: loss {b['loss']:.4f}  accuracy {b['accuracy'] or 0:.3f}  brier {b['brier']:.4f}")
     print("  by day:")
     for d in m["by_day"]:
         print(f"    {d['days']:>6s}  {d['n']:8,d}  loss {d['loss']:.4f}  accuracy {d['accuracy'] or 0:.3f}")
@@ -510,7 +518,7 @@ def _value(args, http: Http) -> int:
         states.append(np.frombuffer(s.to_bytes(), np.uint8))
         movers.append(s.active)
         days.append(s.day)
-    prob = critic.wdl(np.stack(states))
+    prob = critic.wdl(np.stack(states), _mover_ratings(args.ratings, movers))
     cos = load_rules().cos
     first, second = sorted(r.turns[0].players, key=lambda p: p.order)
     names = [f"P1 {cos[first.co_id].name}", f"P2 {cos[second.co_id].name}"]
@@ -522,6 +530,13 @@ def _value(args, http: Http) -> int:
     print(f"game {r.game.id} on map {r.game.map_id}: {names[0]} vs {names[1]}; {result}")
     _print_values(names, prob, movers, days)
     return 0
+
+
+def _mover_ratings(ratings: list[int] | None, movers: list[int]) -> list[tuple[int, int]] | None:
+    """Ratings by player index to each state's (player to move's, opponent's)."""
+    if ratings is None:
+        return None
+    return [(ratings[m], ratings[1 - m]) for m in movers]
 
 
 def _print_values(names: list[str], prob, movers: list[int], days: list[int]) -> None:
@@ -550,7 +565,10 @@ def _live(args, http: Http) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
     critic = Critic.load(args.checkpoint, args.device)
-    prob = critic.wdl(np.stack([np.frombuffer(s.to_bytes(), np.uint8) for s in states]))
+    movers = [s.active for s in states]
+    prob = critic.wdl(
+        np.stack([np.frombuffer(s.to_bytes(), np.uint8) for s in states]), _mover_ratings(args.ratings, movers)
+    )
     cos = load_rules().cos
     first = turns[0].turn.players
     co = {p.id: cos[p.co_id].name for p in first}
@@ -566,7 +584,6 @@ def _live(args, http: Http) -> int:
         f"  funds {g.funds_per_property}, weather {g.weather_type.lower()}, powers {'on' if g.use_powers else 'off'}, "
         f"capture limit {cap}, day limit {limit(game.day_limit)}, unit limit {limit(game.unit_limit)}"
     )
-    movers = [s.active for s in states]
     if args.history:
         _print_values(names, prob, movers, [s.day for s in states])
     now, p, mover = turns[-1], prob[-1], movers[-1]
