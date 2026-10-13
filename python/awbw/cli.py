@@ -93,6 +93,35 @@ def main(argv: list[str] | None = None) -> int:
     tc.add_argument("--show", type=int, default=3, help="examples per mismatch kind (default 3)")
     tc.add_argument("--skips", action="store_true", help="also list why turns were skipped")
 
+    tr = sub.add_parser("train-critic", help="train the critic on a v0 dataset")
+    tr.add_argument("--data", type=Path, help="dataset directory (default: cache/datasets/v0)")
+    tr.add_argument("--out", type=Path, required=True, help="run directory for checkpoints and metrics.jsonl")
+    tr.add_argument("--epochs", type=int)
+    tr.add_argument("--batch-size", type=int)
+    tr.add_argument("--lr", type=float)
+    tr.add_argument("--weight-decay", type=float)
+    tr.add_argument("--min-rating", type=int, help="keep games whose players are both rated at least this")
+    tr.add_argument("--eval-every", type=int, help="steps between evaluations (default: once per epoch)")
+    tr.add_argument("--seed", type=int)
+    tr.add_argument("--no-augment", dest="augment", action="store_false", default=None)
+    tr.add_argument("--compile", action="store_true", default=None, help="torch.compile the network")
+    tr.add_argument("--channels", type=int)
+    tr.add_argument("--blocks", type=int)
+    tr.add_argument("--device", default="auto", help="cuda, mps, cpu or auto (default)")
+    tr.add_argument("--resume", action="store_true", help="continue the run in --out from its last epoch")
+
+    ec = sub.add_parser("eval-critic", help="validation metrics and calibration of a saved critic")
+    ec.add_argument("checkpoint", type=Path)
+    ec.add_argument("--data", type=Path, help="dataset directory (default: cache/datasets/v0)")
+    ec.add_argument("--split", choices=["val", "train", "all"], default="val")
+    ec.add_argument("--min-rating", type=int, default=0)
+    ec.add_argument("--device", default="auto")
+
+    va = sub.add_parser("value", help="a saved critic's view of a replay, turn by turn")
+    va.add_argument("checkpoint", type=Path)
+    va.add_argument("replay", help="path to a replay zip, or a cached game id")
+    va.add_argument("--device", default="auto")
+
     args = p.parse_args(argv)
     http = Http(min_interval=args.rate)
     commands = {
@@ -107,6 +136,9 @@ def main(argv: list[str] | None = None) -> int:
         "check-moves": _check_moves,
         "check-turns": _check_turns,
         "dataset": _dataset,
+        "train-critic": _train_critic,
+        "eval-critic": _eval_critic,
+        "value": _value,
     }
     return commands[args.cmd](args, http)
 
@@ -400,4 +432,84 @@ def _dataset(args, http: Http) -> int:
     print(f"{meta['games']} games, {meta['samples']} samples in {shards} shards ({size / 1e6:.0f} MB) -> {out}")
     print(f"rejected: {meta['rejected']}")
     print(f"ratings: {meta['ratings']}; ended by: {meta['ended_by']}")
+    return 0
+
+
+# The critic commands import torch only when they run, so the others start quickly.
+
+
+def _train_critic(args, http: Http) -> int:
+    from .nn.critic import pick_device
+    from .nn.model import CriticConfig
+    from .nn.train_critic import TrainConfig, train
+
+    def given(cls):
+        return cls(**{k: getattr(args, k) for k in cls.__dataclass_fields__ if getattr(args, k, None) is not None})
+
+    def log(line: str) -> None:
+        print(line, flush=True)
+
+    data = args.data or cache_dir() / "datasets" / "v0"
+    device = pick_device(args.device)
+    train(data, args.out, given(TrainConfig), given(CriticConfig), device=device, resume=args.resume, log=log)
+    return 0
+
+
+def _eval_critic(args, http: Http) -> int:
+    from .data.shards import Dataset
+    from .nn.critic import load_critic, pick_device
+    from .nn.train_critic import metrics, predict, rating_filter
+
+    device = pick_device(args.device)
+    ds = Dataset(args.data or cache_dir() / "datasets" / "v0")
+    net, info = load_critic(args.checkpoint, device)
+    val_fraction = info.get("train", {}).get("val_fraction", 0.05)
+    keep = rating_filter(args.min_rating)
+    prob, z, day = predict(net, ds, device, split=args.split, keep=keep, val_fraction=val_fraction)
+    m = metrics(prob, z, day)
+    print(f"{args.checkpoint}: {m['n']:,} {args.split} samples")
+    print(f"  loss {m['loss']:.4f}  accuracy {m['accuracy'] or 0:.3f}  brier {m['brier']:.4f}  ece {m['ece']:.4f}")
+    print("  by day:")
+    for d in m["by_day"]:
+        print(f"    {d['days']:>6s}  {d['n']:8,d}  loss {d['loss']:.4f}  accuracy {d['accuracy'] or 0:.3f}")
+    print("  calibration (predicted win chance -> observed):")
+    for pred, obs, n in m["calibration"]:
+        print(f"    {pred:5.1%} -> {obs:5.1%}  ({n:,})")
+    return 0
+
+
+def _value(args, http: Http) -> int:
+    import numpy as np
+
+    from . import engine
+    from .nn.critic import Critic
+    from .nn.model import LOSS, WIN
+    from .rules import load as load_rules
+
+    path = Path(args.replay)
+    if not path.exists() and args.replay.isdigit():
+        path = replay_path(int(args.replay))
+    r = load_replay(path)
+    critic = Critic.load(args.checkpoint, args.device)
+    md = engine.map_data(r.game.map_id)
+    states, movers, days = [], [], []
+    for turn in r.turns:
+        s = engine.state_from_turn(r, turn, md)
+        states.append(np.frombuffer(s.to_bytes(), np.uint8))
+        movers.append(s.active)
+        days.append(s.day)
+    prob = critic.wdl(np.stack(states))
+    cos = load_rules().cos
+    first, second = sorted(r.turns[0].players, key=lambda p: p.order)
+    names = [f"P1 {cos[first.co_id].name}", f"P2 {cos[second.co_id].name}"]
+    result = "no result in the log"
+    if over := r.game_over():
+        order = engine.turn_order(r)
+        won = sorted(f"P{order[p] + 1}" for p in over.winners if p in order)
+        result = f"{' and '.join(won) or 'nobody'} won ({over.end_action}, day {over.day})"
+    print(f"game {r.game.id} on map {r.game.map_id}: {names[0]} vs {names[1]}; {result}")
+    print("  day  to move              P1 wins")
+    for p, mover, day in zip(prob, movers, days, strict=True):
+        p1 = float(p[WIN] if mover == 0 else p[LOSS])
+        print(f"  {day:3d}  {names[mover]:18s}  {p1:6.1%}  {'#' * round(p1 * 40)}")
     return 0

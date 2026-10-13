@@ -1,37 +1,18 @@
 import dataclasses
-import json
 
 import numpy as np
 import pytest
 
-from _factory import GAME_ID, build_replay_zip
+from _factory import GAME_ID, MAP_ID
 from awbw import _core
 from awbw.data.loader import batches, in_validation
 from awbw.data.shards import Dataset, ShardWriter
 from awbw.replay import stats
 from awbw.replay.extract import extract_v0
 
-MAP_ID = 77  # the map the factory's replay is on
 
-
-@pytest.fixture
-def cache(tmp_path, monkeypatch):
-    """A cache with the factory replay and its 5x5 map, and no minimum game length."""
-    monkeypatch.setenv("AWBW_CACHE", str(tmp_path))
-    monkeypatch.setattr(stats, "MIN_DAYS", 1)
-    terrain = [[34 if (x, y) == (1, 2) else 1 for y in range(5)] for x in range(5)]  # [x][y]
-    (tmp_path / "maps").mkdir()
-    (tmp_path / "maps" / f"{MAP_ID}.json").write_text(
-        json.dumps({"Name": "t", "Size X": 5, "Size Y": 5, "Terrain Map": terrain, "Predeployed Units": []})
-    )
-    (tmp_path / "replays").mkdir()
-    path = tmp_path / "replays" / f"{GAME_ID}.zip"
-    path.write_bytes(build_replay_zip())
-    return path
-
-
-def test_extract_labels_each_turn_for_the_mover(cache):
-    g = extract_v0(cache)
+def test_extract_labels_each_turn_for_the_mover(replay_cache):
+    g = extract_v0(replay_cache)
     assert not isinstance(g, str), g
     assert (g.game_id, g.map_id, g.winner, g.end_action, g.cos) == (GAME_ID, MAP_ID, 0, "Resign", (22, 11))
     assert g.states.shape == (2, _core.STATE_BYTES)
@@ -40,13 +21,13 @@ def test_extract_labels_each_turn_for_the_mover(cache):
     assert _core.GameState.from_bytes(g.states[1].tobytes()).active == 1
 
 
-def test_extract_applies_the_filter(cache, monkeypatch):
+def test_extract_applies_the_filter(replay_cache, monkeypatch):
     monkeypatch.setattr(stats, "MIN_DAYS", 6)
-    assert extract_v0(cache) == "under 6 days"
+    assert extract_v0(replay_cache) == "under 6 days"
 
 
-def test_shards_round_trip_into_batches(cache, tmp_path):
-    g = extract_v0(cache)
+def test_shards_round_trip_into_batches(replay_cache, tmp_path):
+    g = extract_v0(replay_cache)
     assert not isinstance(g, str)
     writer = ShardWriter(tmp_path / "ds", games_per_shard=2)
     for i in range(3):

@@ -6,19 +6,20 @@ C++, bound to Python with nanobind. It is for:
 1. parsing real AWBW replays into training data (a critic first),
 2. deep MCTS self-play.
 
-See [PLAN.md](PLAN.md) for the design and milestones. Current status: **M1,
-the C++ rules engine**. Replay ingestion (M0) is done. The engine applies
-every action kind, every CO power's immediate effects, rain and snow, and the
-start of each turn. Replaying the cached games turn by turn from their
-snapshots, it reproduces 544,623 of 544,719 checked turns of 19,925 games
-exactly (9.7M actions); the 96 others are AWBW oddities listed in PLAN.md.
+See [PLAN.md](PLAN.md) for the design and milestones. Current status: **M1
+is finished** (the C++ rules engine, network input encoding, the v0 dataset
+and a first critic). Replay ingestion (M0) is done. The engine applies every
+action kind, every CO power's immediate effects, rain and snow, and the start
+of each turn. Replaying the cached games turn by turn from their snapshots,
+it reproduces 571,454 of 571,552 checked turns of 20,945 games exactly
+(10.2M actions); the 98 others are AWBW oddities listed in PLAN.md.
 
 ## Setup
 
 Requires [uv](https://docs.astral.sh/uv/), CMake ≥ 3.27 and a C++20 compiler.
 
 ```sh
-uv sync                      # builds the C++ extension; rebuilds when src/ changes
+uv sync                      # builds the C++ extension (rebuilt when src/ changes); installs torch
 uv run pre-commit install    # ruff, clang-format and hygiene hooks
 uv run pytest
 ```
@@ -45,7 +46,7 @@ gitignored.
 uv run awbw index "2p global league std nodraw" --max-pages 1
 uv run awbw fetch --index cache/index/2p_global_league_std_nodraw.jsonl --limit 100
 # or walk back through the archive, 10,000 games per date slice, up to a size cap
-uv run awbw crawl "2p global league std" --before 2026-04-26 --max-gb 10
+uv run awbw crawl "2p global league std" --before 2026-04-26 --max-gb 30
 
 uv run awbw inspect 1745964   # summarize one cached replay
 uv run awbw stats             # settings, endings and v1-filter counts over the cache
@@ -59,6 +60,24 @@ uv run awbw dataset           # v0 critic dataset (turn-start states + results) 
 
 Datasets store raw engine states; `awbw.data.loader.batches` encodes them
 for the network (`awbw._core.encode_batch`) as it reads.
+
+## Critic
+
+```sh
+uv run awbw train-critic --out cache/critics/run1 --compile   # on CUDA, MPS or CPU
+uv run awbw eval-critic cache/critics/run1/best.pt            # validation metrics, calibration
+uv run awbw value cache/critics/run1/best.pt 1745964          # win chances through a replay
+```
+
+```python
+from awbw.nn.critic import Critic
+
+critic = Critic.load("cache/critics/run1/best.pt")
+critic.value(states)  # raw states [N, STATE_BYTES] -> [-1, 1] for each player to move
+```
+
+On Linux, `uv sync` installs the CPU build of torch (see `[tool.uv.sources]`
+in `pyproject.toml`); point it at a CUDA index to train on a GPU there.
 
 Requests are rate-limited (`--rate`, default one per second). Please keep it
 that way: both sites are community-run.

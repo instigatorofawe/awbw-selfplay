@@ -35,6 +35,12 @@ def in_validation(game_ids: np.ndarray, fraction: float = 0.05) -> np.ndarray:
     return (h % np.uint64(1_000_000)) < np.uint64(round(fraction * 1_000_000))
 
 
+def state_map_ids(states: np.ndarray) -> np.ndarray:
+    """Map id of each raw state [N, STATE_BYTES]: ``GameState`` starts with it, as a
+    little-endian uint32."""
+    return np.ascontiguousarray(np.asarray(states, dtype=np.uint8)[:, :4]).view("<u4").ravel()
+
+
 def encode(states: np.ndarray, size: int) -> tuple[np.ndarray, np.ndarray]:
     """Planes [N, NUM_PLANES, size, size] and globals [N, NUM_GLOBALS] for raw states."""
     states = np.ascontiguousarray(states, dtype=np.uint8)
@@ -71,7 +77,8 @@ def batches(
 
     ``split`` is "train", "val" or "all". ``keep`` narrows the samples further,
     e.g. by rating or map: it gets a shard and returns a bool mask over its
-    samples. Shuffling mixes ``shards_at_once`` shards at a time.
+    samples. Shuffling mixes ``shards_at_once`` shards at a time, and the
+    batches of different buckets among them.
     """
     if split not in ("train", "val", "all"):
         raise ValueError(f"unknown split {split!r}")
@@ -89,14 +96,16 @@ def batches(
         }
         sizes = np.array([bucket_for(*ds.map_size[int(m)]) for m in meta["map_id"]])
         idx = rng.permutation(len(state)) if shuffle else np.arange(len(state))
+        todo = []
         for size in BUCKETS:
             chosen = idx[sizes[idx] == size]
-            for b in range(0, len(chosen), batch_size):
-                sel = chosen[b : b + batch_size]
-                if drop_last and len(sel) < batch_size:
-                    continue
-                planes, globals_ = encode(state[sel], size)
-                yield Batch(planes=planes, globals=globals_, **{k: v[sel] for k, v in meta.items()})
+            todo += [(size, chosen[b : b + batch_size]) for b in range(0, len(chosen), batch_size)]
+        if drop_last:
+            todo = [(size, sel) for size, sel in todo if len(sel) == batch_size]
+        for j in rng.permutation(len(todo)) if shuffle else range(len(todo)):
+            size, sel = todo[j]
+            planes, globals_ = encode(state[sel], size)
+            yield Batch(planes=planes, globals=globals_, **{k: v[sel] for k, v in meta.items()})
 
 
 def _select(sh: Shard, split: str, val_fraction: float, keep: Callable[[Shard], np.ndarray] | None) -> np.ndarray:

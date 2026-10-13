@@ -38,7 +38,7 @@ awbw-selfplay/
     engine.py                 # replay snapshot -> GameState glue
     replay/   sources.py  parse.py  combat_check.py  move_check.py  step_check.py  extract.py
     data/     shards.py  loader.py
-    nn/       model.py  train_critic.py  selfplay.py
+    nn/       model.py  critic.py  train_critic.py      # selfplay.py to come
     render.py  agents/
   tests/cpp/                  # googletest, fetched by CMake (AWBW_BUILD_TESTS)
   tests/python/               # pytest
@@ -402,15 +402,15 @@ static_assert(std::is_trivially_copyable_v<GameState>);
      a mooo search returns at most 10,000 games (later pages repeat the
      last one), so the crawl walks back in date slices (`before YYYY-MM-DD`,
      strict), saving each slice's index, fetching its maps and replays, and
-     stopping at the size cap. Reruns resume.
+     stopping at the size cap or the start of the archive. Reruns resume.
    - **Size:** replays average 111 KB (about 9 KB per day of play; game
      lengths are the same back to 2022). The archive holds about 215,000
      2p GL std games back to 2022-08-30, so all of them would take about
      24 GB. Replays from 2022, 2024 and 2025 parse and replay exactly.
    - **Cached:** the 20,000 most recent games (2026-04-25 to 2026-10-13),
      all with clear weather, no fog, powers on, 1000 funds per property;
-     crawling further back to a 10 GB cap (about 90,000 games, to roughly
-     mid-2024). Of the 20,000, 2,642 have no `GameOver` (timeouts and
+     crawling the rest of the archive (all ~215,000 games, about 24 GB,
+     with a 30 GB safety cap; about 2.5 days at one replay per second). Of the 20,000, 2,642 have no `GameOver` (timeouts and
      cancelled games) and 810 end before day 6; the median game is 14 days.
 3. **Parse** into a `Replay` object3. **Parse** into a `Replay` object: settings, players, map id, per-turn
    snapshots, per-turn actions, result. Uses our own bytes-based PHP
@@ -533,12 +533,68 @@ of my units nor on my property) are left out of planes and counts alike.
 
 ## 7. Networks
 
-- **Trunk:** a ResNet or U-Net over tiles, or a transformer over tiles.
-  Input is the embedded planes plus the broadcast global vector.
+### Critic v0 (`awbw.nn`, done)
+
+- **Model** (`nn/model.py`, `CriticNet`):
+  - **Input:** the categorical planes' embeddings summed per tile (one
+    table with offsets), plus the quantity planes scaled to [0, 1] through a
+    1×1 conv, plus the globals through a linear layer added to every tile.
+  - **Trunk:** pre-activation residual blocks (two 3×3 convs, SiLU); every
+    second block adds a KataGo-style board summary (masked mean,
+    size-scaled mean and max of 32 channels, through a linear layer) as a
+    channel bias.
+  - **No normalization in the trunk.** Each block's last conv starts at
+    zero, so every block starts as the identity (Fixup/SkipInit).
+    BatchNorm would make a value depend on its batch and count padding in
+    its statistics. A per-tile LayerNorm more than doubled the step time on
+    the M4 Pro's GPU. One LayerNorm sits before the head.
+  - **Masking:** off-board tiles are zero at every layer and pooling reads
+    only the board, so a board's value doesn't depend on its bucket,
+    where it sits in it, or the rest of the batch (tested).
+  - **Head:** a 1×1 conv to 32 channels, masked pooling, concatenated with
+    the raw globals, then an MLP to loss/draw/win logits. Value =
+    P(win) − P(loss).
+- **Training** (`awbw train-critic`, `nn/train_critic.py`): cross-entropy
+  on the result, AdamW (no decay on biases or embeddings), linear warmup
+  then cosine decay over the planned samples, gradient clipping at 1.0,
+  one random flip/transpose per batch. Validation each epoch; checkpoints
+  per epoch, `best.pt`, and `last.pt` + `optimizer.pt` for `--resume`.
+  `--min-rating` keeps games whose players are both rated at least that.
+- **Checkpoints** record the encoder signature (version, planes, global
+  names); loading refuses a mismatch. `Critic.load(path).value(states)`
+  values raw states for MCTS and analysis; `awbw value CKPT GAME` prints a
+  replay's win chances turn by turn; `awbw eval-critic` prints validation
+  metrics by day and a calibration table.
+- **Speed on an M4 Pro (MPS):** channels-last convolutions train about 3×
+  slower there, so the trunk stays NCHW. `--compile` (torch.compile)
+  gives another 1.5×. The default net (64 channels, 6 blocks, 0.51M
+  parameters) trains at about 1,600 samples/s, 5 minutes per epoch of v0.
+- **Results on v0 (17,108 games, 26,737 validation positions), log loss:**
+
+  | | all | days 1–3 | 4–6 | 7–9 | 10–12 | 13–15 | 16–20 | 21+ |
+  |---|---|---|---|---|---|---|---|---|
+  | coin flip | 0.693 | | | | | | | |
+  | logistic regression on the 98 globals | 0.550 | 0.690 | 0.682 | 0.632 | 0.500 | 0.345 | 0.269 | 0.215 |
+  | critic, 2 epochs (default) | **0.543** | 0.691 | 0.683 | 0.628 | 0.483 | 0.324 | 0.257 | 0.206 |
+
+  - Accuracy 68.1% (53% on days 1–3, 78% on days 10–12, 91% after day
+    20), Brier 0.188, calibration error 0.022. Slightly under-confident at
+    the extremes (predicted 15% wins 8%; predicted 75% wins 83%).
+  - **Overfits with more epochs:** on an 8-epoch schedule, validation loss
+    was 0.550 after epoch 1 and 0.554 after epoch 2, with days 1–6 worse
+    than a coin flip (0.705). Every position of a game shares its label, so
+    17k games are too few; the full archive (~200k games) is the fix.
+  - Positions near the end are easy because the loser resigns soon after.
+    The early game is close to a coin flip for any model: who wins is
+    decided by play still to come.
+
+### Later
+
+- **Trunk:** a larger ResNet once the full archive is in; a transformer
+  over tiles is an option.
 - **Heads:**
-  - value (tanh or W/D/L)
   - policy logits per `(channel, tile)`
-  - auxiliary heads (§5)
+  - auxiliary heads (§5): final ownership, army value N days ahead
 - **Policy gather on device.** `collect()` provides padded legal-action
   indices `[B, L_max]` (L_max ≈ 256, with an overflow fallback). The net
   gathers logits on the GPU, so only `[B, L_max]` crosses back to C++.
@@ -636,7 +692,7 @@ while training:
 | # | Milestone | Exit criteria |
 |---|---|---|
 | M0 | Replay ingestion (Python): download + cache, parser, rules JSON | Thousands of replays parsed; settings/filter stats known |
-| M1 | C++ core + bindings: state, `from_snapshot`, movegen, all actions except CO powers, `outcomes`, turn start, `encode_batch` | Every logged attack in `outcomes()` (**done**); state, snapshots, movegen (**done**); apply and turn start, every checkable turn replayed exactly (**done**); `encode_batch`, v0 dataset (**done**) → **critic v0** |
+| M1 | C++ core + bindings: state, `from_snapshot`, movegen, all actions except CO powers, `outcomes`, turn start, `encode_batch` | Every logged attack in `outcomes()` (**done**); state, snapshots, movegen (**done**); apply and turn start, every checkable turn replayed exactly (**done**); `encode_batch`, v0 dataset, **critic v0** (**done**) |
 | M2 | Exact match: full replay stepping, all COs/powers, edge cases | CO powers' effects, missile aim, rain and snow (**done**); ≥ 99% of filtered replays fully verified; benchmarks in CI |
 | M3 | v1 datasets: all idle-phase states + action labels | **Critic v1** + policy prior (behavior cloning); baselines: random, greedy, critic-greedy 1-ply |
 | M4 | Batched Gumbel MCTS with chance nodes, `collect`/`submit` | Search + critic beats critic-greedy; sims/sec measured |

@@ -20,6 +20,8 @@ dev = [
     "pytest>=8",
     "ruff>=0.17",
 ]
+# The critic and, later, self-play networks (awbw.nn).
+nn = ["torch>=2.14"]
 
 [tool.scikit-build]
 minimum-version = "build-system.requires"
@@ -29,6 +31,7 @@ wheel.py-api = "cp312"
 cmake.build-type = "Release"
 
 [tool.uv]
+default-groups = ["dev", "nn"]
 # Rebuild the extension on `uv sync` / `uv run` when C++ sources change.
 cache-keys = [
   { file = "pyproject.toml" },
@@ -36,6 +39,17 @@ cache-keys = [
   { file = "src/**/*.h" },
   { file = "src/**/*.cpp" },
 ]
+
+# Linux gets the CPU build of torch, which keeps CI small; for a CUDA machine,
+# point this at a CUDA index (e.g. https://download.pytorch.org/whl/cu130).
+# macOS wheels from PyPI already include the Metal (MPS) backend.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]

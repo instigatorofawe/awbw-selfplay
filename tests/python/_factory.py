@@ -35,6 +35,7 @@ def php_dumps(value: object) -> bytes:
 
 
 GAME_ID = 1000
+MAP_ID = 77
 P1, P2 = 501, 502
 
 
@@ -99,7 +100,7 @@ def _snapshot(day: int, active: int, units: list[PhpObject], funds: tuple[int, i
         {
             "id": GAME_ID,
             "name": "test game",
-            "maps_id": 77,
+            "maps_id": MAP_ID,
             "weather_type": "Clear",
             "weather_code": "C",
             "turn": active,
