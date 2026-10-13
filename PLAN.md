@@ -524,6 +524,13 @@ knows what a player who watched every turn knows:
   as AWBW's game page does: both players saw them built.
 - Cargo shows with its transport. AWBW doesn't show what's in an enemy
   transport, but every load happened in plain sight.
+- **HP (to come, encoder v3):** players see only displayed HP (1–10), their
+  own units' too. Power meters and Sasha's War Bonds funds count displayed
+  HP, so nothing leaks the rest. Damage depends only on displayed
+  HPs and luck, so someone who watched every fight can keep each unit's
+  posterior over the 10 internal HPs its display allows, and the posteriors
+  of different units stay independent. The encoder should give that
+  posterior instead of the internal HP; v2 still gives the internal HP.
 
 - **11 `uint8` planes `[11, H, W]`** (11 KB per state at 32×32). `PLANES`
   gives each one's name, number of values and whether it is an index to
@@ -568,11 +575,15 @@ knows what a player who watched every turn knows:
     second block adds a KataGo-style board summary (masked mean,
     size-scaled mean and max of 32 channels, through a linear layer) as a
     channel bias.
-  - **No normalization in the trunk.** Each block's last conv starts at
-    zero, so every block starts as the identity (Fixup/SkipInit).
+  - **Pre-norm:** each block reads its input through an RMS norm over each
+    tile's channels, and its last conv starts at zero, so every block
+    starts as the identity (as in SkipInit). Compiled, the RMS norm costs
+    nothing (138 ms per step of 256 against 137 without it); a per-tile
+    LayerNorm more than doubled the step time on the M4 Pro's GPU, and
     BatchNorm would make a value depend on its batch and count padding in
-    its statistics. A per-tile LayerNorm more than doubled the step time on
-    the M4 Pro's GPU. One LayerNorm sits before the head.
+    its statistics. One LayerNorm sits before the head. The first critics
+    had no norm in the trunk (`prenorm=False`, still loadable) and ignored
+    the board (below).
   - **Masking:** off-board tiles are zero at every layer and pooling reads
     only the board, so a board's value doesn't depend on its bucket,
     where it sits in it, or the rest of the batch (tested).
@@ -600,11 +611,12 @@ knows what a player who watched every turn knows:
   |---|---|---|---|---|---|---|---|---|
   | coin flip | 0.693 | | | | | | | |
   | logistic regression on the 104 globals | 0.550 | 0.690 | 0.682 | 0.632 | 0.500 | 0.344 | 0.269 | 0.212 |
-  | critic, 2 epochs (default) | **0.542** | 0.691 | 0.683 | 0.628 | 0.482 | 0.321 | 0.255 | 0.203 |
+  | critic without pre-norm, 2 epochs | 0.542 | 0.691 | 0.683 | 0.628 | 0.482 | 0.321 | 0.255 | 0.203 |
+  | critic, 2 epochs (default) | **0.532** | 0.689 | 0.678 | 0.616 | 0.463 | 0.300 | 0.248 | 0.199 |
 
-  - Accuracy 68.3% (54% on days 1–3, 78% on days 10–12, 91% after day
-    20), Brier 0.187, calibration error 0.022. Slightly under-confident at
-    the extremes (predicted 15% wins 9%; predicted 75% wins 82%).
+  - Accuracy 68.9%, Brier 0.184, calibration error 0.012 (without
+    pre-norm: 68.3%, 0.187, 0.022, slightly under-confident at the
+    extremes).
   - Encoder v2 (hidden units in the totals, 104 globals) changed little:
     0.542 against 0.543 on v1. Only 0.1% of positions have a hidden enemy
     unit.
@@ -615,16 +627,23 @@ knows what a player who watched every turn knows:
   - Positions near the end are easy because the loser resigns soon after.
     The early game is close to a coin flip for any model: who wins is
     decided by play still to come.
-  - **It ignores the board** (found 2026-10-13). On validation positions,
-    removing every unit from the planes moves P(win) by 0.0002 on average,
-    and halving every unit's HP by less than that, while halving
-    `me.army_value` moves it by 0.21. The trunk's activations grow about
-    tenfold per block from the third (RMS 1.2 after the embedding, 8,400
-    after block 6), so the head reads the globals instead. So v0 is in effect
-    a model of the globals, which is why it barely beats the logistic
-    baseline. Spectator HP rounding costs nothing for the same reason (loss
-    0.5466 either way). Next: normalize the trunk (or scale the residual
-    branches) and retrain.
+  - **Without pre-norm it ignored the board** (found and fixed
+    2026-10-13). Change in P(win) for the player to move over 4,096
+    validation positions, editing the encoded input:
+
+    | edit | no pre-norm | pre-norm |
+    |---|---|---|
+    | remove my units from the planes | −0.0001 | −0.076 |
+    | remove the opponent's units | +0.0001 | +0.045 |
+    | halve my units' HP on the planes | −0.0000 | −0.004 |
+    | halve the `me.army_value` global | −0.204 | −0.221 |
+    | trunk RMS, embedding → block 6 | 1.2 → 4,900 | 0.8 → 8.6 |
+
+    Without the norm, activations grew about tenfold per block from the
+    third, burying the board, so the head read the globals and the net was
+    in effect a model of them (0.542, barely past the logistic baseline).
+    HP still moves little with the norm, because `army_value` already
+    counts it and the edit contradicts that global.
 
 ### Later
 

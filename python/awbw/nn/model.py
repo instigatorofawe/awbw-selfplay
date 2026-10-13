@@ -13,11 +13,14 @@ Every few blocks also add a summary of the whole board (masked mean and max
 of some channels, as in KataGo's global pooling), since who is ahead depends
 on all of it.
 
-The trunk has no normalization: each block starts as the identity (its last
-convolution is zero), as in Fixup and SkipInit. BatchNorm would make a value
-depend on the rest of its batch and count the padding in its statistics, and
-a per-tile LayerNorm more than doubled the step time on Apple GPUs. A single
-LayerNorm sits before the head.
+Each block reads its input through an RMS norm over each tile's channels
+(pre-norm) and starts as the identity (its last convolution is zero). Without
+the norm (``prenorm=False``, the first critics) activations grew about tenfold
+per block and the trained network ignored the board. BatchNorm would make a
+value depend on the rest of its batch and count the padding in its
+statistics; a per-tile LayerNorm more than doubled the step time on Apple
+GPUs, while the RMS norm costs nothing once compiled. A LayerNorm sits before
+the head.
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ class CriticConfig:
     pool_channels: int = 32
     head_channels: int = 32
     head_hidden: int = 128
+    prenorm: bool = True  # RMS-normalize each block's input
 
 
 def board_mask(planes: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -64,6 +68,18 @@ class ChannelNorm(nn.LayerNorm):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return super().forward(input.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+
+
+class TileNorm(nn.Module):
+    """RMS norm over the channels of each tile of [B, C, S, S], with a learned gain; zero stays zero."""
+
+    def __init__(self, channels: int, eps: float = 1e-5):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(channels))  # 1-d: no weight decay
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x * torch.rsqrt(x.pow(2).mean(1, keepdim=True) + self.eps) * self.weight.view(1, -1, 1, 1)
 
 
 class Embed(nn.Module):
@@ -104,8 +120,9 @@ class Block(nn.Module):
     biased by a summary of the board. Expects x zero off the board, so that
     silu(x) is too."""
 
-    def __init__(self, channels: int, pool_channels: int = 0):
+    def __init__(self, channels: int, pool_channels: int = 0, prenorm: bool = True):
         super().__init__()
+        self.norm = TileNorm(channels) if prenorm else nn.Identity()
         self.conv1 = nn.Conv2d(channels, channels, 3, padding=1)
         self.conv2 = nn.Conv2d(channels, channels, 3, padding=1)
         nn.init.zeros_(self.conv2.weight)  # each block starts as the identity
@@ -115,7 +132,7 @@ class Block(nn.Module):
         self.pool = nn.Linear(3 * pool_channels, channels) if pool_channels else None
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor, area: torch.Tensor) -> torch.Tensor:
-        h = self.conv1(F.silu(x))
+        h = self.conv1(F.silu(self.norm(x)))
         if self.pool is not None:
             g = F.silu(h[:, : self.pool_channels])
             h = h + self.pool(masked_pool(g, mask, area))[:, :, None, None]
@@ -147,7 +164,8 @@ class CriticNet(nn.Module):
         self.cfg = cfg = cfg or CriticConfig()
         self.embed = Embed(cfg.channels)
         self.blocks = nn.ModuleList(
-            Block(cfg.channels, cfg.pool_channels if (i + 1) % cfg.pool_every == 0 else 0) for i in range(cfg.blocks)
+            Block(cfg.channels, cfg.pool_channels if (i + 1) % cfg.pool_every == 0 else 0, cfg.prenorm)
+            for i in range(cfg.blocks)
         )
         self.value = ValueHead(cfg)
 

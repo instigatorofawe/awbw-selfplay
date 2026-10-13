@@ -66,7 +66,7 @@ def load_critic(path: Path, device: torch.device | str = "cpu") -> tuple[CriticN
             f"{path}: trained on encoder v{ck['encoder']['version']} features, but the engine's "
             f"encoder (v{_core.ENCODE_VERSION}) differs; retrain"
         )
-    net = CriticNet(CriticConfig(**ck["config"]))
+    net = CriticNet(CriticConfig(**({"prenorm": False} | ck["config"])))  # saved before prenorm existed
     net.load_state_dict(ck["state_dict"])
     return net.to(device).eval(), ck["info"]
 

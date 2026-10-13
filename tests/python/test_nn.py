@@ -119,6 +119,17 @@ def test_load_refuses_another_encoder(game, tmp_path):
         load_critic(path)
 
 
+def test_load_reads_checkpoints_from_before_prenorm(game, tmp_path):
+    path = tmp_path / "c.pt"
+    old = CriticNet(dataclasses.replace(TINY, prenorm=False))
+    save_critic(path, old)
+    ck = torch.load(path, weights_only=True)
+    del ck["config"]["prenorm"]
+    torch.save(ck, path)
+    net, _ = load_critic(path)
+    assert not net.cfg.prenorm and not any("norm" in n for n, _ in net.blocks.named_parameters())
+
+
 def test_critic_needs_registered_maps(game):
     states = game.states.copy()
     states[:, :4] = np.frombuffer(np.uint32(987_654).tobytes(), np.uint8)
