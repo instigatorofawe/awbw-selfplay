@@ -299,6 +299,30 @@ TEST(Actions, CaptureLimitIgnoresComtowersAndLabs) {
   EXPECT_EQ(t.winner, kNoOwner);  // 4 properties, but only 2 count
 }
 
+TEST(Actions, DayLimitGoesToTheMostPropertiesCountingComtowersAndLabs) {
+  const MapData m = make_map({"CC.ctl", "......"});
+  GameState s = make_state(m);
+  s.settings.day_limit = 2;
+  put(s, m, kInfantry, 0, 2, 0);
+  put(s, m, kInfantry, 1, 2, 1);
+  pass_round(m, s);
+  ASSERT_EQ(apply(m, s, player_act(kActEndTurn)), kOk);
+  EXPECT_EQ(s.winner, kNoOwner);  // day 2 is played out
+  ASSERT_EQ(apply(m, s, player_act(kActEndTurn)), kOk);
+  EXPECT_EQ(s.winner, 1);  // tower and lab: 3 properties to 2
+  EXPECT_EQ(apply(m, s, player_act(kActEndTurn)), kErrGameOver);
+}
+
+TEST(Actions, DayLimitTieIsADraw) {
+  const MapData m = make_map({"CT.cl", "....."});
+  GameState s = make_state(m);
+  s.settings.day_limit = 1;
+  put(s, m, kInfantry, 0, 2, 0);
+  put(s, m, kInfantry, 1, 2, 1);
+  pass_round(m, s);
+  EXPECT_EQ(s.winner, kDraw);
+}
+
 class TransportTest : public ::testing::Test {
  protected:
   MapData m = make_map({"......", "......"});

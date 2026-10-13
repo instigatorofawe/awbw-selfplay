@@ -860,6 +860,14 @@ void end_turn(const MapData& m, GameState& s) {
     if (u.alive() && u.owner == me) u.flags &= static_cast<uint8_t>(~kMoved);
   }
   const int next = (me + 1) % kMaxPlayers;
+  if (next == 0 && s.settings.day_limit && s.day >= s.settings.day_limit) {
+    // Days limit: once the last day is played, the player holding more
+    // properties wins, comtowers and labs included; a tie is a draw (AWBW
+    // wiki). No cached replay has a day limit, so this is unverified.
+    const int a = count_props(m, s, 0), b = count_props(m, s, 1);
+    s.winner = a == b ? kDraw : static_cast<uint8_t>(a > b ? 0 : 1);
+    return;
+  }
   if (next == 0) ++s.day;
   s.active = static_cast<uint8_t>(next);
   start_turn(m, s);

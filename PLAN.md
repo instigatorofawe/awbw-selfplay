@@ -243,10 +243,10 @@ static_assert(std::is_trivially_copyable_v<GameState>);
     once). Progress lives on the property and resets when the unit on it
     leaves or dies. AWBW's unit `capture` flag only means "captured this
     turn". Taking the HQ, or the last lab of a player without an HQ, wins.
-    The capture limit counts properties **except comtowers and labs**: all
-    30 capture-limit wins ended exactly when that count reached the limit,
-    and 335 captures across 142 games passed the limit counting them
-    without ending the game.
+    The capture limit counts properties **except comtowers and labs**, as
+    the AWBW wiki says: all 30 capture-limit wins ended exactly when that
+    count reached the limit, and 335 captures across 142 games passed the
+    limit counting them without ending the game.
   - **Join:** displayed HPs add up (the result is a whole HP), the excess
     over 10 is refunded at a tenth of the unit cost per HP, fuel and ammo add
     up to the max, and the joined unit keeps the stationary unit's id.
@@ -326,6 +326,9 @@ static_assert(std::is_trivially_copyable_v<GameState>);
     countries to turn order exactly as AWBW does, or the compensation goes to
     the wrong player. Verify this against turn-0 snapshots.
 - **Game end:** HQ capture, rout, capture limit, resign, day limit.
+  - Day limit (AWBW wiki): after the last day is played, the player with
+    more properties wins, comtowers and labs included; a tie is a draw.
+    No cached replay has a day limit, so this is unverified.
   - Self-play also has a training-only day cap; results there are decided by
     army value plus properties.
 
