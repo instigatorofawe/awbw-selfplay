@@ -239,6 +239,7 @@ class _TurnState:
             u = self.units.get(int(rep["units_id"]))
             if u is not None:
                 u.hp = self._with_display(frozenset(min(100, h + 10) for h in u.hp), int(rep["units_hit_points"]))
+                u.ammo = self.r.units[u.type].ammo  # a Black Boat repair resupplies too
             self.players[self.active].funds = int(_view(action["Repair"]["funds"]))
         elif kind == "Supply":
             for uid in action["Supply"].get("rows") or []:

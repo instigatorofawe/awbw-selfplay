@@ -108,7 +108,8 @@ def _sequence(text: bytes, parse_one):
         if pos < n:
             if text[pos] != 0x0A:
                 raise ReplayFormatError(f"expected newline at offset {pos}")
-            pos += 1
+            while pos < n and text[pos] == 0x0A:  # AWBW occasionally leaves a blank line
+                pos += 1
 
 
 def _members(value: Any) -> list[Any]:

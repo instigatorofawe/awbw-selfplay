@@ -10,8 +10,8 @@ See [PLAN.md](PLAN.md) for the design and milestones. Current status: **M1,
 the C++ rules engine**. Replay ingestion (M0) is done. The engine applies
 every action kind, every CO power's immediate effects, rain and snow, and the
 start of each turn. Replaying the cached games turn by turn from their
-snapshots, it reproduces 197,481 of 197,503 checked turns exactly (3.53M
-actions); the 22 others are AWBW oddities listed in PLAN.md.
+snapshots, it reproduces 544,623 of 544,719 checked turns of 19,925 games
+exactly (9.7M actions); the 96 others are AWBW oddities listed in PLAN.md.
 
 ## Setup
 

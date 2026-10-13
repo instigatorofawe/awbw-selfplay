@@ -394,7 +394,9 @@ class _TurnStepper:
             logged_ammo = info[side].get("units_ammo")
             if s >= 0 and logged_ammo is not None:
                 u = state.unit(s)
-                self._expect(f"fire ammo: {self.r.units[u.type].name}", u.ammo, int(logged_ammo), step.index)
+                # AWBW can log negative ammo for a unit that fired with none left.
+                want = max(0, int(logged_ammo))
+                self._expect(f"fire ammo: {self.r.units[u.type].name}", u.ammo, want, step.index)
         cv = fire.get("copValues") or {}
         players = state.players
         for side, player in (("attacker", att_player), ("defender", def_player)):

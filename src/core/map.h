@@ -35,6 +35,8 @@ struct MapData {
   uint16_t prop_tile[kMaxProps];
   uint8_t prop_kind[kMaxProps];
   uint8_t prop_country[kMaxProps];  // owning country at game start; 0 = neutral
+  // Property indices column by column (x, then y): the order AWBW repairs in.
+  uint8_t prop_by_column[kMaxProps];
 
   int tile(int x, int y) const { return y * width + x; }
   int x_of(int t) const { return t % width; }

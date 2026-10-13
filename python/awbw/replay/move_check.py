@@ -21,6 +21,7 @@ from .. import _core, engine
 from ..maps import map_path
 from .combat_check import _view
 from .parse import ReplayFormatError, load_replay
+from .step_check import _own_path
 
 _STOP = frozenset(["Fire", "Power", "AttackSeam", "Supply", "Repair"])
 
@@ -75,7 +76,8 @@ def check_replay(path: Path) -> MoveReport:
             if move is None:
                 continue
             unit = _view(move["unit"])
-            steps = [(int(p["x"]), int(p["y"])) for p in _view(move["paths"])]
+            # A hidden unit's global path is what its opponent sees; use the mover's own.
+            steps = _own_path(move, int(unit["units_players_id"]))
             slot = slot_of.get(int(unit["units_id"]))
             if slot is None or len(steps) < 2:
                 rep.skipped["new unit" if slot is None else "no movement"] += 1

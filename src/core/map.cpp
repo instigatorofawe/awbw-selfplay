@@ -77,6 +77,13 @@ bool build_map(uint32_t id, int width, int height, const int16_t* terrain_ids, M
     out.neighbor[t][2] = y + 1 < height ? static_cast<int16_t>(t + width) : kOffMap;
     out.neighbor[t][3] = x > 0 ? static_cast<int16_t>(t - 1) : kOffMap;
   }
+  int k = 0;
+  for (int x = 0; x < width; ++x) {
+    for (int y = 0; y < height; ++y) {
+      const int p = out.prop[out.tile(x, y)];
+      if (p != kNoProp) out.prop_by_column[k++] = static_cast<uint8_t>(p);
+    }
+  }
   return true;
 }
 

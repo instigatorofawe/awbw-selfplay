@@ -129,10 +129,11 @@ bool combat_outcomes(const Combatant& att, const Combatant& def, int dist,
   luck_distribution(b, lb);
   const bool b_counters = first_is_def || can_counter(b, a, dist);
 
-  // Counter Break's pre-emptive strike does not get counterattack multipliers
-  // (checked against replays), so only a normal counter is a "counter".
+  // The second strike is the counterattack, and only it gets counterattack
+  // bonuses: Counter Break's pre-emptive strike doesn't, and the attacker's
+  // reply to one does (Sonja mirrors, checked against replays).
   const bool a_counter = false;
-  const bool b_counter = !first_is_def;
+  const bool b_counter = true;
 
   // Damage is monotone in luck, so equal results from the first strike are
   // contiguous: group them, then expand each group by the reply's luck.
@@ -180,7 +181,7 @@ bool sample_fight(const Combatant& att, const Combatant& def, int dist, uint64_t
   int a_hp = a.hp;
   if (b_hp > 0 && b_counters) {
     b.hp = static_cast<uint8_t>(b_hp);
-    a_hp = std::max(0, a.hp - damage(b, a, roll_luck(b, rng), !first_is_def));
+    a_hp = std::max(0, a.hp - damage(b, a, roll_luck(b, rng), true));  // the counterattack
   }
   out = first_is_def ? Outcome{static_cast<uint8_t>(b_hp), static_cast<uint8_t>(a_hp), 1.0}
                      : Outcome{static_cast<uint8_t>(a_hp), static_cast<uint8_t>(b_hp), 1.0};

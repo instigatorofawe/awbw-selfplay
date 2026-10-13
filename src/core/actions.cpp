@@ -605,8 +605,8 @@ bool mid_capture(const MapData& m, const GameState& s, const Unit& u) {
 //   ties to the enemy's unclamped HP.
 //   Von Bolt: displayed HP lost (at most 3) x cost, ties as Rachel's second.
 //   Sturm: displayed HP x cost, centred only on an enemy unit.
-// Against logged centres (check-turns): 1,521 of 1,578 Rachel missiles, 347
-// of 358 Von Bolt's, all 59 of Sturm's.
+// Against logged centres (check-turns): 4,520 of 4,701 Rachel missiles,
+// 1,016 of 1,049 Von Bolt's, all 165 of Sturm's.
 int aim_missile(const MapData& m, const GameState& s, MissileAim aim, int me) {
   thread_local int64_t score[kMaxTiles], tie[kMaxTiles];
   std::fill(score, score + m.n_tiles, 0);
@@ -812,21 +812,22 @@ void start_turn(const MapData& m, GameState& s) {
     paying += s.prop_owner[i] == me && pays_income(m.prop_kind[i]);
   p.funds += paying * (s.settings.funds_per_property + co.income_bonus);
 
-  // Repairs on properties, in slot (creation) order while funds last.
-  for (Unit& u : s.units) {
-    if (!u.alive() || u.owner != me || u.has(kCarried)) continue;
-    const int prop = m.prop[u.tile];
-    if (prop == kNoProp || s.prop_owner[prop] != me || !services(m.prop_kind[prop], u.type))
-      continue;
+  // Repairs on properties, column by column (x, then y) as AWBW orders its
+  // buildings. A unit whose whole repair costs more than the funds left gets
+  // none and the next one is tried (the only two such turns in replays).
+  const int gain = 20 + co.repair_bonus;
+  for (int i = 0; i < m.n_props; ++i) {
+    const int prop = m.prop_by_column[i];
+    const int slot = s.unit_at[m.prop_tile[prop]];
+    if (slot == kNoUnit) continue;
+    Unit& u = s.units[slot];
+    if (u.owner != me || s.prop_owner[prop] != me || !services(m.prop_kind[prop], u.type)) continue;
     resupply(u);
-    for (int steps = (20 + co.repair_bonus) / 10; steps > 0; --steps) {
-      const int hp = std::min(100, u.hp + 10 * steps);
-      const int price = (displayed_hp(hp) - displayed_hp(u.hp)) * kUnits[u.type].cost / 10;
-      if (price <= p.funds) {
-        p.funds -= price;
-        u.hp = static_cast<uint8_t>(hp);
-        break;
-      }
+    const int hp = std::min(100, u.hp + gain);
+    const int price = (displayed_hp(hp) - displayed_hp(u.hp)) * kUnits[u.type].cost / 10;
+    if (price <= p.funds) {
+      p.funds -= price;
+      u.hp = static_cast<uint8_t>(hp);
     }
   }
 

@@ -69,16 +69,28 @@ def test_snapshots_load_and_logged_moves_are_legal(path):
 
 # Turns where AWBW's result has no rule behind it that we can see.
 KNOWN_ODDITIES = {
-    "1724707 day 15",  # a Black Boat repair leaves a 9.5 HP infantry at 9.5; 2 others at 9.5 top up to 10
-    "1713380 day 21",  # repairs short of funds skip a hidden Stealth for a later Tank (the only such turn)
+    # A Black Boat repair leaves a 9.1-9.9 HP unit as it was; 315 others top up to 10.
+    "1643462 day 12",
+    "1644362 day 16",
+    "1645952 day 10",
+    "1650385 day 12",
+    "1651661 day 19",
+    "1653448 day 12",
+    "1654751 day 16",
+    "1671326 day 9",
+    "1674937 day 11",
+    "1724707 day 15",
+    "1636466 day 13",  # a city's capture points drop to 0 with no capture logged; it is taken next turn
+    "1695038 day 12",  # too many fight-result choices for the search budget
     "1728785 day 15",  # needs 508k fight-result tries, over the search budget
 }
 
-# Lash's terrain-star attack bonus is missing in every mismatched Lash fight,
-# all in turns played between 2026-07-26 and 07-28 02:11 (AWBW server time);
-# it holds in her fights at any other time.
+# Lash's terrain-star attack bonus is missing in every mismatched fight of a
+# Lash game (127 of 1.7M attacks), all in turns overlapping 2026-07-27 16:47 to
+# 07-28 04:57 (AWBW server time); it holds in her 90,277 other attacks from
+# starred terrain.
 LASH = 16
-LASH_GAP = ("2026-07-26", "2026-07-28 12")
+LASH_GAP = ("2026-07-27 16", "2026-07-28 06")
 
 
 def known_oddity(replay, day: int) -> bool:

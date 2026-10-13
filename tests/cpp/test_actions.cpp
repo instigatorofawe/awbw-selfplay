@@ -523,17 +523,33 @@ TEST_F(TurnStartTest, IncomeComesFromPayingProperties) {
   EXPECT_EQ(s.players[0].funds, 500 + 4 * 1000);  // HQ, cities, airport; not the tower
 }
 
-TEST_F(TurnStartTest, RepairsCostPerDisplayedHpAndStopWhenFundsRunOut) {
+TEST_F(TurnStartTest, RepairsGoColumnByColumnAndSkipWhatTheyCantAfford) {
+  const int c = put(s, m, kTank, 0, 0, 0, 50);      // 5 -> 7 costs 1400: unaffordable, skipped
   const int a = put(s, m, kInfantry, 0, 1, 0, 55);  // 6 -> 8: 200
   const int b = put(s, m, kTank, 0, 2, 0, 95);      // 10 -> 10: free
-  const int c = put(s, m, kTank, 0, 0, 0, 50);      // 5 -> 7 costs 1400; only 1 HP affordable
   s.units[b].ammo = 0;
   s.players[0].funds = -4000 + 200 + 700;  // after 4000 income: 900
   ASSERT_EQ(apply(m, s, player_act(kActEndTurn)), kOk);
-  EXPECT_EQ(s.units[c].hp, 60);  // repaired last (slot order): 700 left buys 1 HP
+  EXPECT_EQ(s.units[c].hp, 50);  // no 1 HP repair for the 700 it could pay
   EXPECT_EQ(s.units[a].hp, 75);
   EXPECT_EQ(s.units[b].hp, 100);
   EXPECT_EQ(s.units[b].ammo, 9);
+  EXPECT_EQ(s.players[0].funds, 700);
+}
+
+TEST(Actions, RepairsFollowColumnsNotCreationOrder) {
+  // Two damaged tanks on Orange Star cities; funds for one repair. The one in
+  // the left column is repaired although it was created second.
+  const MapData m = make_map({"..C", "C.."});
+  GameState s = make_state(m);
+  const int right = put(s, m, kTank, 0, 2, 0, 50);
+  const int left = put(s, m, kTank, 0, 0, 1, 50);
+  s.players[0].funds = -2000 + 1400;
+  s.day = 2;
+  s.active = 1;
+  ASSERT_EQ(apply(m, s, player_act(kActEndTurn)), kOk);
+  EXPECT_EQ(s.units[left].hp, 70);
+  EXPECT_EQ(s.units[right].hp, 50);
   EXPECT_EQ(s.players[0].funds, 0);
 }
 

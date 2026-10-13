@@ -183,9 +183,10 @@ static_assert(std::is_trivially_copyable_v<GameState>);
     and in rain as in snow; Drake ignores rain; Sturm's and Lash's cost of 1
     doesn't apply in snow. Power weather lasts until the start of its user's
     next turn (the opponent's turn is the one in it).
-  - **Verified** (`awbw check-moves`, 7,359 replays): 201,628 snapshots load
-    with no errors, and all 653,924 checkable logged moves pass, those in rain
-    and snow included. The path is legal, its cost equals the fuel spent, and
+  - **Verified** (`awbw check-moves`, 19,926 replays): 547,143 snapshots load
+    with no errors, and all 1,775,167 checkable logged moves pass, those in
+    rain and snow included (a hidden unit's path is read from its owner's
+    view; the global copy leaves out unseen steps). The path is legal, its cost equals the fuel spent, and
     the search finds no cheaper route. (Earlier, on 2,000 replays: for each
     of the 50 (unit, CO, power) combinations with ≥ 300 moves, the longest
     logged move reaches the engine's movement points exactly.)
@@ -193,11 +194,12 @@ static_assert(std::is_trivially_copyable_v<GameState>);
     action that can change movement (Fire, Power, AttackSeam, Supply, Repair);
     `check-turns` (below) checks every move with the full engine.
 - **Combat** (`src/core/combat.cpp`; [wiki formula](https://awbw.fandom.com/wiki/Damage_Formula)),
-  in exact integer math. **Verified: 627,074 of the 627,101 attacks logged
-  in 7,338 cached replays are in `combat_outcomes()`** (`awbw check-combat`).
-  The 27 others are Lash attacks in turns played between 2026-07-26 and
-  07-28 02:11 that get no terrain-star bonus; it holds in her attacks at any
-  other time, so AWBW seems to have dropped it for those days.
+  in exact integer math. **Verified: 1,709,016 of the 1,709,143 attacks
+  logged in 19,925 cached replays are in `combat_outcomes()`** (`awbw
+  check-combat`). The 127 others are fights of Lash games in turns
+  overlapping 2026-07-27 16:47 to 07-28 04:57 (AWBW server time) where her
+  terrain-star bonus is missing; it holds in her 90,277 other attacks from
+  starred terrain, so AWBW seems to have dropped it for those hours.
   - raw = (B·ATK/100 + luck − bad luck) · HP_att/10 · (200 − (DEF + stars·HP_def))/100,
     with displayed HPs.
   - Damage = floor(raw + 0.05). The wiki says "round up to a multiple of 0.05,
@@ -209,7 +211,9 @@ static_assert(std::is_trivially_copyable_v<GameState>);
     post-damage HP. Sonja's and Kanbei's "×1.5 counters" add 50 to the
     counter's ATK; luck isn't scaled. (Scaling the whole raw damage passes
     every displayed result too, but internal HPs in later snapshots rule it
-    out.) Sonja's Counter Break strike comes first and gets no bonus.
+    out.) Sonja's Counter Break strike comes first and gets no bonus; the
+    attacker's reply is then the counterattack and does get one (Sonja
+    mirrors: 310 attacks in 3 games).
   - A hidden Stealth can only be hit by Fighters and Stealths, a dived Sub
     only by Subs and Cruisers; that also rules out counters against them.
   - Checked quirks: Koal's road bonus excludes bridges; Jake's plains bonus
@@ -254,7 +258,8 @@ static_assert(std::is_trivially_copyable_v<GameState>);
   - **Supply:** an APC also refills the cargo of the transports next to it,
     as an action and at turn start.
   - **Black Boat repair:** +1 HP priced per displayed HP gained, so topping up
-    9.6 to 10 is free (26 of 27 cases; one 9.5 stays put).
+    9.6 to 10 is free (315 of 325 repairs of a 9.1-9.9 HP unit; the other
+    10 leave it as it was, with no pattern found).
   - **Pipe seams** (1,483 attacks): hit as an undefended full-HP Neotank on
     0-star terrain with no luck: base × ATK/100 × HP/10. Broken at 0.
   - **Hidden attackers:** a unit that can't see a hidden Stealth deals it
@@ -281,8 +286,8 @@ static_assert(std::is_trivially_copyable_v<GameState>);
       pages): each candidate centre scores the units in reach, the user's
       own negative; ties go to a second score and then the top-left tile.
       Replays give the logged centres; otherwise the engine aims them. It
-      matches AWBW for 1,521 of 1,578 Rachel missiles, 347 of 358 Von Bolt
-      missiles and all 59 Sturm missiles.
+      matches AWBW for 4,520 of 4,701 Rachel missiles, 1,016 of 1,049 Von
+      Bolt missiles and all 165 Sturm missiles.
   - Builds logged with no unit didn't happen. Game-ending captures log the
     remaining points without resetting them.
 - **Turn start** (for the player whose turn begins):
@@ -295,8 +300,11 @@ static_assert(std::is_trivially_copyable_v<GameState>);
     labs), plus Sasha's 100 per property
   - repairs on own properties of the right type (cities, HQs and bases for
     ground units, airports for air, ports for ships): +2 HP (+3 Rachel)
-    priced per displayed HP gained, in slot (creation) order, falling back to
-    +1 HP when only that is affordable; resupply there in any case
+    priced per displayed HP gained, property by property column by column
+    (x, then y), as AWBW numbers its buildings; a unit whose whole repair is
+    unaffordable gets none, and the next is tried (the only two such turns
+    in 545k: column order and no partial repair leave exactly AWBW's funds,
+    creation order doesn't); resupply there in any case
   - APC resupply of neighbours and their cargo; air units and ships at 0 fuel
     are destroyed
 - **COs:**
@@ -418,17 +426,15 @@ static_assert(std::is_trivially_copyable_v<GameState>);
      snapshot, with conflict-directed backjumping (each unit's HP records the
      fight choices it depends on).
    - The divergence report *is* the rules bug tracker.
-   - **Result on the cache (7,245 replays, 198,438 turns): 197,481 of
-     197,503 checked turns match exactly (3.53M actions).** 935 turns are
-     skipped: 934 with no log, and one whose next snapshot is missing (the
-     opponent's turn was never recorded). The 22 mismatches are
-     known oddities in `tests/python/test_cached_replays.py`:
-     - 19 turns of Lash games in that window (her missing terrain bonus);
-     - a Black Boat repair that leaves 9.5 HP (two others top up to 10);
-     - the only turn whose repairs ran short of funds: AWBW skipped a hidden
-       Stealth (repaired in other turns) for a Tank built after it, and left
-       funds that would have paid for 1 HP of the Stealth;
-     - one turn whose fight results take 508k tries, over the search budget.
+   - **Result on the cache (19,925 replays, 547,143 turns): 544,623 of
+     544,719 checked turns match exactly (9.69M actions).** 2,424 turns are
+     skipped: 2,423 with no log, and one whose next snapshot is missing (the
+     opponent's turn was never recorded). The 96 mismatches are known
+     oddities in `tests/python/test_cached_replays.py`:
+     - 83 turns of Lash games in that window (her missing terrain bonus);
+     - 10 Black Boat repairs that leave a 9.x HP unit as it was;
+     - a city whose capture points drop to 0 with no capture logged;
+     - two turns whose fight results take more tries than the search budget.
 7. **Extract samples:**
    - **v0 (needs only `from_snapshot`, not the full engine):** turn-start
      states + game outcome. The critic can start training before the engine
