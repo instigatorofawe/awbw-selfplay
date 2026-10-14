@@ -335,8 +335,9 @@ Status load(const MapData& m, GameState& s, const Action& a, const MovePlan& mp)
   const int ti = s.unit_at[mp.dest()];
   if (ti == kNoUnit || ti == a.unit) return kErrCannotLoad;
   const Unit& t = s.units[ti];
+  // A transport carrying a unit can't board another (no logged load does).
   if (t.owner != u.owner || !((kUnits[t.type].carry_mask >> u.type) & 1) ||
-      cargo_count(t) >= kUnits[t.type].carry_slots)
+      cargo_count(t) >= kUnits[t.type].carry_slots || cargo_count(u) > 0)
     return kErrCannotLoad;
   execute_move(m, s, a.unit, mp, false);
   load_unit(s, a.unit, ti);
@@ -373,11 +374,15 @@ Status unload(const MapData& m, GameState& s, const Action& a, const MovePlan& m
   if (!free_for(s, dest, a.unit)) return kErrOccupied;
   if (a.arg > 1 || u.cargo[a.arg] == kNoUnit) return kErrCannotUnload;
   const int c = u.cargo[a.arg];
+  // Cargo comes off only where it could move itself: onto such a tile, from
+  // a transport standing on one (every logged Lander and Black Boat unload is
+  // from a shoal or a port).
+  if (!passable(m, s, c, dest)) return kErrCannotUnload;
   // The tile the transport is leaving counts as free.
   const bool free =
       s.unit_at[a.target] == kNoUnit || (s.unit_at[a.target] == a.unit && a.target != dest);
   if (a.target >= m.n_tiles || m.distance(dest, a.target) != 1 || !free ||
-      move_cost(m, s, a.target, kUnits[s.units[c].type].move_type, weather_for(s, u.owner)) == 0)
+      !passable(m, s, c, a.target))
     return kErrCannotUnload;
   const bool moves = dest != u.tile;
   execute_move(m, s, a.unit, mp, true);
@@ -565,20 +570,31 @@ Status unit_action(const MapData& m, GameState& s, const Action& a, const Detail
   return st;
 }
 
-Status build(const MapData& m, GameState& s, const Action& a) {
+int build_price(const GameState& s, int type) {
+  return kUnits[type].cost * co_state(s, s.active).cost / 100;
+}
+
+Status check_build(const MapData& m, const GameState& s, int tile, int type) {
   const int me = s.active;
-  Player& p = s.players[me];
-  if (a.target >= m.n_tiles || a.arg >= kNumUnitTypes) return kErrBadAction;
-  const int prop = m.prop[a.target];
-  if (prop == kNoProp || s.prop_owner[prop] != me || !builds(m.prop_kind[prop], a.arg, p) ||
-      ((s.settings.banned_units >> a.arg) & 1))
+  const Player& p = s.players[me];
+  if (tile < 0 || tile >= m.n_tiles || type < 0 || type >= kNumUnitTypes) return kErrBadAction;
+  const int prop = m.prop[tile];
+  if (prop == kNoProp || s.prop_owner[prop] != me || !builds(m.prop_kind[prop], type, p) ||
+      ((s.settings.banned_units >> type) & 1))
     return kErrCannotBuild;
-  if (s.unit_at[a.target] != kNoUnit) return kErrOccupied;
+  if (s.unit_at[tile] != kNoUnit) return kErrOccupied;
   if ((s.settings.unit_limit && count_units(s, me) >= s.settings.unit_limit) || alloc_unit(s) < 0)
     return kErrUnitLimit;
-  const int price = kUnits[a.arg].cost * co_state(s, me).cost / 100;
-  if (p.funds < price) return kErrFunds;
-  p.funds -= price;
+  if (p.funds < build_price(s, type)) return kErrFunds;
+  return kOk;
+}
+
+Status build(const MapData& m, GameState& s, const Action& a) {
+  const Status st = check_build(m, s, a.target, a.arg);
+  if (st != kOk) return st;
+  const int me = s.active;
+  Player& p = s.players[me];
+  p.funds -= build_price(s, a.arg);
   Unit n{};
   n.tile = a.target;
   n.type = a.arg;
@@ -706,15 +722,23 @@ int aim_missile(const MapData& m, const GameState& s, MissileAim aim, int me) {
   return best;
 }
 
+Status check_power(const GameState& s, int level) {
+  const Player& p = s.players[s.active];
+  const CoSpec& co = kCos[p.co];
+  if (!s.settings.use_powers || p.power_on || (level != 1 && level != 2)) return kErrPower;
+  const bool super = level == 2;
+  if ((super ? co.scop_stars : co.cop_stars) == 0) return kErrPower;
+  if (p.power < (super ? p.scop_cost : p.cop_cost)) return kErrPower;
+  return kOk;
+}
+
 Status power(const MapData& m, GameState& s, const Action& a, const Detail& d) {
+  const Status st = check_power(s, a.arg);
+  if (st != kOk) return st;
   const int me = s.active, enemy = 1 - me;
   Player& p = s.players[me];
-  const CoSpec& co = kCos[p.co];
-  if (!s.settings.use_powers || p.power_on || (a.arg != 1 && a.arg != 2)) return kErrPower;
   const bool super = a.arg == 2;
-  if ((super ? co.scop_stars : co.cop_stars) == 0) return kErrPower;
   const int price = super ? p.scop_cost : p.cop_cost;
-  if (p.power < price) return kErrPower;
   const int n_missiles = missile_count(p.co, super);
   if (d.missiles && d.n_missiles != n_missiles) return kErrBadTarget;
   for (int i = 0; d.missiles && i < n_missiles; ++i) {
@@ -992,6 +1016,17 @@ int cop_cost(int co, int uses) {
   return kCos[co].cop_stars ? scaled_cost(kCos[co].cop_stars, uses) : scop_cost(co, uses);
 }
 
+bool passable(const MapData& m, const GameState& s, int slot, int tile) {
+  const Unit& u = s.units[slot];
+  return move_cost(m, s, tile, kUnits[u.type].move_type, weather_for(s, u.owner)) > 0;
+}
+
+bool can_build(const MapData& m, const GameState& s, int tile, int type) {
+  return check_build(m, s, tile, type) == kOk;
+}
+
+bool can_use_power(const GameState& s, int level) { return check_power(s, level) == kOk; }
+
 Status apply(const MapData& m, GameState& s, const Action& a, const Detail& d) {
   if (s.winner != kNoOwner) return kErrGameOver;
   switch (a.kind) {
@@ -1003,6 +1038,8 @@ Status apply(const MapData& m, GameState& s, const Action& a, const Detail& d) {
       if (a.unit >= kMaxUnits || !s.units[a.unit].alive() || s.units[a.unit].owner != s.active ||
           s.units[a.unit].has(kCarried))
         return kErrNotYourUnit;
+      // Only a unit that hasn't moved (every logged Delete).
+      if (s.units[a.unit].has(kMoved)) return kErrCannotAct;
       destroy(m, s, a.unit);
       check_rout(s, s.active);
       return kOk;

@@ -142,17 +142,38 @@ static_assert(std::is_trivially_copyable_v<GameState>);
 
 ## 3. Action space: micro-steps
 
-| Phase | Choice | Encoding |
-|---|---|---|
-| Idle | select a unit or factory tile, or End Turn / COP / SCOP | tile + 3 globals |
-| Unit selected | destination tile | tile |
-| Unit moved | Wait, Capture, Fire@tile, Load, Join, Unload@tile, Supply, Dive/Hide, Launch@tile, Repair@tile, Explode, Delete | channel × tile |
-| Factory selected | unit type | 25 |
+Done (`src/core/legal.h`). A decision is one micro-step the policy scores
+tile by tile:
 
-- **Action ID:** `channel * MAX_TILES + tile`, plus a few non-spatial IDs.
+| Phase | Choice | Ids |
+|---|---|---|
+| Idle | a unit or factory, scrap a unit, COP / SCOP, End Turn | Select@tile, Delete@tile, 3 non-spatial |
+| Unit selected | its destination (its own tile to stay) | Move@tile |
+| Unit moved | its action | Wait, Capture, Load, Join, Supply, Hide, Unhide, Explode @its tile; Fire, AttackSeam, Repair, Launch, Unload1, Unload2 @the tile acted on |
+| Factory selected | unit type | 25 non-spatial |
+
+- **Action ID:** `channel * MAX_TILES + tile` over 17 channels (map tiles,
+  y × width + x), then End Turn, COP, SCOP and Build + unit type: 27,228 ids.
+- **`Selection`** (4 bytes: phase, unit, tile) holds a decision in
+  progress, next to the `GameState` rather than in it. Picks don't touch the
+  state; the last step builds the `Action` and applies it.
+- **Legal means `apply` takes it,** as the mover sees the board. Destinations
+  come from `reachable`, so moving into or through an enemy the player can't
+  see is legal and traps (`kTrapped`). Fire and seam targets are what the
+  unit sees from its destination: a hidden unit is seen once the attacker
+  is next to it. Each id leads on to at least one legal action, so the list
+  is empty only when the game is over.
+- **API:** `legal_actions()` gives complete actions (heuristic bots, replay
+  checks); `legal_ids(sel)`, `step(sel, id)`, `step_action(sel, id)` (the
+  action a last step completes) and `action_steps(action)` (its ids, for
+  replay labels) give the micro-steps.
+- **Cost** (the §10 board, player to move ~25 units): `legal_ids` 0.3 µs
+  idle, 0.8 µs for a Tank's destinations, 0.7 µs for its options there;
+  `legal_actions` 47 µs for 1,237 actions.
 - **No cancel/undo.** A transport may unload where it stands at any time in
   its turn (AWBW allows it even after the transport has acted), so a second
-  unload is just another action.
+  unload is just another action. A moved transport with cargo stays
+  selectable for that alone.
 - **Forced steps auto-advance.** A phase with exactly one legal action is
   applied immediately. It produces no search and no training sample.
 - **Full-action API.** `enumerate_full_actions()` returns complete
@@ -265,7 +286,16 @@ static_assert(std::is_trivially_copyable_v<GameState>);
     (players hop infantry through APCs this way); a transport may unload in
     place even after acting (an APC supplies, then unloads); moving then
     unloading ends its turn; cargo may land on the tile the transport just
-    left. Cargo slots never shift: a load takes the first empty slot.
+    left. Cargo slots never shift: a load takes the first empty slot. A unit
+    loaded this turn can be dropped further on the same turn (AWBW's
+    boosting).
+    - Cargo comes off only onto terrain it could move on, from a transport
+      standing on such terrain, so a Lander or Black Boat unloads from a
+      shoal or a port, never open sea or reef.
+    - A transport carrying a unit can't board another.
+  - **Delete:** only a unit that hasn't moved this turn.
+  - These three hold for every logged action in the 38,936 cached replays
+    (`check-turns`).
   - **Supply:** an APC also refills the cargo of the transports next to it,
     as an action and at turn start.
   - **Black Boat repair:** +1 HP priced per displayed HP gained, so topping up
@@ -874,7 +904,10 @@ while training:
   - Release builds use `-O3`; a `-march=native` option for local builds.
 - **`GameState`:**
   - `copy()`; pickling via raw bytes
-  - `legal_actions()`, `outcomes()`, `apply()`
+  - `legal_actions()`, `outcomes()`, `apply()`; the micro-steps as
+    module functions `legal_ids(state, sel)`, `legal_mask(state, sel)`,
+    `step(state, sel, id)`, `step_action`, `action_steps` with a `Selection`
+    (**done**)
   - `from_snapshot()`, `zobrist`
   - zero-copy numpy views for debugging
 - **Batch functions:** `encode_batch(state_bytes[N]) -> planes, globals`,
@@ -886,19 +919,31 @@ while training:
 ## 10. Testing & benchmarks
 
 - **C++ (googletest, `tests/cpp/`):** maps, state bookkeeping, snapshots,
-  movement, damage, every action kind, the turn start, CO powers and the
-  network encoding (95 tests). CI runs them on Linux and macOS, in Release
-  and under ASan/UBSan.
+  movement, damage, every action kind, the turn start, CO powers, the
+  network encoding and legal actions (137 tests). CI runs them on Linux and
+  macOS, in Release and under ASan/UBSan.
 - **Damage formula across all logged attacks:** every logged combat result
   must be in `outcomes()`. This checks the formula over the whole replay
   archive.
 - **Full replay verification rate:** tracked per CO and per action type.
   A local regression corpus of verified replays runs in CI. Replays stay
   gitignored; only game IDs and hashes are committed.
+- **Legal actions** (`tests/cpp/test_legal.cpp`): on positions from random
+  games on a 12×10 map with every unit type, random COs, hidden Subs and
+  Stealths, transports with cargo, seams and silos, `legal_actions` equals
+  what a brute force over `apply` takes (every kind, unit, destination,
+  target and cargo slot); the micro-steps from idle expand to exactly those
+  actions; and each action's `action_steps` play it as `apply` does.
+  `check-turns` also checks that every logged action's micro-steps are
+  legal: all 18,456,503 actions of the 1,044,228 matching turns in 38,936
+  cached replays are. The only logged actions outside the mask are 4
+  attacks on a seam the attack before had already broken (AWBW logs a fresh
+  HP for it); `apply` refuses those as well.
 - **Random-playout invariant tests under ASan/UBSan:**
-  - occupancy grid stays in sync
-  - HP and funds stay in range
-  - the legal-action mask is non-empty until the game ends
+  - occupancy grid stays in sync (**done**, `check_state` after every step)
+  - HP and funds stay in range (**done**)
+  - the legal-action mask is non-empty until the game ends, and an id not
+    in it changes nothing (**done**)
   - the incremental Zobrist hash equals a hash recomputed from scratch
 - **Benchmarks** (Google Benchmark, `bench/`; current numbers on an Apple
   M-series laptop in parentheses):
@@ -909,6 +954,7 @@ while training:
     of turn on a 30×30 board with ~50 units (0.3 µs); a fight with a Sonja
     unit whose display the opponent doesn't know (0.7 µs)
   - `encode` (2.1 µs for that board in a 32×32 window)
+  - `legal_ids` and `legal_actions` on that board (§3)
   - MCTS simulations/sec, with a dummy net and with the real net
 
 ## 11. Milestones
@@ -918,6 +964,6 @@ while training:
 | M0 | Replay ingestion (Python): download + cache, parser, rules JSON | Thousands of replays parsed; settings/filter stats known |
 | M1 | C++ core + bindings: state, `from_snapshot`, movegen, all actions except CO powers, `outcomes`, turn start, `encode_batch` | Every logged attack in `outcomes()` (**done**); state, snapshots, movegen (**done**); apply and turn start, every checkable turn replayed exactly (**done**); `encode_batch`, v0 dataset, **critic v0** (**done**) |
 | M2 | Exact match: full replay stepping, all COs/powers, edge cases | CO powers' effects, missile aim, rain and snow (**done**); ≥ 99% of filtered replays fully verified; benchmarks in CI |
-| M3 | v1 datasets: all idle-phase states + action labels | **Critic v1** + policy prior (behavior cloning); baselines: random, greedy, critic-greedy 1-ply |
+| M3 | v1 datasets: all idle-phase states + action labels | Micro-step action space and legal mask (**done**); **Critic v1** + policy prior (behavior cloning); baselines: random, greedy, critic-greedy 1-ply |
 | M4 | Batched Gumbel MCTS with chance nodes, `collect`/`submit` | Search + critic beats critic-greedy; sims/sec measured |
 | M5 | Self-play loop: actors / learner / evaluator, mixed with human data | Elo rises across checkpoints vs. fixed baselines |

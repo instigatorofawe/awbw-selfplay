@@ -17,6 +17,7 @@
 #include "core/combat.h"
 #include "core/config.h"
 #include "core/encode.h"
+#include "core/legal.h"
 #include "core/map.h"
 #include "core/movegen.h"
 #include "core/snapshot.h"
@@ -51,10 +52,8 @@ uint16_t tile_of(const awbw::MapData& md, XY xy) {
   return static_cast<uint16_t>(md.tile(x, y));
 }
 
-int apply_action(awbw::GameState& s, int kind, int unit, std::optional<XY> to,
-                 std::optional<XY> target, int arg, std::optional<std::vector<XY>> path, int att_hp,
-                 int def_hp, std::optional<std::vector<XY>> missiles) {
-  const awbw::MapData& md = map_for(s);
+awbw::Action make_action(const awbw::MapData& md, const awbw::GameState& s, int kind, int unit,
+                         std::optional<XY> to, std::optional<XY> target, int arg) {
   if (kind < 0 || kind >= awbw::kNumActionKinds) throw nb::value_error("unknown action kind");
   awbw::Action a;
   a.kind = static_cast<uint8_t>(kind);
@@ -66,22 +65,64 @@ int apply_action(awbw::GameState& s, int kind, int unit, std::optional<XY> to,
   }
   if (target) a.target = tile_of(md, *target);
   a.arg = static_cast<uint8_t>(arg);
+  return a;
+}
+
+// What apply() and step() take besides the action, and the buffers it points into.
+struct DetailArgs {
   awbw::Detail d;
-  std::vector<uint16_t> tiles;
-  if (path) {
-    for (const XY& xy : *path) tiles.push_back(tile_of(md, xy));
-    d.path = tiles.data();
-    d.path_len = static_cast<int>(tiles.size());
+  std::vector<uint16_t> tiles, centres;
+
+  DetailArgs(const awbw::MapData& md, const std::optional<std::vector<XY>>& path, int att_hp,
+             int def_hp, const std::optional<std::vector<XY>>& missiles) {
+    if (path) {
+      for (const XY& xy : *path) tiles.push_back(tile_of(md, xy));
+      d.path = tiles.data();
+      d.path_len = static_cast<int>(tiles.size());
+    }
+    d.att_hp = att_hp;
+    d.def_hp = def_hp;
+    if (missiles) {
+      for (const XY& xy : *missiles) centres.push_back(tile_of(md, xy));
+      d.missiles = centres.data();
+      d.n_missiles = static_cast<int>(centres.size());
+    }
   }
-  d.att_hp = att_hp;
-  d.def_hp = def_hp;
-  std::vector<uint16_t> centres;
-  if (missiles) {
-    for (const XY& xy : *missiles) centres.push_back(tile_of(md, xy));
-    d.missiles = centres.data();
-    d.n_missiles = static_cast<int>(centres.size());
-  }
-  return awbw::apply(md, s, a, d);
+};
+
+int apply_action(awbw::GameState& s, int kind, int unit, std::optional<XY> to,
+                 std::optional<XY> target, int arg, std::optional<std::vector<XY>> path, int att_hp,
+                 int def_hp, std::optional<std::vector<XY>> missiles) {
+  const awbw::MapData& md = map_for(s);
+  const awbw::Action a = make_action(md, s, kind, unit, to, target, arg);
+  const DetailArgs d(md, path, att_hp, def_hp, missiles);
+  return awbw::apply(md, s, a, d.d);
+}
+
+// An action as apply()'s arguments: (kind, unit, to, target, arg), with -1 /
+// None / 0 where the kind takes none.
+using ActionTuple = std::tuple<int, int, std::optional<XY>, std::optional<XY>, int>;
+
+ActionTuple action_tuple(const awbw::MapData& md, const awbw::Action& a) {
+  using namespace awbw;
+  const bool unit_kind = a.kind < kActBuild;
+  const bool targeted = a.kind == kActFire || a.kind == kActUnload || a.kind == kActRepair ||
+                        a.kind == kActAttackSeam || a.kind == kActLaunch || a.kind == kActBuild;
+  auto xy = [&](int t) { return std::optional<XY>(XY{md.x_of(t), md.y_of(t)}); };
+  return {a.kind, unit_kind || a.kind == kActDelete ? a.unit : -1,
+          unit_kind ? xy(a.to) : std::nullopt, targeted ? xy(a.target) : std::nullopt,
+          a.kind == kActUnload || a.kind == kActBuild || a.kind == kActPower ? a.arg : 0};
+}
+
+using IdArray = nb::ndarray<nb::numpy, int64_t, nb::ndim<1>>;
+
+IdArray legal_id_array(const awbw::GameState& s, const awbw::Selection& sel) {
+  std::vector<uint16_t> ids;
+  awbw::legal_ids(map_for(s), s, sel, ids);
+  auto* data = new int64_t[ids.size()];
+  std::copy(ids.begin(), ids.end(), data);
+  nb::capsule owner(data, [](void* p) noexcept { delete[] static_cast<int64_t*>(p); });
+  return IdArray(data, {ids.size()}, owner);
 }
 
 awbw::GameState load_snapshot(const awbw::MapData& m, const awbw::Settings& settings, int day,
@@ -619,6 +660,121 @@ NB_MODULE(_core, m) {
         "cheapest path its owner can see); att_hp / def_hp force a fight's result; missiles: "
         "a power's missile centres [(x, y), ...] (default: aimed as AWBW does). Returns OK, "
         "TRAPPED or an error status (state unchanged); see status_name.");
+  {
+    nb::list channels;
+    const char* names[awbw::kNumChannels] = {
+        "Select", "Delete",  "Move", "Wait",       "Capture", "Load",   "Join",    "Supply", "Hide",
+        "Unhide", "Explode", "Fire", "AttackSeam", "Repair",  "Launch", "Unload1", "Unload2"};
+    for (const char* n : names) channels.append(n);
+    m.attr("CHANNELS") = nb::tuple(channels);
+    m.attr("PHASES") = nb::make_tuple("idle", "selected", "moved", "factory");
+  }
+  m.attr("ID_END_TURN") = awbw::kIdEndTurn;
+  m.attr("ID_COP") = awbw::kIdCop;
+  m.attr("ID_SCOP") = awbw::kIdScop;
+  m.attr("ID_BUILD") = awbw::kIdBuild;
+  m.attr("NUM_ACTION_IDS") = awbw::kNumActionIds;
+
+  nb::class_<awbw::Selection>(
+      m, "Selection",
+      "The active player's action in progress, between micro-steps: phase (PHASES index), the\n"
+      "picked unit's slot (-1 if none) and tile: the unit's own, its destination, or the\n"
+      "factory's (a map tile index, y * width + x).")
+      .def(nb::init<>())
+      .def_rw("phase", &awbw::Selection::phase)
+      .def_prop_rw(
+          "unit",
+          [](const awbw::Selection& s) { return s.unit == awbw::kNoUnit ? -1 : int(s.unit); },
+          [](awbw::Selection& s, int v) {
+            s.unit = v < 0 || v >= awbw::kMaxUnits ? awbw::kNoUnit : static_cast<uint8_t>(v);
+          })
+      .def_rw("tile", &awbw::Selection::tile)
+      .def("copy", [](const awbw::Selection& s) { return s; })
+      .def("__eq__",
+           [](const awbw::Selection& a, nb::handle b) {
+             return nb::isinstance<awbw::Selection>(b) && a == nb::cast<awbw::Selection>(b);
+           })
+      .def("__repr__", [](const awbw::Selection& s) {
+        static const char* kPhases[] = {"idle", "selected", "moved", "factory"};
+        return std::string("Selection(") + (s.phase < 4 ? kPhases[s.phase] : "?") +
+               ", unit=" + std::to_string(s.unit == awbw::kNoUnit ? -1 : int(s.unit)) +
+               ", tile=" + std::to_string(s.tile) + ")";
+      });
+
+  m.def(
+      "legal_actions",
+      [](const awbw::GameState& s) {
+        const awbw::MapData& md = map_for(s);
+        std::vector<awbw::Action> acts;
+        awbw::legal_actions(md, s, acts);
+        std::vector<ActionTuple> out;
+        out.reserve(acts.size());
+        for (const awbw::Action& a : acts) out.push_back(action_tuple(md, a));
+        return out;
+      },
+      "state"_a,
+      "Every complete action the player to move can take, Resign aside, as apply()'s\n"
+      "arguments (kind, unit, to, target, arg): apply(state, *a) takes each one, with OK, or\n"
+      "TRAPPED when an enemy the player can't see is in the way. [] once the game is over.");
+  m.def("legal_ids", &legal_id_array, "state"_a, "selection"_a = awbw::Selection{},
+        "Legal micro-step ids from `selection`, ascending (int64). An id is\n"
+        "CHANNELS index * MAX_TILES + tile, or ID_END_TURN, ID_COP, ID_SCOP, ID_BUILD + unit\n"
+        "type. Every id leads on to a legal action; empty once the game is over.");
+  m.def(
+      "legal_mask",
+      [](const awbw::GameState& s, const awbw::Selection& sel) {
+        std::vector<uint16_t> ids;
+        awbw::legal_ids(map_for(s), s, sel, ids);
+        auto* data = new bool[awbw::kNumActionIds]();
+        for (uint16_t id : ids) data[id] = true;
+        nb::capsule owner(data, [](void* p) noexcept { delete[] static_cast<bool*>(p); });
+        return nb::ndarray<nb::numpy, bool, nb::ndim<1>>(
+            data, {static_cast<size_t>(awbw::kNumActionIds)}, owner);
+      },
+      "state"_a, "selection"_a = awbw::Selection{},
+      "legal_ids() as a mask over all NUM_ACTION_IDS ids.");
+  m.def(
+      "step",
+      [](awbw::GameState& s, awbw::Selection& sel, int id, std::optional<std::vector<XY>> path,
+         int att_hp, int def_hp, std::optional<std::vector<XY>> missiles) {
+        const awbw::MapData& md = map_for(s);
+        const DetailArgs d(md, path, att_hp, def_hp, missiles);
+        return static_cast<int>(awbw::step(md, s, sel, id, d.d));
+      },
+      "state"_a, "selection"_a, "id"_a, "path"_a = nb::none(), "att_hp"_a = -1, "def_hp"_a = -1,
+      "missiles"_a = nb::none(),
+      "Take micro-step `id`, in place: a pick advances `selection` and returns OK; a step\n"
+      "that completes an action applies it (path / att_hp / def_hp / missiles as in apply),\n"
+      "resets `selection` and returns apply's status. An id that isn't legal returns an\n"
+      "error and changes nothing.");
+  m.def(
+      "step_action",
+      [](const awbw::GameState& s, const awbw::Selection& sel,
+         int id) -> std::optional<ActionTuple> {
+        const awbw::MapData& md = map_for(s);
+        awbw::Action a;
+        if (!awbw::step_action(md, s, sel, id, a)) return std::nullopt;
+        return action_tuple(md, a);
+      },
+      "state"_a, "selection"_a, "id"_a,
+      "The action (as in legal_actions) that step `id` from `selection` would complete, or\n"
+      "None for a pick. Legality isn't checked.");
+  m.def(
+      "action_steps",
+      [](const awbw::GameState& s, int kind, int unit, std::optional<XY> to,
+         std::optional<XY> target, int arg) {
+        const awbw::MapData& md = map_for(s);
+        const awbw::Action a = make_action(md, s, kind, unit, to, target, arg);
+        if ((a.kind < awbw::kActBuild || a.kind == awbw::kActDelete) &&
+            (a.unit == awbw::kNoUnit || !s.units[a.unit].alive()))
+          throw nb::index_error("no unit in that slot");
+        uint16_t ids[3];
+        const int n = awbw::action_steps(md, s, a, ids);
+        return std::vector<int>(ids, ids + n);
+      },
+      "state"_a, "kind"_a, "unit"_a = -1, "to"_a = nb::none(), "target"_a = nb::none(), "arg"_a = 0,
+      "The micro-step ids that play an action given as apply()'s arguments (so\n"
+      "action_steps(state, *a) for a in legal_actions(state)); [] for Resign.");
   m.def(
       "missile_targets",
       [](const awbw::GameState& s, int level) {

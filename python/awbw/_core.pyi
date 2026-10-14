@@ -432,6 +432,90 @@ def apply(state: GameState, kind: int, unit: int = -1, to: tuple[int, int] | Non
     Carry out one action for the active player, in place. kind: ACTIONS[name]; unit: slot; to / target: (x, y); path: [(x, y), ...] from the unit's tile to `to` (default: the cheapest path its owner can see); att_hp / def_hp force a fight's result; missiles: a power's missile centres [(x, y), ...] (default: aimed as AWBW does). Returns OK, TRAPPED or an error status (state unchanged); see status_name.
     """
 
+CHANNELS: tuple = ...
+
+PHASES: tuple = ('idle', 'selected', 'moved', 'factory')
+
+ID_END_TURN: int = 27200
+
+ID_COP: int = 27201
+
+ID_SCOP: int = 27202
+
+ID_BUILD: int = 27203
+
+NUM_ACTION_IDS: int = 27228
+
+class Selection:
+    """
+    The active player's action in progress, between micro-steps: phase (PHASES index), the
+    picked unit's slot (-1 if none) and tile: the unit's own, its destination, or the
+    factory's (a map tile index, y * width + x).
+    """
+
+    def __init__(self) -> None: ...
+
+    @property
+    def phase(self) -> int: ...
+
+    @phase.setter
+    def phase(self, arg: int, /) -> None: ...
+
+    @property
+    def unit(self) -> int: ...
+
+    @unit.setter
+    def unit(self, arg: int, /) -> None: ...
+
+    @property
+    def tile(self) -> int: ...
+
+    @tile.setter
+    def tile(self, arg: int, /) -> None: ...
+
+    def copy(self) -> Selection: ...
+
+    def __eq__(self, arg: object, /) -> bool: ...
+
+    def __repr__(self) -> str: ...
+
+def legal_actions(state: GameState) -> list[tuple[int, int, tuple[int, int] | None, tuple[int, int] | None, int]]:
+    """
+    Every complete action the player to move can take, Resign aside, as apply()'s
+    arguments (kind, unit, to, target, arg): apply(state, *a) takes each one, with OK, or
+    TRAPPED when an enemy the player can't see is in the way. [] once the game is over.
+    """
+
+def legal_ids(state: GameState, selection: Selection = ...) -> Annotated[NDArray[numpy.int64], dict(shape=(None,))]:
+    """
+    Legal micro-step ids from `selection`, ascending (int64). An id is
+    CHANNELS index * MAX_TILES + tile, or ID_END_TURN, ID_COP, ID_SCOP, ID_BUILD + unit
+    type. Every id leads on to a legal action; empty once the game is over.
+    """
+
+def legal_mask(state: GameState, selection: Selection = ...) -> Annotated[NDArray[numpy.bool_], dict(shape=(None,))]:
+    """legal_ids() as a mask over all NUM_ACTION_IDS ids."""
+
+def step(state: GameState, selection: Selection, id: int, path: Sequence[tuple[int, int]] | None = None, att_hp: int = -1, def_hp: int = -1, missiles: Sequence[tuple[int, int]] | None = None) -> int:
+    """
+    Take micro-step `id`, in place: a pick advances `selection` and returns OK; a step
+    that completes an action applies it (path / att_hp / def_hp / missiles as in apply),
+    resets `selection` and returns apply's status. An id that isn't legal returns an
+    error and changes nothing.
+    """
+
+def step_action(state: GameState, selection: Selection, id: int) -> tuple[int, int, tuple[int, int] | None, tuple[int, int] | None, int] | None:
+    """
+    The action (as in legal_actions) that step `id` from `selection` would complete, or
+    None for a pick. Legality isn't checked.
+    """
+
+def action_steps(state: GameState, kind: int, unit: int = -1, to: tuple[int, int] | None = None, target: tuple[int, int] | None = None, arg: int = 0) -> list[int]:
+    """
+    The micro-step ids that play an action given as apply()'s arguments (so
+    action_steps(state, *a) for a in legal_actions(state)); [] for Resign.
+    """
+
 def missile_targets(state: GameState, level: int) -> list[tuple[int, int] | None]:
     """
     Where the active player's power `level` (1 COP, 2 SCOP) would aim its missiles now, as AWBW does: [(x, y), ...] (None for a missile with no target); [] for a power without missiles.

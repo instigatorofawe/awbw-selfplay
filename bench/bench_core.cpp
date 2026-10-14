@@ -13,6 +13,7 @@
 #include "core/actions.h"
 #include "core/combat.h"
 #include "core/encode.h"
+#include "core/legal.h"
 #include "core/movegen.h"
 #include "test_util.h"
 
@@ -219,6 +220,43 @@ void BM_Encode(benchmark::State& st) {
   }
 }
 BENCHMARK(BM_Encode);
+
+// Every complete action of the player to move (about 25 units).
+void BM_LegalActions(benchmark::State& st) {
+  const Board& b = board();
+  std::vector<Action> acts;
+  for (auto _ : st) {
+    legal_actions(b.map, b.state, acts);
+    benchmark::DoNotOptimize(acts.data());
+  }
+  st.counters["actions"] = static_cast<double>(acts.size());
+}
+BENCHMARK(BM_LegalActions);
+
+// Legal micro-steps: picking a unit, then a picked Tank's destinations, then
+// what it can do on one of them.
+void BM_LegalIds(benchmark::State& st) {
+  const Board& b = board();
+  Selection sel;
+  if (st.range(0) > 0) {
+    const int tank = *std::find_if(b.slots.begin(), b.slots.end(), [&](int i) {
+      return b.state.units[i].type == kTank && b.state.units[i].owner == 0;
+    });
+    sel = Selection{kPhaseSelected, static_cast<uint8_t>(tank), b.state.units[tank].tile};
+    if (st.range(0) > 1) {
+      std::vector<uint16_t> dests;
+      legal_ids(b.map, b.state, sel, dests);
+      sel = Selection{kPhaseMoved, sel.unit, static_cast<uint16_t>(dests.back() % kMaxTiles)};
+    }
+  }
+  std::vector<uint16_t> ids;
+  for (auto _ : st) {
+    legal_ids(b.map, b.state, sel, ids);
+    benchmark::DoNotOptimize(ids.data());
+  }
+  st.counters["ids"] = static_cast<double>(ids.size());
+}
+BENCHMARK(BM_LegalIds)->Arg(0)->Arg(1)->Arg(2);
 
 }  // namespace
 }  // namespace awbw

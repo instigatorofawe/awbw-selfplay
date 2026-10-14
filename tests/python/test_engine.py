@@ -138,16 +138,22 @@ def test_apply_build_and_explicit_path(md):
 
 
 def test_cargo_slots(md):
-    s = snapshot(
-        md,
-        [
-            (50, U["Lander"], 0, 1, 2, 100, 99, 0, 0, 0, 51),
-            (51, U["Infantry"], 0, 1, 2, 100, 99, 0, 0, 0, 0),
-        ],
+    # Sea, a shoal and plains.
+    shore = _core.register_map(910003, np.array([[28, 29, 1], [28, 28, 1]], dtype=np.int16))
+    no_props = np.zeros((0, 4), dtype=np.int64)
+
+    def lander_at(x, y):
+        rows = [(50, U["Lander"], 0, x, y, 100, 99, 0, 0, 0, 51), (51, U["Infantry"], 0, x, y, 100, 99, 0, 0, 0, 0)]
+        return _core.load_snapshot(shore, _core.Settings(), 4, 0, players(), no_props, units(*rows))
+
+    at_sea = lander_at(1, 1)
+    assert _core.status_name(_core.apply(at_sea, A["Unload"], at_sea.find_unit(50), target=(2, 1), arg=1)) == (
+        "cannot unload"  # infantry can't stand where the Lander is
     )
+    s = lander_at(1, 0)
     lander = s.find_unit(50)
     assert s.unit(lander).cargo == (-1, s.find_unit(51))  # AWBW's slot 2, kept
-    assert _core.apply(s, A["Unload"], lander, target=(1, 1), arg=1) == _core.OK
+    assert _core.apply(s, A["Unload"], lander, target=(2, 0), arg=1) == _core.OK
     assert s.unit(lander).cargo == (-1, -1)
     assert not s.unit(lander).flags & _core.UNIT_MOVED  # unloading in place keeps its action
 
@@ -178,3 +184,73 @@ def test_missiles_aimed_or_given(md):
     assert given.unit(given.find_unit(70)).hp == 100
     assert _core.apply(s, A["Power"], arg=1) == _core.OK
     assert s.unit(s.find_unit(70)).hp == 60
+
+
+CH = {name: i for i, name in enumerate(_core.CHANNELS)}
+
+
+def step_id(channel, md, x, y):
+    return CH[channel] * _core.MAX_TILES + md.tile(x, y)
+
+
+def fighting(md):
+    return snapshot(
+        md, [(60, U["Infantry"], 0, 1, 1, 100, 99, 0, 0, 0, 0), (70, U["Tank"], 1, 3, 1, 64, 50, 7, 0, 0, 0)]
+    )
+
+
+def test_legal_actions_are_what_apply_takes(md):
+    s = fighting(md)
+    acts = _core.legal_actions(s)
+    assert len(set(acts)) == len(acts)
+    assert (A["EndTurn"], -1, None, None, 0) in acts
+    assert (A["Wait"], 0, (1, 1), None, 0) in acts
+    assert (A["Capture"], 0, (3, 0), None, 0) in acts
+    assert (A["Fire"], 0, (3, 0), (3, 1), 0) in acts
+    assert (A["Delete"], 0, None, None, 0) in acts
+    assert not any(a[0] == A["Wait"] and a[2] == (3, 1) for a in acts)  # the tank's tile
+    for a in acts:
+        assert _core.apply(s.copy(), *a) == _core.OK, a
+
+
+def test_micro_steps_pick_a_unit_its_destination_then_its_action(md):
+    s = fighting(md)
+    sel = _core.Selection()
+    ids = _core.legal_ids(s, sel)
+    mask = _core.legal_mask(s, sel)
+    assert mask.shape == (_core.NUM_ACTION_IDS,) and mask.sum() == len(ids) and mask[ids].all()
+    assert list(ids) == sorted(ids)
+    assert _core.ID_END_TURN in ids and _core.ID_COP not in ids
+    pick = step_id("Select", md, 1, 1)
+    assert pick in ids and step_id("Select", md, 3, 1) not in ids  # the enemy's tank
+    assert _core.step_action(s, sel, pick) is None
+    before = s.to_bytes()
+    assert _core.step(s, sel, pick) == _core.OK
+    assert (_core.PHASES[sel.phase], sel.unit, sel.tile) == ("selected", 0, md.tile(1, 1))
+    assert _core.step(s, sel, _core.ID_END_TURN) != _core.OK  # a unit is picked
+    dest = step_id("Move", md, 3, 0)
+    assert dest in _core.legal_ids(s, sel) and step_id("Move", md, 3, 1) not in _core.legal_ids(s, sel)
+    assert _core.step(s, sel, dest) == _core.OK
+    assert s.to_bytes() == before  # picks change only the selection
+    ids = set(_core.legal_ids(s, sel).tolist())
+    assert ids == {step_id("Wait", md, 3, 0), step_id("Capture", md, 3, 0), step_id("Fire", md, 3, 1)}
+    capture = step_id("Capture", md, 3, 0)
+    assert _core.step_action(s, sel, capture) == (A["Capture"], 0, (3, 0), None, 0)
+    assert _core.step(s, sel, capture) == _core.OK
+    assert sel == _core.Selection()
+    assert s.unit(0).tile == md.tile(3, 0) and s.unit(0).flags & _core.UNIT_CAPTURING
+    assert step_id("Select", md, 3, 0) not in _core.legal_ids(s, sel)  # it has acted
+
+
+def test_each_actions_steps_play_it(md):
+    s = fighting(md)
+    for a in _core.legal_actions(s):
+        ids = _core.action_steps(s, *a)
+        t, u, sel = s.copy(), s.copy(), _core.Selection()
+        for i in ids[:-1]:
+            assert i in _core.legal_ids(t, sel)
+            assert _core.step(t, sel, i) == _core.OK
+        assert _core.step_action(t, sel, ids[-1]) == a
+        assert _core.step(t, sel, ids[-1]) == _core.apply(u, *a) == _core.OK
+        assert t.to_bytes() == u.to_bytes()
+    assert _core.action_steps(s, A["Resign"]) == []

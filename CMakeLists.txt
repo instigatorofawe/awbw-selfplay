@@ -36,6 +36,7 @@ add_library(awbw_core STATIC
   src/core/belief.cpp
   src/core/combat.cpp
   src/core/encode.cpp
+  src/core/legal.cpp
   src/core/map.cpp
   src/core/movegen.cpp
   src/core/snapshot.cpp
@@ -93,6 +94,7 @@ if(AWBW_BUILD_TESTS)
     tests/cpp/test_combat.cpp
     tests/cpp/test_encode.cpp
     tests/cpp/test_hidden_hp.cpp
+    tests/cpp/test_legal.cpp
     tests/cpp/test_map.cpp
     tests/cpp/test_movegen.cpp
     tests/cpp/test_powers.cpp

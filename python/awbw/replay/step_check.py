@@ -202,6 +202,7 @@ class _TurnStepper:
         # Each unit's (internal HP, HP belief) at the end of a turn that matched, by AWBW id.
         self.end_beliefs: dict[int, Beliefs] | None = None
         self.unchecked: frozenset[int] = frozenset()  # units (AWBW ids) left out of the end-of-turn check
+        self.check_legal = False  # also check each logged action is among the legal ones
 
     def _hp_seen(self, uid: int, hp: int) -> int | None:
         """What the end-of-turn check compares of a unit's HP."""
@@ -291,6 +292,8 @@ class _TurnStepper:
         return slot
 
     def _apply(self, state: _core.GameState, index: int, kind: str, **kw: Any) -> int:
+        if self.check_legal and not _is_legal(state, kind, kw):
+            raise Diverged(f"illegal: {kind}", f"not among the legal actions: {kw}", index)
         st = _core.apply(state, A[kind], **kw)
         if st not in (_core.OK, _core.TRAPPED):
             raise Diverged(f"{kind}: {_core.status_name(st)}", f"engine rejects {kind} {kw}", index)
@@ -923,12 +926,26 @@ def _unit_ids(obj: Any) -> set[int]:
     return out
 
 
+def _is_legal(state: _core.GameState, kind: str, kw: dict[str, Any]) -> bool:
+    """Whether each micro-step that plays the action is legal in turn."""
+    args = {k: kw[k] for k in ("unit", "to", "target", "arg") if k in kw}
+    ids = _core.action_steps(state, A[kind], **args)
+    sel = _core.Selection()
+    for n, i in enumerate(ids):
+        if i not in _core.legal_ids(state, sel):
+            return False
+        if n + 1 < len(ids):
+            _core.step(state, sel, i)  # a pick: only the selection changes
+    return True
+
+
 class _Skip(Exception):
     pass
 
 
 def check_turns(replay: Replay, md: _core.MapData) -> list[tuple[TurnCheck, int]]:
-    """Check every turn of a replay; returns (result, number of actions) per turn."""
+    """Check every turn of a replay, and that each logged action is legal; returns
+    (result, number of actions) per turn."""
     out: list[tuple[TurnCheck, int]] = []
     gid = replay.game.id
     order = replay.player_ids
@@ -948,6 +965,7 @@ def check_turns(replay: Replay, md: _core.MapData) -> list[tuple[TurnCheck, int]
         else:
             try:
                 stepper = _TurnStepper(replay, md, turn, nxt)
+                stepper.check_legal = True
                 stepper.run()
                 res.ok = True
                 for what, hit, n in stepper.aims.values():

@@ -34,7 +34,7 @@ enum ActionKind : uint8_t {
   // Player actions.
   kActBuild,   // build UnitType `arg` on the property at `target`
   kActPower,   // arg 1: COP, 2: SCOP; immediate effects (heals, damage, weather, ...) included
-  kActDelete,  // scrap `unit`
+  kActDelete,  // scrap `unit`, which hasn't moved
   kActEndTurn,
   kActResign,
   kNumActionKinds,
@@ -107,6 +107,17 @@ Combatant combatant(const MapData& m, const GameState& s, int slot, int tile);
 // target) and returns how many missiles the power fires.
 inline constexpr uint16_t kNoTile = 0xFFFF;
 int missile_targets(const MapData& m, const GameState& s, int level, uint16_t* out);
+
+// Whether the active player can build a unit of `type` on `tile` now: an
+// empty factory of theirs that makes it, the type not banned, room under the
+// unit limit, and the funds.
+bool can_build(const MapData& m, const GameState& s, int tile, int type);
+// Whether the active player can use power `level` (1 COP, 2 SCOP) now.
+bool can_use_power(const GameState& s, int level);
+// Whether the terrain on `tile` lets the unit in `slot` move there (weather
+// included). Cargo is unloaded only onto such a tile, from a transport
+// standing on one.
+bool passable(const MapData& m, const GameState& s, int slot, int tile);
 
 // Power costs with `uses` powers used so far (AWBW co_max_power / co_max_spower).
 // A CO without a COP reports the SCOP cost for both, as AWBW does.

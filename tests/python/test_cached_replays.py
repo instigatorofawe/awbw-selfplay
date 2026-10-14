@@ -4,8 +4,12 @@ Fetch some with e.g. ``awbw index "2p global league std" --max-pages 1`` and
 ``awbw fetch --index cache/index/2p_global_league_std.jsonl --limit 50``.
 """
 
+import random
+
 import pytest
 
+from awbw import _core, engine
+from awbw.maps import map_path
 from awbw.net import cache_dir
 from awbw.replay import load_replay
 from awbw.replay.combat_check import check_file
@@ -133,3 +137,26 @@ def test_hp_beliefs_carry_through_every_turn(path):
         assert any(known_oddity(replay, t.day) for t in replay.turns), f"{g.unstepped} turns not stepped"
     else:
         assert g.hp_unknown == 0
+
+
+@pytest.mark.skipif(not PATHS, reason="no cached replays")
+@pytest.mark.parametrize("path", PATHS[-20:], ids=[p.stem for p in PATHS[-20:]])
+def test_random_micro_steps_from_logged_positions(path):
+    """From a few logged positions, random legal micro-steps keep the state sound
+    and always leave a move until the game ends."""
+    replay = load_replay(path)
+    if len(replay.player_ids) != 2 or replay.game.fog or not map_path(replay.game.map_id).exists():
+        pytest.skip("not 2 players, fog, or map not cached")
+    md = engine.map_data(replay.game.map_id)
+    rng = random.Random(int(path.stem))
+    for turn in replay.turns[:: max(1, len(replay.turns) // 4)]:
+        s = engine.state_from_turn(replay, turn, md)
+        sel = _core.Selection()
+        for _ in range(400):
+            ids = _core.legal_ids(s, sel)
+            if s.winner != _core.NO_OWNER:
+                assert len(ids) == 0
+                break
+            assert len(ids), f"no legal step on day {s.day}"
+            assert _core.step(s, sel, int(rng.choice(ids))) in (_core.OK, _core.TRAPPED)
+            assert s.check() == ""
