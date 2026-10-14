@@ -45,7 +45,15 @@ import torch
 import torch.nn.functional as F
 
 from .. import _core
-from ..data.loader import AUX_BINARY, AUX_HORIZONS, AUX_REGRESSION, DecisionBatch, decision_batches, in_validation
+from ..data.loader import (
+    AUX_BINARY,
+    AUX_HORIZONS,
+    AUX_REGRESSION,
+    DecisionBatch,
+    decision_batches,
+    in_subset,
+    in_validation,
+)
 from ..data.shards import Dataset, Shard
 from .model import NUM_AUX_REGRESSION, PolicyConfig, PolicyValueNet, flat_policy, legal_mask, masked_log_softmax
 from .policy import load_policy, save_policy
@@ -67,6 +75,9 @@ class PolicyTrainConfig:
     aux_weight: float = 1.0  # weight of the auxiliary losses (networks with PolicyConfig.aux)
     aux_fraction: float = 0.25  # share of decisions that train the auxiliary head
     min_rating: int = 0  # keep games whose players are both rated at least this
+    games_fraction: float = 1.0  # train on this share of the training games (``in_subset``)
+    hold_out_maps: tuple[int, ...] = ()  # train on no game on these maps
+    game_ids: tuple[int, int] | None = None  # train only on games with lo <= id < hi
     rating_dropout: float = 0.25
     augment: bool = True
     compile: bool = False
@@ -90,9 +101,57 @@ def undihedral(x: torch.Tensor, k: int) -> torch.Tensor:
     return x
 
 
+def games_keep(
+    min_rating: int = 0,
+    *,
+    fraction: float = 1.0,
+    maps: tuple[int, ...] = (),
+    exclude_maps: tuple[int, ...] = (),
+    game_ids: tuple[int, int] | None = None,
+) -> Callable[[Shard], np.ndarray] | None:
+    """A ``keep`` mask for the games whose players are both rated at least
+    ``min_rating``, in the ``in_subset`` share ``fraction``, on one of ``maps``
+    (if any) and none of ``exclude_maps``, with ids in [lo, hi); None keeps all."""
+    rated = rating_filter(min_rating)
+    if rated is None and fraction >= 1 and not maps and not exclude_maps and game_ids is None:
+        return None
+
+    def keep(sh: Shard) -> np.ndarray:
+        g = np.ones(len(sh.g_id), bool)
+        if fraction < 1:
+            g &= in_subset(sh.g_id, fraction)
+        if maps:
+            g &= np.isin(sh.g_map, maps)
+        if exclude_maps:
+            g &= ~np.isin(sh.g_map, exclude_maps)
+        if game_ids is not None:
+            g &= (sh.g_id >= game_ids[0]) & (sh.g_id < game_ids[1])
+        mask = g[sh.game]
+        return mask & rated(sh) if rated is not None else mask
+
+    return keep
+
+
+def training_games(cfg: PolicyTrainConfig) -> Callable[[Shard], np.ndarray] | None:
+    """The ``keep`` mask of the games ``cfg`` trains on (validation keeps only ``min_rating``)."""
+    return games_keep(
+        cfg.min_rating,
+        fraction=cfg.games_fraction,
+        exclude_maps=tuple(cfg.hold_out_maps),
+        game_ids=tuple(cfg.game_ids) if cfg.game_ids is not None else None,  # type: ignore[arg-type]
+    )
+
+
 def count_decisions(ds: Dataset, split: str, keep: Callable[[Shard], np.ndarray] | None, val_fraction: float) -> int:
     """Decisions ``decision_batches`` gives for ``split`` (forced steps left out)."""
-    n = 0
+    return split_size(ds, split, keep, val_fraction)[1]
+
+
+def split_size(
+    ds: Dataset, split: str, keep: Callable[[Shard], np.ndarray] | None, val_fraction: float
+) -> tuple[int, int]:
+    """Games and decisions ``decision_batches`` gives for ``split`` (forced steps left out)."""
+    games = n = 0
     for path in ds.shards:
         with np.load(path) as f:
             arrays = {k: f[k] for k in f.files if k != "state"}
@@ -104,7 +163,8 @@ def count_decisions(ds: Dataset, split: str, keep: Callable[[Shard], np.ndarray]
             mask &= keep(sh)
         taken = np.arange(3)[None, :] < sh.n_steps[:, None]
         n += int((taken & (sh.n_legal > 1))[mask].sum())
-    return n
+        games += len(np.unique(sh.game[mask]))
+    return games, n
 
 
 def _to_device(b: DecisionBatch, device: torch.device) -> dict[str, torch.Tensor]:
@@ -332,9 +392,10 @@ def train(
     if not ds.has_actions:
         raise ValueError(f"{data}: not a v1 dataset (build one with `awbw dataset --v1`)")
     keep = rating_filter(cfg.min_rating)
-    n_train = count_decisions(ds, "train", keep, cfg.val_fraction)
+    train_keep = training_games(cfg)
+    train_games, n_train = split_size(ds, "train", train_keep, cfg.val_fraction)
     if n_train == 0:
-        raise ValueError(f"{data}: no training decisions (min rating {cfg.min_rating})")
+        raise ValueError(f"{data}: no training decisions (min rating {cfg.min_rating}, games {cfg.games_fraction})")
     per_epoch = n_train * cfg.fraction
     planned = cfg.epochs * per_epoch
 
@@ -355,9 +416,15 @@ def train(
     params = sum(p.numel() for p in net.parameters())
     log(
         f"{params / 1e6:.2f}M parameters on {device}; {n_train:,} training decisions, "
-        f"{per_epoch:,.0f} per epoch; {ds.meta['games']:,} games"
+        f"{per_epoch:,.0f} per epoch; {train_games:,} training games of {ds.meta['games']:,}"
     )
-    setup = {"train": asdict(cfg), "dataset": str(data), "dataset_games": ds.meta["games"], "train_decisions": n_train}
+    setup = {
+        "train": asdict(cfg),
+        "dataset": str(data),
+        "dataset_games": ds.meta["games"],
+        "train_games": train_games,
+        "train_decisions": n_train,
+    }
     rng = np.random.default_rng(cfg.seed)
     last: dict[str, Any] = {}
 
@@ -401,7 +468,7 @@ def train(
             cfg.batch_size,
             split="train",
             val_fraction=cfg.val_fraction,
-            keep=keep,
+            keep=train_keep,
             seed=cfg.seed * 1000 + epoch,
             shards_at_once=cfg.shards_at_once,
             fraction=cfg.fraction,

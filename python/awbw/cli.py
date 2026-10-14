@@ -151,6 +151,9 @@ def main(argv: list[str] | None = None) -> int:
     tp.add_argument("--aux-weight", type=float, help="weight of the auxiliary losses (default 1)")
     tp.add_argument("--aux-fraction", type=float, help="share of decisions that train the auxiliary head (0.25)")
     tp.add_argument("--min-rating", type=int, help="keep games whose players are both rated at least this")
+    tp.add_argument("--games-fraction", type=float, help="train on this share of the training games (default 1)")
+    tp.add_argument("--hold-out-maps", type=int, nargs="+", metavar="MAP", help="train on no game on these maps")
+    tp.add_argument("--game-ids", type=int, nargs=2, metavar=("LO", "HI"), help="train on games with LO <= id < HI")
     tp.add_argument("--rating-dropout", type=float, help="chance of hiding a sample's ratings (default 0.25)")
     tp.add_argument("--val-rows", type=float, help="share of validation actions scored (default 0.1)")
     tp.add_argument("--shards-at-once", type=int, help="shards whose decisions are shuffled together (default 8)")
@@ -200,6 +203,8 @@ def main(argv: list[str] | None = None) -> int:
     ep.add_argument("--split", choices=["val", "train", "all"], default="val")
     ep.add_argument("--rows", type=float, default=0.1, help="share of the split's actions scored (default 0.1)")
     ep.add_argument("--min-rating", type=int, default=0)
+    ep.add_argument("--maps", type=int, nargs="+", default=(), metavar="MAP", help="only games on these maps")
+    ep.add_argument("--game-ids", type=int, nargs=2, metavar=("LO", "HI"), help="only games with LO <= id < HI")
     ep.add_argument("--device", default="auto")
 
     ar = sub.add_parser("arena", help="play a saved policy against a random mover or another policy")
@@ -687,14 +692,13 @@ def _eval_policy(args, http: Http) -> int:
     from .data.shards import Dataset
     from .nn.critic import pick_device
     from .nn.policy import load_policy
-    from .nn.train_critic import rating_filter
-    from .nn.train_policy import evaluate_policy, evaluate_value
+    from .nn.train_policy import evaluate_policy, evaluate_value, games_keep
 
     device = pick_device(args.device)
     ds = Dataset(args.data or cache_dir() / "datasets" / "v1")
     net, info = load_policy(args.checkpoint, device)
     val_fraction = info.get("train", {}).get("val_fraction", 0.05)
-    keep = rating_filter(args.min_rating)
+    keep = games_keep(args.min_rating, maps=tuple(args.maps), game_ids=tuple(args.game_ids) if args.game_ids else None)
     pol = evaluate_policy(
         net, ds, device, keep=keep, val_fraction=val_fraction, row_fraction=args.rows, split=args.split
     )

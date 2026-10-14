@@ -937,6 +937,13 @@ knows what a player who watched every turn knows:
   `awbw arena` plays a checkpoint against a random mover or another
   checkpoint from validation games' starts, each start twice with seats
   swapped (`agents.py`).
+- **Choosing the training games** (for experiments on how methods scale
+  with data): `--games-fraction F` trains on a share of the training games
+  by a hash of the id unrelated to the validation split's, so a quarter is
+  part of the half (`loader.in_subset`); `--hold-out-maps` leaves maps out;
+  `--game-ids LO HI` keeps an id range (ids grow with time). Validation is
+  unchanged by them. `eval-policy --maps` and `--game-ids` score a part of
+  the validation games.
 - **Speed** (decisions/s, batch 256): RTX 5070 bf16 compiled 9,060, fp32
   compiled 5,602, bf16 eager 4,965, fp32 eager 3,902; M4 Pro (MPS) 1,260.
   The 5070 needs `uv sync --extra cuda` (PyTorch's CUDA 13 wheels).

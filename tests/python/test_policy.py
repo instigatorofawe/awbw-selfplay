@@ -18,6 +18,7 @@ from awbw.data.loader import (
     aux_targets,
     decision_batches,
     encode_decisions,
+    in_subset,
     in_validation,
 )
 from awbw.data.shards import Dataset, ShardWriter
@@ -33,7 +34,15 @@ from awbw.nn.model import (
 )
 from awbw.nn.policy import Policy, load_policy, policy_ids, save_policy
 from awbw.nn.train_critic import dihedral
-from awbw.nn.train_policy import PolicyTrainConfig, count_decisions, policy_metrics, train, undihedral
+from awbw.nn.train_policy import (
+    PolicyTrainConfig,
+    count_decisions,
+    games_keep,
+    policy_metrics,
+    split_size,
+    train,
+    undihedral,
+)
 from awbw.replay.extract import NO_ACTION, ActionLabels, GameSamples
 
 U = {u.name: u.index for u in rules.load().units}
@@ -387,6 +396,36 @@ def test_movement_and_aux_train_and_score(cache, tmp_path):
         )
 
 
+def test_training_games_can_be_a_nested_subset(cache, tmp_path):
+    many = np.arange(1, 200_000)
+    quarter, half = in_subset(many, 0.25), in_subset(many, 0.5)
+    assert not (quarter & ~half).any()
+    assert half.mean() == pytest.approx(0.5, abs=0.01) and quarter.mean() == pytest.approx(0.25, abs=0.01)
+    assert in_validation(many)[half].mean() == pytest.approx(0.05, abs=0.003)  # unrelated to the split
+    ids = np.arange(1, 200)
+    val = in_validation(ids, 0.5)
+    train_ids = [int(i) for i in ids[~val][:8]]
+    games = [random_game(cache, 20, seed=i, game_id=i) for i in [int(ids[val][0]), *train_ids]]
+    ds = write_dataset(tmp_path / "ds", games)
+
+    def decisions(i: int) -> int:
+        a = labels(games[[g.game_id for g in games].index(i)])
+        return int(((np.arange(3)[None, :] < a.n_steps[:, None]) & (a.n_legal > 1)).sum())
+
+    def size(keep):
+        return split_size(ds, "train", keep, 0.5)
+
+    assert size(None) == (8, sum(map(decisions, train_ids)))
+    halved = [i for i in train_ids if in_subset(np.array([i]), 0.5)[0]]
+    assert 0 < len(halved) < 8 and size(games_keep(fraction=0.5)) == (len(halved), sum(map(decisions, halved)))
+    assert size(games_keep(game_ids=(train_ids[2], train_ids[5])))[0] == 3
+    assert size(games_keep(maps=(MAP_ID,))) == size(None)
+    assert size(games_keep(exclude_maps=(MAP_ID,))) == (0, 0)
+    cfg = PolicyTrainConfig(epochs=1, fraction=1.0, batch_size=16, val_fraction=0.5, hold_out_maps=(MAP_ID,))
+    with pytest.raises(ValueError, match="no training decisions"):
+        train(tmp_path / "ds", tmp_path / "run", cfg, TINY)
+
+
 def test_load_policy_refuses_another_encoder(tmp_path):
     net = PolicyValueNet(TINY)
     save_policy(tmp_path / "p.pt", net)
@@ -419,6 +458,13 @@ def test_cli_trains_and_evaluates_a_policy(cache, tmp_path, capsys):
     assert main(["eval-policy", str(out / "best.pt"), *args, "--split", "all", "--rows", "1"]) == 0
     text = capsys.readouterr().out
     assert "by phase" in text and "value at" in text and "uniform" in text
+    some = ["--split", "all", "--rows", "1", "--maps", str(MAP_ID), "--game-ids", "1", "3"]
+    assert main(["eval-policy", str(out / "best.pt"), *args, *some]) == 0
+    assert "value at" in capsys.readouterr().out
+    fewer = ["--games-fraction", "0.9", "--hold-out-maps", "1", "2", "--game-ids", "0", "100"]
+    assert main(["train-policy", *args, "--out", str(tmp_path / "fewer"), *small, *fewer]) == 0
+    info = load_policy(tmp_path / "fewer" / "best.pt")[1]
+    assert info["train"]["hold_out_maps"] == [1, 2] and 0 < info["train_games"] <= 4
 
 
 def test_games_between_agents_end_or_are_adjudicated(cache):

@@ -22,6 +22,7 @@ from .shards import Dataset, Shard
 
 BUCKETS = (16, 24, 32, 40)
 _GOLDEN = np.uint64(0x9E3779B97F4A7C15)
+_SUBSET = np.uint64(0xD1B54A32D192ED03)
 
 
 def bucket_for(height: int, width: int) -> int:
@@ -37,6 +38,14 @@ def in_validation(game_ids: np.ndarray, fraction: float = 0.05) -> np.ndarray:
     """Whether each game is in the validation split: a fixed hash of its id, so a
     game stays on one side across rebuilds and dataset sizes."""
     h = (np.asarray(game_ids).astype(np.uint64) * _GOLDEN) >> np.uint64(40)
+    return (h % np.uint64(1_000_000)) < np.uint64(round(fraction * 1_000_000))
+
+
+def in_subset(game_ids: np.ndarray, fraction: float) -> np.ndarray:
+    """Whether each game is in a ``fraction`` share of the games, by a hash of its
+    id unrelated to ``in_validation``'s, so smaller shares are parts of larger ones
+    (a quarter of the games is half of the half) and hold validation games evenly."""
+    h = (np.asarray(game_ids).astype(np.uint64) * _SUBSET) >> np.uint64(40)
     return (h % np.uint64(1_000_000)) < np.uint64(round(fraction * 1_000_000))
 
 
