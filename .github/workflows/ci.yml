@@ -22,7 +22,7 @@ jobs:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
       # Builds the extension, which regenerates python/awbw/_core.pyi.
-      - run: uv sync --locked
+      - run: uv sync --locked --extra cpu  # torch on Linux; no-op on macOS
       - name: Committed extension stub is up to date
         run: git diff --exit-code -- python/awbw/_core.pyi
       - run: uv run pre-commit run --all-files --show-diff-on-failure
@@ -40,7 +40,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           enable-cache: true
-      - run: uv sync --locked
+      - run: uv sync --locked --extra cpu  # torch on Linux; no-op on macOS
       - run: uv run pytest -v
 
   cpp:

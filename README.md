@@ -6,13 +6,16 @@ C++, bound to Python with nanobind. It is for:
 1. parsing real AWBW replays into training data (a critic first),
 2. deep MCTS self-play.
 
-See [PLAN.md](PLAN.md) for the design and milestones. Current status: **M1
-is finished** (the C++ rules engine, network input encoding, the v0 dataset
-and a first critic). Replay ingestion (M0) is done. The engine applies every
-action kind, every CO power's immediate effects, rain and snow, and the start
-of each turn. Replaying the cached games turn by turn from their snapshots,
-it reproduces 571,454 of 571,552 checked turns of 20,945 games exactly
-(10.2M actions); the 98 others are AWBW oddities listed in PLAN.md.
+See [PLAN.md](PLAN.md) for the design and milestones. Current status: M0
+(replay ingestion) and M1 (the C++ rules engine, network input encoding, the
+v0 dataset and a first critic) are finished, and M3 is under way: a
+micro-step action space with its legal mask, the v1 dataset of every action
+taken, and a policy-value network pre-trained on it. The engine applies
+every action kind, every CO power's immediate effects, rain and snow, and
+the start of each turn. Replaying 38,936 cached games turn by turn from
+their snapshots, it reproduces 1,044,228 of 1,044,350 checked turns exactly
+(18.5M actions, every one in the legal mask); the others are AWBW oddities
+listed in PLAN.md.
 
 ## Setup
 
@@ -23,6 +26,10 @@ uv sync                      # builds the C++ extension (rebuilt when src/ chang
 uv run pre-commit install    # ruff, clang-format and hygiene hooks
 uv run pytest
 ```
+
+On Linux, torch comes from PyTorch's own index through an extra: `uv sync
+--extra cuda` (CUDA 13) or `uv sync --extra cpu`. Later `uv run`s keep it,
+but a plain `uv sync` there removes it.
 
 C++ unit tests (googletest) and micro-benchmarks (Google Benchmark) build
 with plain CMake; both libraries are fetched at pinned versions:
@@ -56,10 +63,13 @@ uv run awbw check-combat      # every logged attack vs the engine's damage formu
 uv run awbw check-moves       # load every snapshot into the engine; check logged moves
 uv run awbw check-turns       # replay every turn with the engine; compare with the next snapshot
 uv run awbw dataset           # v0 critic dataset (turn-start states + results) -> cache/datasets/v0
+uv run awbw dataset --v1      # every action taken, with its micro-steps -> cache/datasets/v1
 ```
 
 Datasets store raw engine states; `awbw.data.loader.batches` encodes them
-for the network (`awbw._core.encode_batch`) as it reads.
+for the network (`awbw._core.encode_batch`) as it reads, and
+`decision_batches` gives a v1 dataset's micro-step decisions
+(`encode_policy_batch`).
 
 ## Critic
 
@@ -76,8 +86,23 @@ critic = Critic.load("cache/critics/run1/best.pt")
 critic.value(states)  # raw states [N, STATE_BYTES] -> [-1, 1] for each player to move
 ```
 
-On Linux, `uv sync` installs the CPU build of torch (see `[tool.uv.sources]`
-in `pyproject.toml`); point it at a CUDA index to train on a GPU there.
+## Policy
+
+A policy-value network (the critic's trunk, plus a head that scores each
+micro-step of a decision) pre-trained by behaviour cloning on the v1 dataset:
+
+```sh
+uv run awbw train-policy --out cache/policies/run1 --compile   # --fraction: share of decisions per epoch
+uv run awbw eval-policy cache/policies/run1/best.pt            # by phase, against a uniform choice
+uv run awbw arena cache/policies/run1/best.pt --games 32       # whole games against a random mover
+```
+
+```python
+from awbw.nn.policy import Policy
+
+policy = Policy.load("cache/policies/run1/best.pt")
+policy.score(states, picks, n_picks)  # each decision's legal ids, their priors and the value
+```
 
 Requests are rate-limited (`--rate`, default one per second). Please keep it
 that way: both sites are community-run.

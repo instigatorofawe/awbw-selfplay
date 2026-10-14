@@ -144,6 +144,7 @@ def main(argv: list[str] | None = None) -> int:
     tp.add_argument("--seed", type=int)
     tp.add_argument("--no-augment", dest="augment", action="store_false", default=None)
     tp.add_argument("--compile", action="store_true", default=None, help="torch.compile the network")
+    tp.add_argument("--no-bf16", dest="bf16", action="store_false", default=None, help="train in float32 on CUDA too")
     tp.add_argument("--channels", type=int)
     tp.add_argument("--blocks", type=int)
     tp.add_argument("--device", default="auto", help="cuda, mps, cpu or auto (default)")
@@ -156,6 +157,17 @@ def main(argv: list[str] | None = None) -> int:
     ep.add_argument("--rows", type=float, default=0.1, help="share of the split's actions scored (default 0.1)")
     ep.add_argument("--min-rating", type=int, default=0)
     ep.add_argument("--device", default="auto")
+
+    ar = sub.add_parser("arena", help="play a saved policy against a random mover or another policy")
+    ar.add_argument("checkpoint", type=Path)
+    ar.add_argument("--opponent", default="random", help="'random' (default) or another policy checkpoint")
+    ar.add_argument("--games", type=int, default=32, help="start positions, each played twice with seats swapped")
+    ar.add_argument("--max-days", type=int, default=30, help="then more properties wins (default 30)")
+    ar.add_argument("--temperature", type=float, default=0.0, help="0 (default): always the likeliest step")
+    ar.add_argument("--ratings", type=int, nargs=2, metavar=("MOVER", "OPPONENT"), help="ratings the nets are told")
+    ar.add_argument("--data", type=Path, help="v1 dataset whose validation games give the starts (default: v1)")
+    ar.add_argument("--device", default="auto")
+    ar.add_argument("--seed", type=int, default=0)
 
     va = sub.add_parser("value", help="a saved critic's view of a replay, turn by turn")
     va.add_argument("checkpoint", type=Path)
@@ -193,6 +205,7 @@ def main(argv: list[str] | None = None) -> int:
         "eval-critic": _eval_critic,
         "train-policy": _train_policy,
         "eval-policy": _eval_policy,
+        "arena": _arena,
         "value": _value,
         "live": _live,
     }
@@ -606,6 +619,50 @@ def _eval_policy(args, http: Http) -> int:
             f"  value at {v['n']:,} turn starts, {what}: loss {v['loss']:.4f}  accuracy {v['accuracy'] or 0:.3f}  "
             f"brier {v['brier']:.4f}  ece {v['ece']:.4f}"
         )
+    return 0
+
+
+def _arena(args, http: Http) -> int:
+    import numpy as np
+
+    from . import _core
+    from .agents import DRAW, PolicyAgent, RandomAgent, play
+    from .data.loader import in_validation
+    from .data.shards import Dataset
+    from .nn.policy import Policy
+
+    ds = Dataset(args.data or cache_dir() / "datasets" / "v1")
+    starts: list = []
+    for i in range(len(ds.shards)):
+        if len(starts) >= args.games:
+            break
+        sh = ds.load(i)
+        for g in np.flatnonzero(in_validation(sh.g_id))[: args.games - len(starts)]:
+            starts.append(_core.GameState.from_bytes(sh.state[sh.g_start[g]].tobytes()))
+    ratings = tuple(args.ratings) if args.ratings else None
+    me = PolicyAgent(Policy.load(args.checkpoint, args.device), args.temperature, ratings, seed=args.seed)
+    if args.opponent == "random":
+        them = RandomAgent(args.seed + 1)
+    else:
+        them = PolicyAgent(Policy.load(args.opponent, args.device), args.temperature, ratings, seed=args.seed + 1)
+    first = play(starts, (me, them), max_days=args.max_days)
+    second = play(starts, (them, me), max_days=args.max_days)
+    tally = {"won": 0, "lost": 0, "drawn": 0}
+    for seat, results in ((0, first), (1, second)):
+        won = sum(r.winner == seat for r in results)
+        drawn = sum(r.winner == DRAW for r in results)
+        lost = len(results) - won - drawn
+        tally["won"] += won
+        tally["lost"] += lost
+        tally["drawn"] += drawn
+        ended = sum(r.decided == "game over" for r in results)
+        days = np.mean([r.days for r in results])
+        print(
+            f"as player {seat + 1}: won {won}, lost {lost}, drawn {drawn}; {ended} ended before the day limit, "
+            f"{days:.1f} days on average"
+        )
+    n = sum(tally.values())
+    print(f"{args.checkpoint} vs {args.opponent}: {tally['won']}-{tally['lost']}-{tally['drawn']} of {n} games")
     return 0
 
 

@@ -258,5 +258,26 @@ void BM_LegalIds(benchmark::State& st) {
 }
 BENCHMARK(BM_LegalIds)->Arg(0)->Arg(1)->Arg(2);
 
+// A policy decision's whole input in a 32x32 window: the board, then the legal
+// steps from idle and the decision planes.
+void BM_EncodeDecision(benchmark::State& st) {
+  const Board& b = board();
+  std::vector<uint8_t> planes((size_t{kNumPlanes} + kNumSelectionPlanes) * 32 * 32);
+  std::vector<float> globals(int{kNumGlobals} + kNumSelectionGlobals);
+  uint8_t nonspatial[kNumNonSpatialIds];
+  std::vector<uint16_t> ids;
+  const Selection sel;
+  for (auto _ : st) {
+    encode(b.map, b.state, planes.data(), 32, 32, globals.data());
+    legal_ids(b.map, b.state, sel, ids);
+    encode_selection(b.map, b.state, sel, ids.data(), static_cast<int>(ids.size()),
+                     planes.data() + size_t{kNumPlanes} * 32 * 32, 32, 32,
+                     globals.data() + kNumGlobals, nonspatial);
+    benchmark::DoNotOptimize(planes.data());
+    benchmark::ClobberMemory();
+  }
+}
+BENCHMARK(BM_EncodeDecision);
+
 }  // namespace
 }  // namespace awbw

@@ -5,6 +5,7 @@
 #include <nanobind/stl/tuple.h>
 #include <nanobind/stl/vector.h>
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <optional>
@@ -222,8 +223,8 @@ void encode_policy_batch(StateRows states, PickRows picks, CountIn n_picks, Plan
                          GlobalOut globals, MaskOut nonspatial, std::optional<TargetOut> targets) {
   using namespace awbw;
   const size_t n = states.shape(0);
-  constexpr int kAllPlanes = kNumPlanes + kNumSelectionPlanes;
-  constexpr int kAllGlobals = kNumGlobals + kNumSelectionGlobals;
+  constexpr int kAllPlanes = int{kNumPlanes} + kNumSelectionPlanes;
+  constexpr int kAllGlobals = int{kNumGlobals} + kNumSelectionGlobals;
   if (states.shape(1) != sizeof(GameState))
     throw nb::value_error(
         ("states must have STATE_BYTES = " + std::to_string(sizeof(GameState)) + " columns")

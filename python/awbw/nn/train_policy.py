@@ -13,6 +13,8 @@ An epoch is a random ``fraction`` of the training decisions. Each batch gets
 one of the 8 flips and transposes of its square bucket; the spatial policy
 logits are mapped back before the loss. Ratings are hidden at random as for
 the critic, so the policy can imitate players of a given strength or of any.
+On CUDA the forward pass runs in bfloat16 (``bf16``); the losses and
+validation stay in float32.
 
 Validation scores the decisions of a fixed ``val_rows`` share of the
 validation games' actions (by phase, against a uniform choice among the
@@ -60,6 +62,7 @@ class PolicyTrainConfig:
     rating_dropout: float = 0.25
     augment: bool = True
     compile: bool = False
+    bf16: bool = True  # autocast the forward pass on CUDA (validation stays float32)
     val_fraction: float = 0.05
     val_rows: float = 0.1  # share of the validation games' actions whose decisions are scored
     shards_at_once: int = 8
@@ -308,7 +311,8 @@ def train(
             t = _to_device(b, device)
             hide = torch.from_numpy(rng.random(len(b.target)) < cfg.rating_dropout).to(device)
             rating = t["rating"].masked_fill(hide[:, None], -1)
-            logp, value = _forward(forward, t, rating, int(rng.integers(8)) if cfg.augment else 0)
+            with torch.autocast(device.type, torch.bfloat16, enabled=cfg.bf16 and device.type == "cuda"):
+                logp, value = _forward(forward, t, rating, int(rng.integers(8)) if cfg.augment else 0)
             policy_loss = -logp.gather(1, t["target"][:, None]).mean()
             valued = torch.from_numpy(rng.random(len(b.target)) < cfg.value_fraction).to(device)
             ce = F.cross_entropy(value.float(), t["z"], reduction="none")

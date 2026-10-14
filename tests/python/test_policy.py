@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from awbw import _core, engine, rules
+from awbw.agents import DRAW, PolicyAgent, RandomAgent, adjudicate, army_values, play, property_counts
 from awbw.cli import main
 from awbw.data.loader import (
     PHASE_FACTORY,
@@ -316,3 +317,21 @@ def test_cli_trains_and_evaluates_a_policy(cache, tmp_path, capsys):
     assert main(["eval-policy", str(out / "best.pt"), *args, "--split", "all", "--rows", "1"]) == 0
     text = capsys.readouterr().out
     assert "by phase" in text and "value at" in text and "uniform" in text
+
+
+def test_games_between_agents_end_or_are_adjudicated(cache):
+    s = start(cache)
+    assert property_counts(cache, s) == [2, 2]  # each HQ and base
+    assert army_values(s) == [1000 + 7000 + 6000, 1000 + 7000 + 3000]
+    assert adjudicate(cache, s) == 0  # equal properties: the larger army
+    results = play([s, s], (RandomAgent(1), RandomAgent(2)), max_days=4)
+    assert len(results) == 2
+    for r in results:
+        assert r.actions > 0 and r.winner in (0, 1, DRAW)
+        assert (r.decided == "day limit") == (r.final.winner == _core.NO_OWNER)
+        if r.decided == "day limit":
+            assert r.days == 4 and r.final.day == 5 and r.winner == adjudicate(cache, r.final)
+    policy = Policy(_random_net())
+    for agent in (PolicyAgent(policy), PolicyAgent(policy, temperature=1.0, ratings=(1200, 1200))):
+        (r,) = play([s], (agent, RandomAgent(3)), max_days=2)
+        assert r.actions > 0 and r.days <= 2

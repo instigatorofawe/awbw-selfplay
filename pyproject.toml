@@ -10,6 +10,14 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = ["numpy>=2.0"]
 
+[project.optional-dependencies]
+# torch for awbw.nn on Linux, from PyTorch's index (`[tool.uv.sources]`):
+# `uv sync --extra cpu` (CI) or `uv sync --extra cuda` (CUDA 13, which
+# Blackwell GPUs need). `uv run` keeps whichever is installed; a plain
+# `uv sync` removes it.
+cpu = ["torch>=2.14; sys_platform == 'linux'"]
+cuda = ["torch>=2.14; sys_platform == 'linux'"]
+
 [project.scripts]
 awbw = "awbw.cli:main"
 
@@ -20,8 +28,9 @@ dev = [
     "pytest>=8",
     "ruff>=0.17",
 ]
-# The critic and, later, self-play networks (awbw.nn).
-nn = ["torch>=2.14"]
+# The critic and policy networks (awbw.nn) on macOS, whose PyPI wheels include
+# the Metal (MPS) backend. Linux takes an extra instead.
+nn = ["torch>=2.14; sys_platform == 'darwin'"]
 
 [tool.scikit-build]
 minimum-version = "build-system.requires"
@@ -39,16 +48,22 @@ cache-keys = [
   { file = "src/**/*.h" },
   { file = "src/**/*.cpp" },
 ]
+conflicts = [[{ extra = "cpu" }, { extra = "cuda" }]]
 
-# Linux gets the CPU build of torch, which keeps CI small; for a CUDA machine,
-# point this at a CUDA index (e.g. https://download.pytorch.org/whl/cu130).
-# macOS wheels from PyPI already include the Metal (MPS) backend.
 [tool.uv.sources]
-torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+torch = [
+  { index = "pytorch-cpu", extra = "cpu" },
+  { index = "pytorch-cu130", extra = "cuda" },
+]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.pytest.ini_options]

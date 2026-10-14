@@ -37,8 +37,8 @@ awbw-selfplay/
     rules/    maps.py
     engine.py                 # replay snapshot -> GameState glue
     replay/   sources.py  parse.py  combat_check.py  move_check.py  step_check.py  extract.py
-    data/     shards.py  loader.py
-    nn/       model.py  critic.py  train_critic.py      # selfplay.py to come
+    data/     shards.py  loader.py  build.py
+    nn/       model.py  critic.py  train_critic.py  policy.py  train_policy.py   # selfplay.py to come
     render.py  agents/
   tests/cpp/                  # googletest, fetched by CMake (AWBW_BUILD_TESTS)
   tests/python/               # pytest
@@ -174,11 +174,9 @@ tile by tile:
   its turn (AWBW allows it even after the transport has acted), so a second
   unload is just another action. A moved transport with cargo stays
   selectable for that alone.
-- **Forced steps auto-advance.** A phase with exactly one legal action is
-  applied immediately. It produces no search and no training sample.
-- **Full-action API.** `enumerate_full_actions()` returns complete
-  `(unit, dest, cmd, target)` tuples, used by replay decomposition and
-  heuristic bots.
+- **Forced steps** (a single legal id, 17% of logged steps, mostly Wait
+  after a move) carry no choice: the policy dataset leaves them out, and
+  search is to take them without expanding a node.
 - **Paths:** the destination is enough: the engine takes the cheapest path the
   mover's owner can see (`apply` also takes an explicit path; replays pass the
   logged one, which costs more than the cheapest in 0.7% of moves). The path
@@ -544,16 +542,38 @@ tile by tile:
        (70 s from snapshots alone).
    - Ratings come from the mooo index, which lists players in turn order:
      its loser matched the replay's `GameOver` in all 17,108 games.
-   - **v1 (verified replays only):** every idle-phase state + outcome, plus
-     micro-step action labels (from `enumerate_full_actions` decomposition)
-     for a policy prior.
+   - **v1 (`awbw dataset --v1`, `extract.extract_v1`):** a sample for every
+     action taken, in the state it was taken in, labelled with its
+     micro-steps (`action_steps`) and how many ids were legal at each, plus
+     the result. The engine steps each turn as `check-turns` does and
+     records each applied action with the state before it
+     (`step_check.Labelled`; a failed fight-result branch is overwritten by
+     the one that passes), so only turns that replay exactly get labels; the
+     start of every turn is a sample either way, so v1's turn starts are
+     v0's samples (tested on cached replays). The last turn has no snapshot
+     after it and is checked against the log only. A server-ended turn has
+     no End Turn label, a resignation none at all.
+     - On the 43,060 replays cached on 2026-10-13: 35,684 games pass the
+       filter, giving 19,225,064 samples (539 per game), 19,213,293 of them
+       labelled: 52,339,186 micro-steps, 9,060,294 forced. 104 turns couldn't
+       be stepped. 1.74 GB; built in about 25 minutes on 11 workers, which
+       write whole shards themselves (`data/build.py`, 100 replays per
+       shard), since moving and compressing 125 GB of raw states in one
+       process would be the bottleneck.
+     - Consecutive states differ in a few bytes, so zlib takes a state to
+       83 bytes here (XOR against the previous row gave 44, not worth a
+       format change).
+     - Two replays from the older archive have a building without a terrain
+       id; parse errors like that now raise `ReplayFormatError`.
 8. **Store** (`awbw.data.shards`): a directory of `numpy` `.npz` shards of
-   whole games (1,000 per shard), plus `maps.npz` (terrain of every map
-   used, so a dataset needs no replay cache) and `meta.json`.
+   whole games (1,000 per shard; v1 about 83), plus `maps.npz` (terrain of
+   every map used, so a dataset needs no replay cache) and `meta.json`.
    - Per sample: `state` (raw `GameState` bytes), `game`, `turn`, `day`,
-     `to_play`, `z`. Per game: id, map, winner, how it ended, days, both
-     COs and both players' ratings from before the game (shard format v2;
-     v1 stored the leaky ones).
+     `to_play`, `z`; v1 (`meta["rows"] == "actions"`) adds `action` (its
+     place in the turn), `kind`, `steps` [3], `n_steps` and `n_legal` [3].
+     Per game: id, map, winner, how it ended, days, both COs and both
+     players' ratings from before the game (shard format v2; v1 stored the
+     leaky ones).
    - zlib (`savez_compressed`) shrinks a state from 4,000 bytes to about
      240 and decompresses at about 3 GB/s; zstd would save 15% more, not
      worth a dependency.
@@ -563,6 +583,13 @@ tile by tile:
      buckets (16/24/32/40) so a batch has one shape, splits off validation
      games by a fixed hash of the game id (5%), and takes a `keep` mask for
      rating or map filters. About 66k samples/s in one process.
+   - `decision_batches` turns a v1 dataset's actions into decisions, one
+     per non-forced micro-step, each encoded with the picks before it
+     (`encode_policy_batch`, §6) and the policy index of the step taken. It
+     takes a random `fraction` of the decisions per pass (or a fixed
+     `row_fraction` of the actions, for validation) and keeps only the
+     states those need, so many shards can be shuffled together. About
+     160k decisions/s in one thread.
 
 ### Critic training notes
 
@@ -705,8 +732,21 @@ knows what a player who watched every turn knows:
     (quantities); `flags` (index: moved, hidden, stunned, capturing)
   - `cargo1`, `cargo2` (index: type), `cargo1_hp`, `cargo2_hp` (expected
     internal HP, rounded)
-  - To come with the policy: the pending selection and reachable /
-    attackable masks.
+- **The decision in progress** (`encode_selection`, selection encoder v1)
+  adds 18 planes and 29 globals for the policy network:
+  - `pick` (index): 1 on the picked unit's tile, 2 where it moves, 3 both,
+    4 on a picked factory;
+  - `legal.select` .. `legal.unload2` (one per channel, 0/1): where that
+    channel's step is legal. These are the spatial part of the policy's
+    mask, and show the net the reachable tiles, targets and drops directly;
+  - globals: the phase (one-hot) and the picked unit's type (one-hot).
+  - The non-spatial ids' legality (End Turn, COP, SCOP, Build + type) comes
+    back separately, `[28]` per decision, for the mask.
+  - `encode_policy_batch(states, picks, n_picks, ...)` reaches each decision
+    by taking its first `n_picks` picks from idle (picks change no state),
+    and with `targets` gives the next pick's `policy_index`: channel × S² +
+    y × S + x over the S × S bucket, then the 28 non-spatial ids, so
+    `policy_size(40, 40) == NUM_ACTION_IDS`.
 - **104 globals (`float32`)**, named in `GLOBAL_NAMES`: for me, then the
   opponent, funds, income, power meter as a share of each power's cost, the
   costs, which power is on, power uses, properties, comtowers, unit count
@@ -845,9 +885,8 @@ knows what a player who watched every turn knows:
 
 - **Trunk:** a larger ResNet once the full archive is in; a transformer
   over tiles is an option.
-- **Heads:**
-  - policy logits per `(channel, tile)`
-  - auxiliary heads (§5): final ownership, army value N days ahead
+- **Heads:** auxiliary heads (§5): final ownership, army value N days
+  ahead.
 - **Policy gather on device.** `collect()` provides padded legal-action
   indices `[B, L_max]` (L_max ≈ 256, with an overflow fallback). The net
   gathers logits on the GPU, so only `[B, L_max]` crosses back to C++.
@@ -910,8 +949,10 @@ while training:
     (**done**)
   - `from_snapshot()`, `zobrist`
   - zero-copy numpy views for debugging
-- **Batch functions:** `encode_batch(state_bytes[N]) -> planes, globals`,
-  writing into caller-provided numpy buffers.
+- **Batch functions:** `encode_batch(state_bytes[N]) -> planes, globals`
+  and `encode_policy_batch(state_bytes[N], picks[N, 3], n_picks[N]) ->
+  planes, globals, non-spatial legality, targets`, writing into
+  caller-provided numpy buffers; `policy_index` / `policy_size` (**done**).
 - **`BatchedSearch`:** as in §8.
 - **macOS:** Apple clang ships no OpenMP, so parallelism uses a `std::thread`
   pool.
@@ -920,7 +961,8 @@ while training:
 
 - **C++ (googletest, `tests/cpp/`):** maps, state bookkeeping, snapshots,
   movement, damage, every action kind, the turn start, CO powers, the
-  network encoding and legal actions (137 tests). CI runs them on Linux and
+  network encoding (the decision planes included) and legal actions (140
+  tests). CI runs them on Linux and
   macOS, in Release and under ASan/UBSan.
 - **Damage formula across all logged attacks:** every logged combat result
   must be in `outcomes()`. This checks the formula over the whole replay

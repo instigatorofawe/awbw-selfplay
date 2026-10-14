@@ -12,6 +12,7 @@ step taken.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -219,7 +220,8 @@ def decision_batches(
     of the decisions on each pass, ``row_fraction`` a fixed share of the
     actions (all of their decisions; for validation). ``split`` and ``keep``
     are as in ``batches``. Shuffling mixes ``shards_at_once`` shards at a
-    time; only the states their chosen decisions need are kept.
+    time; only the states their chosen decisions need are kept. The next
+    group of shards loads in a thread while this one's batches are used.
     """
     if not ds.has_actions:
         raise ValueError(f"{ds.root}: not a v1 dataset (no action labels)")
@@ -227,30 +229,38 @@ def decision_batches(
         raise ValueError(f"unknown split {split!r}")
     rng = np.random.default_rng(seed)
     order = rng.permutation(len(ds.shards)) if shuffle else np.arange(len(ds.shards))
-    for start in range(0, len(order), shards_at_once):
+    groups = [order[start : start + shards_at_once] for start in range(0, len(order), shards_at_once)]
+    jobs = list(zip(groups, rng.spawn(len(groups)), strict=True))  # a generator per group: loads run ahead
+
+    def load(job: tuple[np.ndarray, np.random.Generator]) -> tuple[np.ndarray, dict[str, np.ndarray]] | None:
+        shards, group_rng = job
         parts = []
-        for i in order[start : start + shards_at_once]:
+        for i in shards:
             sh = ds.load(int(i))
-            if (
-                part := _decisions(sh, int(i), split, val_fraction, keep, fraction, row_fraction, forced, steps, rng)
-            ) is not None:
+            args = (split, val_fraction, keep, fraction, row_fraction, forced, steps, group_rng)
+            if (part := _decisions(sh, int(i), *args)) is not None:
                 parts.append(part)
         if not parts:
-            continue
+            return None
         offsets = np.cumsum([0] + [len(p["states"]) for p in parts[:-1]])
         states = np.concatenate([p.pop("states") for p in parts])
         for p, off in zip(parts, offsets, strict=True):
             p["state"] = p["state"] + off
-        cols = {k: np.concatenate([p[k] for p in parts]) for k in parts[0]}
+        return states, {k: np.concatenate([p[k] for p in parts]) for k in parts[0]}
+
+    for (_, group_rng), loaded in zip(jobs, _read_ahead(load, jobs), strict=True):
+        if loaded is None:
+            continue
+        states, cols = loaded
         sizes = np.array([bucket_for(*ds.map_size[int(m)]) for m in cols["map_id"]])
-        idx = rng.permutation(len(sizes)) if shuffle else np.arange(len(sizes))
+        idx = group_rng.permutation(len(sizes)) if shuffle else np.arange(len(sizes))
         todo = []
         for size in BUCKETS:
             chosen = idx[sizes[idx] == size]
             todo += [(size, chosen[b : b + batch_size]) for b in range(0, len(chosen), batch_size)]
         if drop_last:
             todo = [(size, sel) for size, sel in todo if len(sel) == batch_size]
-        for j in rng.permutation(len(todo)) if shuffle else range(len(todo)):
+        for j in group_rng.permutation(len(todo)) if shuffle else range(len(todo)):
             size, sel = todo[j]
             planes, globals_, nonspatial, target = encode_decisions(
                 states[cols["state"][sel]], cols["steps"][sel], cols["step"][sel], size
@@ -267,6 +277,18 @@ def decision_batches(
 
 
 _DECISION_FIELDS = ("step", "phase", "n_legal", "kind", "turn_start", "row", "z", "game_id", "map_id", "day", "rating")
+
+
+def _read_ahead[T, R](fn: Callable[[T], R], items: list[T]) -> Iterator[R]:
+    """``fn`` of each item in turn, the next one computed in a thread while the
+    caller uses this one (decompression and numpy release the GIL)."""
+    with ThreadPoolExecutor(1) as pool:
+        ahead = [pool.submit(fn, item) for item in items[:1]]
+        for item in items[1:]:
+            ahead.append(pool.submit(fn, item))
+            yield ahead.pop(0).result()
+        if ahead:
+            yield ahead.pop().result()
 
 
 def _decisions(
