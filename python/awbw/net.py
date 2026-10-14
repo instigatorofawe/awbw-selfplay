@@ -3,7 +3,10 @@
 A 429 or 503 is the server asking us to slow down: every thread waits out its
 Retry-After, and requests are spaced twice as far apart from then on. Other
 5xx answers, timeouts and dropped connections are retried after a backoff.
-Each retry is reported on stderr and counted in ``Http.retried``.
+A request also times out if its whole response takes longer than
+``deadline``: a server that sends a few bytes now and then never trips the
+socket's own timeout. Each retry is reported on stderr and counted in
+``Http.retried``.
 """
 
 from __future__ import annotations
@@ -49,9 +52,10 @@ class HttpError(RuntimeError):
 
 
 class Http:
-    def __init__(self, min_interval: float = 1.0, timeout: float = 60.0, retries: int = 3):
+    def __init__(self, min_interval: float = 1.0, timeout: float = 60.0, deadline: float = 300.0, retries: int = 3):
         self.min_interval = min_interval
-        self.timeout = timeout
+        self.timeout = timeout  # for each socket operation
+        self.deadline = deadline  # for the whole response
         self.retries = retries
         self.cookies: dict[str, str] = {}
         self.retried = 0
@@ -90,11 +94,10 @@ class Http:
             req.add_header("Cookie", "; ".join(f"{k}={v}" for k, v in self.cookies.items()))
         for attempt in range(self.retries + 1):
             self._wait_turn()
+            deadline = time.monotonic() + self.deadline
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                    data = resp.read(MAX_RESPONSE_BYTES + 1)
-                    if len(data) > MAX_RESPONSE_BYTES:
-                        raise HttpError(req.full_url, resp.status, b"response too large")
+                    data = self._read_body(req, resp, deadline)
                     self._remember_cookies(resp.headers)
                     return data, resp.headers
             except urllib.error.HTTPError as e:
@@ -112,6 +115,18 @@ class Http:
                 self._note_retry(req, repr(e), attempt)
             time.sleep(2.0 * 2**attempt)
         raise AssertionError("unreachable")
+
+    def _read_body(self, req: urllib.request.Request, resp, deadline: float) -> bytes:
+        chunks: list[bytes] = []
+        size = 0
+        while chunk := resp.read1(1 << 16):
+            size += len(chunk)
+            if size > MAX_RESPONSE_BYTES:
+                raise HttpError(req.full_url, resp.status, b"response too large")
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"response not complete after {self.deadline:g}s")
+            chunks.append(chunk)
+        return b"".join(chunks)
 
     def _note_retry(self, req: urllib.request.Request, why: str, attempt: int) -> None:
         with self._lock:

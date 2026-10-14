@@ -154,6 +154,32 @@ def test_http_retries_a_dropped_connection(monkeypatch, capsys):
     assert "Connection reset by peer" in capsys.readouterr().err
 
 
+def test_http_gives_up_on_a_response_that_trickles_in(monkeypatch, capsys):
+    clock = [0.0]
+
+    class Trickle(io.BytesIO):
+        status = 200
+        headers = Message()
+
+        def read1(self, size: int | None = -1, /) -> bytes:
+            clock[0] += 50.0  # each byte arrives inside the socket timeout
+            return super().read1(1)
+
+    calls = []
+
+    def urlopen(req, timeout):
+        calls.append(req.full_url)
+        return Trickle(b"stalled" if len(calls) == 1 else b"ok")
+
+    monkeypatch.setattr(net.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(net.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(net.time, "sleep", lambda s: None)
+    http = Http(min_interval=0.25, deadline=300.0)
+    assert http.get("http://example.test/a") == b"ok"  # 2 bytes in 100 s; 7 would take 350
+    assert len(calls) == 2 and http.retried == 1
+    assert "not complete after 300s" in capsys.readouterr().err
+
+
 def test_fetch_replays_keeps_n_in_flight(monkeypatch, tmp_path):
     monkeypatch.setenv("AWBW_CACHE", str(tmp_path))
     both = threading.Barrier(2, timeout=10)
