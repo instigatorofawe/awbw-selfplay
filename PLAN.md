@@ -1072,20 +1072,35 @@ knows what a player who watched every turn knows:
     node stores a new state (6.5 KB) only where an action was applied: at
     most one per simulation.
 - **Chance nodes after Fire:**
-  - **Results:** `fire_outcomes` gives them: `combat_outcomes` for the
-    attacker at its destination, or none if the move traps.
+  - **Results are what the players see:** `fire_outcomes` gives the
+    displayed HPs a fight can leave, none if the move traps. Players know
+    only displayed HP, so each result's probability averages
+    `combat_outcomes` over the luck rolls and over the internal HPs the two
+    units' beliefs (§6) allow. The tree goes on from the likeliest internal
+    HPs that show the result, before and after the fight, and the beliefs
+    update as in the game.
+    - So nothing in the tree depends on internal HPs the players can't see,
+      except Rachel's and Von Bolt's missile aim. Two states that differ
+      only there search the same (tested).
+    - Merging by display also leaves fewer results to visit, and the
+      search is no slower (`BM_Search`: 246k simulations/s, from 230k).
+    - Sonja's hidden displays (`hp_hidden`) are left out: they count as
+      seen.
   - **Sampling:** each visit goes to the result whose share of the visits
     is furthest below its probability. That keeps every result within 1.5
     visits of p × N (tested).
   - **Other actions:** no other action has chance (missile aim, bombs and
     traps are deterministic).
-- **Hidden information: the search sees the whole state,** internal HP and
-  hidden units included, although the network's input holds only what the
-  mover knows.
+- **Hidden units: the search sees them,** although the network's input
+  holds only what the mover knows.
   - A move into an unseen unit traps in the tree as it would in the game,
-    so the search effectively knows where hidden units are.
-  - Self-play is symmetric, so both sides get the same knowledge. Searching
-    a real game would need roots sampled from the beliefs (later).
+    so the search effectively knows where hidden Subs and Stealths are.
+    Concealing a unit or scouting for one is worth nothing in the tree.
+  - Self-play is symmetric, so both sides get the same knowledge. It comes
+    up rarely: in a sample of the v1 replays, 0.1% of decisions have an
+    unseen enemy Sub or Stealth (about 1% of games).
+  - Searching a real game would need roots sampled from a belief over where
+    those units are (later).
 - **Day cap:** past `max_days`, the tree and self-play end a game as a day
   limit decides it: properties, then army value (`day_limit_winner`, the
   same rule as `agents.adjudicate`).

@@ -215,8 +215,10 @@ uint32_t BatchedSearch::add_chance(Slot& sl, const GameState& s, const Selection
   n.step = static_cast<uint16_t>(id);
   n.first = static_cast<uint32_t>(sl.edges.size());
   n.n = static_cast<uint16_t>(sl.outs.size());
-  for (const Outcome& o : sl.outs) {
+  for (const SeenOutcome& o : sl.outs) {
     SearchEdge e;
+    e.att_from = o.att_from;
+    e.def_from = o.def_from;
     e.att_hp = o.att_hp;
     e.def_hp = o.def_hp;
     e.prior = static_cast<float>(o.prob);
@@ -284,6 +286,11 @@ uint32_t BatchedSearch::expand_outcome(Slot& sl, uint32_t node, int edge) {
   const SearchEdge e = sl.edges[edge];
   GameState s = sl.states[c.state];
   Selection sel = c.sel;
+  Action a;
+  step_action(m, s, sel, c.step, a);
+  // The world this result is likeliest in: the internal HPs before the fight.
+  s.units[s.unit_at[a.target]].hp = e.def_from;
+  s.units[a.unit].hp = e.att_from;
   Detail d;
   d.att_hp = e.att_hp;
   d.def_hp = e.def_hp;

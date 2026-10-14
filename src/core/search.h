@@ -13,7 +13,8 @@
 //
 // The tree is over micro-steps (legal.h). A node is a decision (a state and
 // the selection in progress), a chance node (a Fire whose luck is still to be
-// drawn, with a child per result fire_outcomes gives) or the end of the game.
+// drawn, with a child per result fire_outcomes gives as the players see it)
+// or the end of the game.
 // Steps with a single legal id are taken on the way, without a node. Values
 // are kept from player 0's side and read from the mover's, so a value changes
 // sign only where the mover changes, not at every step.
@@ -26,8 +27,13 @@
 // is furthest below its probability. The improved policy at the root,
 // softmax(logits + sigma(completed Q)), is the training target.
 //
-// The search sees the whole state, internal HP and hidden units included,
-// where the network's input holds only what the mover knows (encode.h).
+// Players see only displayed HP, so a chance node's results are the displays
+// the fight can leave, with probabilities over the units' HP beliefs, and the
+// tree goes on from the likeliest internal HPs that show each: nothing in it
+// depends on the internal HPs it can't see (Rachel's and Von Bolt's missiles
+// aside). Hidden units are another matter: a move into one traps in the tree
+// as in the game, so the search knows where they are, while the network's
+// input holds only what the mover knows (encode.h).
 
 #include <cstdint>
 #include <vector>
@@ -128,7 +134,9 @@ struct SearchNode {
 struct SearchEdge {
   uint32_t child = kNoNode;  // not expanded yet
   uint16_t id = 0;           // decision: the step
-  uint8_t att_hp = 0;        // chance: the result
+  uint8_t att_from = 0;      // chance: the result (SeenOutcome)
+  uint8_t def_from = 0;
+  uint8_t att_hp = 0;
   uint8_t def_hp = 0;
   float prior = 0;  // decision: the network's logit; chance: the result's probability
 };
@@ -204,7 +212,7 @@ class BatchedSearch {
     uint32_t leaf = 0;
     SearchResult result;
     std::vector<uint16_t> ids;  // scratch
-    std::vector<Outcome> outs;
+    std::vector<SeenOutcome> outs;
   };
 
   int new_slot();

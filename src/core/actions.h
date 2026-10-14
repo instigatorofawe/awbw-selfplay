@@ -102,12 +102,27 @@ Status apply(const MapData& m, GameState& s, const Action& a, const Detail& d = 
 // The fight as the damage formula sees it, for the unit in `slot` standing on `tile`.
 Combatant combatant(const MapData& m, const GameState& s, int slot, int tile);
 
-// The results Fire action `a` can have (combat_outcomes for the unit at its
-// destination), for search's chance nodes; Detail::att_hp / def_hp force one.
-// False, with `out` empty, if `a` isn't a Fire, its move runs into an enemy
-// the mover can't see (nothing is fought), or there is nothing to fight.
+// A result of a Fire as the players see it: both units' displayed HP afterwards.
+// Players know only displayed HP, so its probability is over the luck rolls
+// and the internal HPs the units' beliefs allow (hp_belief). The internal HPs
+// are the likeliest ones before and after that give it: a world to go on in.
+struct SeenOutcome {
+  uint8_t att_from = 0;  // internal HP before the fight
+  uint8_t def_from = 0;
+  uint8_t att_hp = 0;  // and after; 0 = destroyed
+  uint8_t def_hp = 0;
+  double prob = 0;
+};
+
+// The results Fire action `a` can have as the players see them, for search's
+// chance nodes: combat_outcomes for the unit at its destination, averaged over
+// the beliefs and merged by displayed HP. To play one, set the units' HPs to
+// att_from / def_from and force att_hp / def_hp (Detail). False, with `out`
+// empty, if `a` isn't a Fire, its move runs into an enemy the mover can't see
+// (nothing is fought), or there is nothing to fight. Sonja's hidden displays
+// (hp_hidden) are left out: the displays count as seen.
 bool fire_outcomes(const MapData& m, const GameState& s, const Action& a,
-                   std::vector<Outcome>& out);
+                   std::vector<SeenOutcome>& out);
 
 // Where the active player's power `level` (1 COP, 2 SCOP) would aim its
 // missiles now, as AWBW does: writes up to 3 tiles (kNoTile if there is no

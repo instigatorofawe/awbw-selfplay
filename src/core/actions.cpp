@@ -996,8 +996,19 @@ Combatant combatant(const MapData& m, const GameState& s, int slot, int tile) {
   return c;
 }
 
+namespace {
+
+// The unit's belief, or its own HP if the belief holds nothing.
+void hp_probs(const GameState& s, int slot, double (&p)[kHpBins]) {
+  belief_probs(s, slot, p);
+  if (std::all_of(p, p + kHpBins, [](double x) { return x == 0; }))
+    p[s.units[slot].hp - hp_bin_base(s.units[slot].hp)] = 1;
+}
+
+}  // namespace
+
 bool fire_outcomes(const MapData& m, const GameState& s, const Action& a,
-                   std::vector<Outcome>& out) {
+                   std::vector<SeenOutcome>& out) {
   out.clear();
   if (a.kind != kActFire || a.unit >= kMaxUnits || !s.units[a.unit].alive() ||
       a.target >= m.n_tiles)
@@ -1007,8 +1018,45 @@ bool fire_outcomes(const MapData& m, const GameState& s, const Action& a,
   const int ti = s.unit_at[a.target];
   if (ti == kNoUnit || s.units[ti].owner == s.units[a.unit].owner) return false;
   const int dest = mp.dest();
-  return combat_outcomes(combatant(m, s, a.unit, dest), combatant(m, s, ti, a.target),
-                         m.distance(dest, a.target), out);
+  Combatant att = combatant(m, s, a.unit, dest);
+  Combatant def = combatant(m, s, ti, a.target);
+  const int dist = m.distance(dest, a.target);
+  double pa[kHpBins], pd[kHpBins];
+  hp_probs(s, a.unit, pa);
+  hp_probs(s, ti, pd);
+  const int base_a = hp_bin_base(att.hp), base_d = hp_bin_base(def.hp);
+  thread_local std::vector<Outcome> outs;
+  thread_local std::vector<double> likeliest;  // per result: its likeliest way
+  likeliest.clear();
+  for (int i = 0; i < kHpBins; ++i) {
+    if (pa[i] == 0) continue;
+    att.hp = static_cast<uint8_t>(base_a + i);
+    for (int j = 0; j < kHpBins; ++j) {
+      if (pd[j] == 0) continue;
+      def.hp = static_cast<uint8_t>(base_d + j);
+      if (!combat_outcomes(att, def, dist, outs)) return false;
+      for (const Outcome& o : outs) {
+        const double w = pa[i] * pd[j] * o.prob;
+        size_t k = 0;
+        while (k < out.size() && (displayed_hp(out[k].att_hp) != displayed_hp(o.att_hp) ||
+                                  displayed_hp(out[k].def_hp) != displayed_hp(o.def_hp)))
+          ++k;
+        if (k == out.size()) {
+          out.emplace_back();
+          likeliest.push_back(-1);
+        }
+        out[k].prob += w;
+        if (w > likeliest[k]) {
+          likeliest[k] = w;
+          out[k].att_from = att.hp;
+          out[k].def_from = def.hp;
+          out[k].att_hp = o.att_hp;
+          out[k].def_hp = o.def_hp;
+        }
+      }
+    }
+  }
+  return true;
 }
 
 int missile_targets(const MapData& m, const GameState& s, int level, uint16_t* out) {

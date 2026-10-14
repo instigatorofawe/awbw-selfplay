@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <numeric>
 #include <random>
 #include <vector>
 
+#include "core/belief.h"
 #include "core/encode.h"
 #include "core/legal.h"
 #include "core/search.h"
@@ -189,7 +191,7 @@ TEST(Search, ChanceNodesVisitResultsByTheirProbability) {
   ASSERT_EQ(fire.id, action_id(kChFire, m.tile(2, 0)));
   const SearchNode& chance = nodes[fire.child];
   ASSERT_EQ(chance.kind, kNodeChance);
-  ASSERT_GT(chance.n, 3);
+  ASSERT_GE(chance.n, 3);
   double total = 0;
   for (int i = 0; i < chance.n; ++i) {
     const SearchEdge& o = edges[chance.first + i];
@@ -201,6 +203,122 @@ TEST(Search, ChanceNodesVisitResultsByTheirProbability) {
   // Firing on a damaged Tank gains army value, so it gets more visits and wins.
   EXPECT_EQ(r.id, fire.id);
   EXPECT_GT(r.q[1], r.q[0]);
+}
+
+// A Tank at (1, 0) firing on an enemy Tank of `def_hp` at (2, 0); with
+// `unknown`, both units' beliefs allow every internal HP of their displays.
+struct Fight {
+  MapData m = make_map({"H...h"});
+  GameState s;
+  int att = 0, def = 0;
+  Action a;
+
+  Fight(int att_hp, int def_hp, bool unknown) : s(start(m)) {
+    att = put(s, m, kTank, 0, 1, 0, att_hp);
+    def = put(s, m, kTank, 1, 2, 0, def_hp);
+    put(s, m, kInfantry, 1, 4, 0);
+    if (unknown) {
+      belief_unknown(s, att);
+      belief_unknown(s, def);
+    }
+    a.kind = kActFire;
+    a.unit = static_cast<uint8_t>(att);
+    a.to = static_cast<uint16_t>(m.tile(1, 0));
+    a.target = static_cast<uint16_t>(m.tile(2, 0));
+  }
+};
+
+// combat_outcomes at the units' own HPs, merged by displayed HP: (att, def) -> p.
+std::map<std::pair<int, int>, double> by_display(const Fight& f, int att_hp, int def_hp) {
+  Combatant att = combatant(f.m, f.s, f.att, f.m.tile(1, 0));
+  Combatant def = combatant(f.m, f.s, f.def, f.m.tile(2, 0));
+  att.hp = static_cast<uint8_t>(att_hp);
+  def.hp = static_cast<uint8_t>(def_hp);
+  std::vector<Outcome> outs;
+  EXPECT_TRUE(combat_outcomes(att, def, 1, outs));
+  std::map<std::pair<int, int>, double> p;
+  for (const Outcome& o : outs) p[{displayed_hp(o.att_hp), displayed_hp(o.def_hp)}] += o.prob;
+  return p;
+}
+
+TEST(Search, FireOutcomesAreWhatThePlayersSee) {
+  // A known HP: combat_outcomes, merged by display.
+  {
+    Fight f(100, 75, false);
+    std::vector<SeenOutcome> out;
+    ASSERT_TRUE(fire_outcomes(f.m, f.s, f.a, out));
+    const auto want = by_display(f, 100, 75);
+    ASSERT_EQ(out.size(), want.size());
+    for (const SeenOutcome& o : out) {
+      EXPECT_EQ(o.att_from, 100);
+      EXPECT_EQ(o.def_from, 75);
+      EXPECT_NEAR(o.prob, want.at({displayed_hp(o.att_hp), displayed_hp(o.def_hp)}), 1e-12);
+    }
+  }
+  // Unknown HPs: the average over every pair of internal HPs the displays
+  // allow, whatever the units' own HPs are.
+  std::map<std::pair<int, int>, double> want;
+  for (int i = 51; i <= 60; ++i)
+    for (int j = 71; j <= 80; ++j)
+      for (const auto& [key, p] : by_display(Fight(i, j, true), i, j)) want[key] += p / 100;
+  std::vector<SeenOutcome> first;
+  for (const auto& [att_hp, def_hp] : {std::pair{55, 75}, {51, 80}, {60, 71}}) {
+    Fight f(att_hp, def_hp, true);
+    std::vector<SeenOutcome> out;
+    ASSERT_TRUE(fire_outcomes(f.m, f.s, f.a, out));
+    ASSERT_EQ(out.size(), want.size());
+    double total = 0;
+    for (size_t k = 0; k < out.size(); ++k) {
+      const SeenOutcome& o = out[k];
+      total += o.prob;
+      EXPECT_NEAR(o.prob, want.at({displayed_hp(o.att_hp), displayed_hp(o.def_hp)}), 1e-12);
+      // The world it goes on in gives this result.
+      EXPECT_EQ(displayed_hp(o.att_from), 6);
+      EXPECT_EQ(displayed_hp(o.def_from), 8);
+      const std::pair<int, int> seen{displayed_hp(o.att_hp), displayed_hp(o.def_hp)};
+      EXPECT_GT(by_display(f, o.att_from, o.def_from)[seen], 0);
+      if (!first.empty()) {
+        EXPECT_EQ(o.att_from, first[k].att_from);
+        EXPECT_EQ(o.def_from, first[k].def_from);
+        EXPECT_EQ(o.att_hp, first[k].att_hp);
+        EXPECT_EQ(o.def_hp, first[k].def_hp);
+      }
+    }
+    EXPECT_NEAR(total, 1.0, 1e-12);
+    if (first.empty()) first = out;
+  }
+}
+
+TEST(Search, TheTreeCantTellInternalHpsApart) {
+  // Searches of two states that differ only in internal HPs the players
+  // can't see (the displays and beliefs are the same) come out the same.
+  SearchResult results[2];
+  for (int v = 0; v < 2; ++v) {
+    Fight f(v ? 51 : 60, v ? 80 : 71, true);
+    const Selection moved{kPhaseMoved, static_cast<uint8_t>(f.att), f.a.to};
+    SearchConfig cfg;
+    cfg.sims = 200;
+    cfg.seed = 5;
+    BatchedSearch bs(cfg, 8);
+    const int slot = bs.add_root(f.m, f.s, moved);
+    FakeNet net;
+    net.material = true;
+    net.run(bs);
+    results[v] = bs.result(slot);
+    const std::vector<SearchNode>& nodes = bs.nodes(slot);
+    const std::vector<SearchEdge>& edges = bs.edges(slot);
+    const SearchNode& chance = nodes[edges[nodes[0].first + 1].child];
+    ASSERT_EQ(chance.kind, kNodeChance);
+    std::vector<SeenOutcome> out;
+    ASSERT_TRUE(fire_outcomes(f.m, f.s, f.a, out));
+    ASSERT_EQ(chance.n, out.size());
+    for (int k = 0; k < chance.n; ++k)
+      EXPECT_FLOAT_EQ(edges[chance.first + k].prior, static_cast<float>(out[k].prob));
+  }
+  EXPECT_EQ(results[0].id, results[1].id);
+  EXPECT_EQ(results[0].visits, results[1].visits);
+  EXPECT_EQ(results[0].q, results[1].q);
+  EXPECT_EQ(results[0].policy, results[1].policy);
 }
 
 TEST(Search, PicksTakeTheValueOfTheirState) {
