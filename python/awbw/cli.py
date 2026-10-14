@@ -6,6 +6,7 @@ import argparse
 import datetime
 import re
 import sys
+import time
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -26,6 +27,7 @@ from .replay.sources import (
     RatingHistory,
     ReplayUnavailable,
     fetch_replay,
+    fetch_replays,
     next_slice_before,
     read_index,
     replay_path,
@@ -57,6 +59,14 @@ def main(argv: list[str] | None = None) -> int:
     cr.add_argument("query", help='mooo search without a date, e.g. "2p global league std"')
     cr.add_argument("--before", required=True, help="start from games strictly before this date (YYYY-MM-DD)")
     cr.add_argument("--max-gb", type=float, required=True, help="stop once the replay cache holds this many GB")
+    cr.add_argument(
+        "--parallel",
+        type=int,
+        choices=range(1, 5),
+        default=1,
+        metavar="N",
+        help="replay downloads in flight at once, 1-4 (default 1); --rate still spaces their starts",
+    )
 
     m = sub.add_parser("fetch-map", help="download maps into the cache")
     m.add_argument("map_ids", nargs="*", type=int)
@@ -263,6 +273,7 @@ def _crawl(args, http: Http) -> int:
     slug = re.sub(r"[^A-Za-z0-9]+", "_", args.query).strip("_").lower()
     before: str | None = args.before
     fetched = failed = 0
+    start = time.monotonic()
     while before is not None and used < cap:
         out = cache_dir() / "index" / f"{slug}_before_{before.replace('-', '')}.jsonl"
         if out.exists():
@@ -277,19 +288,23 @@ def _crawl(args, http: Http) -> int:
                 fetch_map(map_id, http)
             except (HttpError, ValueError) as e:
                 print(f"map {map_id}: {e}", file=sys.stderr)
-        for e in entries:
+        todo = [e.game_id for e in entries if not replay_path(e.game_id).exists()]
+        for _, got in fetch_replays(todo, http, args.parallel):
+            if isinstance(got, ReplayUnavailable):
+                failed += 1
+                print(got, file=sys.stderr)
+            else:
+                used += got.stat().st_size
+                fetched += 1
+            if (fetched + failed) % 100 == 0:
+                per_hour = 3600 * (fetched + failed) / (time.monotonic() - start)
+                print(
+                    f"fetched={fetched} failed={failed} cache={used / 1e9:.2f} GB"
+                    f" ({per_hour:,.0f}/h, {http.min_interval:g}s between requests)",
+                    file=sys.stderr,
+                )
             if used >= cap:
                 break
-            if replay_path(e.game_id).exists():
-                continue
-            try:
-                used += fetch_replay(e.game_id, http).stat().st_size
-                fetched += 1
-            except ReplayUnavailable as err:
-                failed += 1
-                print(err, file=sys.stderr)
-            if (fetched + failed) % 100 == 0:
-                print(f"fetched={fetched} failed={failed} cache={used / 1e9:.2f} GB", file=sys.stderr)
         before = next_slice_before(entries, before)
     print(f"fetched={fetched} failed={failed} cache={used / 1e9:.2f} GB; next slice: {before or 'none'}")
     return 0

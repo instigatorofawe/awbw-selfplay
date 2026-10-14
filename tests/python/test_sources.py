@@ -1,4 +1,12 @@
-from awbw.net import Http
+import email.utils
+import io
+import threading
+import time
+import urllib.error
+from email.message import Message
+
+from awbw import net
+from awbw.net import Http, HttpError, retry_after
 from awbw.replay import sources
 from awbw.replay.sources import IndexEntry, IndexPlayer, RatingHistory, parse_search_page
 
@@ -81,3 +89,79 @@ def test_ratings_come_from_games_that_ended_on_an_earlier_day():
     assert h.before("a", "2026-10-06") == 910
     assert h.before("b", "2026-10-06") == 890  # same day: the later game id
     assert h.before("c", "2026-10-06") is None
+
+
+def _headers(**fields: str) -> Message:
+    m = Message()
+    for k, v in fields.items():
+        m[k.replace("_", "-")] = v
+    return m
+
+
+def test_retry_after_reads_seconds_or_a_date():
+    assert retry_after(_headers(Retry_After="30"), 2.0) == 30.0
+    assert retry_after(_headers(Retry_After="1"), 2.0) == 2.0  # never sooner than our own backoff
+    assert retry_after(_headers(Retry_After="86400"), 2.0) == net.MAX_PAUSE
+    assert retry_after(_headers(Retry_After="soon"), 2.0) == 2.0
+    assert retry_after(_headers(), 4.0) == 4.0
+    when = email.utils.formatdate(time.time() + 120, usegmt=True)
+    assert 100 < retry_after(_headers(Retry_After=when), 2.0) <= 120
+
+
+def test_http_slows_down_when_the_server_asks(monkeypatch):
+    class Response(io.BytesIO):
+        status = 200
+        headers = Message()
+
+    calls = []
+
+    def urlopen(req, timeout):
+        calls.append(req.full_url)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", _headers(Retry_After="5"), None)
+        return Response(b"ok")
+
+    slept = []
+    monkeypatch.setattr(net.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(net.time, "sleep", slept.append)
+    http = Http(min_interval=0.25)
+    assert http.get("http://example.test/a") == b"ok"
+    assert len(calls) == 2
+    assert slept and 4.5 < slept[0] <= 5.0  # waited out Retry-After, not the usual backoff
+    assert http.min_interval == 1.0  # and spaces requests further apart from now on
+
+
+def test_fetch_replays_keeps_n_in_flight(monkeypatch, tmp_path):
+    monkeypatch.setenv("AWBW_CACHE", str(tmp_path))
+    both = threading.Barrier(2, timeout=10)
+    lock = threading.Lock()
+    active, peak = 0, 0
+
+    class FakeHttp(Http):
+        def get(self, url: str) -> bytes:
+            nonlocal active, peak
+            game_id = int(url.rsplit("/", 1)[1].removesuffix(".zip"))
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            try:
+                if game_id in (1, 2):
+                    both.wait()  # the first two are downloading at once
+                if game_id == 4:
+                    raise HttpError(url, 404)
+                return b"PK" + bytes([game_id])
+            finally:
+                with lock:
+                    active -= 1
+
+    got = dict(sources.fetch_replays([1, 2, 3, 4, 5], FakeHttp(min_interval=0.0), parallel=2))
+    assert sorted(got) == [1, 2, 3, 4, 5] and peak == 2
+    assert isinstance(got[4], sources.ReplayUnavailable)
+    assert not isinstance(got[5], sources.ReplayUnavailable) and got[5].read_bytes() == b"PK\x05"
+
+    seen = []
+    for game_id, _ in sources.fetch_replays([6, 7, 8, 9], FakeHttp(min_interval=0.0), parallel=2):
+        seen.append(game_id)
+        break
+    started = {int(p.stem) for p in (tmp_path / "replays").glob("*.zip")} - set(got)
+    assert len(seen) == 1 and seen[0] in started and started <= {6, 7}  # stopping waits only for those in flight

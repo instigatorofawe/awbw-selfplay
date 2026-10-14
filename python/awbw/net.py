@@ -1,7 +1,12 @@
-"""Polite HTTP client: one shared rate limit, retries with backoff, size caps."""
+"""Polite HTTP client: one shared rate limit, retries with backoff, size caps.
+
+A 429 or 503 is the server asking us to slow down: every thread waits out its
+Retry-After, and requests are spaced twice as far apart from then on.
+"""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import threading
@@ -10,10 +15,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from email.message import Message
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 USER_AGENT = "awbw-selfplay/0.1 (research; replay ingestion)"
 MAX_RESPONSE_BYTES = 256 * 1024 * 1024
+MAX_INTERVAL = 60.0  # the widest spacing slowing down goes to
+MAX_PAUSE = 600.0  # the longest Retry-After honoured
 
 
 def cache_dir() -> Path:
@@ -65,6 +73,12 @@ class Http:
         if delay > 0:
             time.sleep(delay)
 
+    def _slow_down(self, pause: float) -> None:
+        """Every thread waits ``pause`` seconds; requests are spaced twice as far apart."""
+        with self._lock:
+            self.min_interval = min(max(2 * self.min_interval, 1.0), MAX_INTERVAL)
+            self._next_request = max(self._next_request, time.monotonic() + pause)
+
     def _request(self, req: urllib.request.Request) -> tuple[bytes, Message]:
         req.add_header("User-Agent", USER_AGENT)
         if self.cookies:
@@ -82,6 +96,9 @@ class Http:
                 retryable = e.code == 429 or e.code >= 500
                 if not retryable or attempt == self.retries:
                     raise HttpError(req.full_url, e.code, e.read(4096)) from e
+                if e.code in (429, 503):
+                    self._slow_down(retry_after(e.headers, 2.0 * 2**attempt))
+                    continue
             except (urllib.error.URLError, TimeoutError):
                 if attempt == self.retries:
                     raise
@@ -92,3 +109,17 @@ class Http:
         for header in headers.get_all("Set-Cookie") or []:
             name, _, rest = header.partition("=")
             self.cookies[name.strip()] = rest.split(";", 1)[0]
+
+
+def retry_after(headers: Message | None, default: float) -> float:
+    """Seconds a response's Retry-After asks for (seconds or an HTTP date), at
+    least ``default`` and at most MAX_PAUSE."""
+    value = headers.get("Retry-After") if headers is not None else None
+    seconds = default
+    if value:
+        try:
+            seconds = float(value)
+        except ValueError:
+            with contextlib.suppress(TypeError, ValueError):
+                seconds = parsedate_to_datetime(value).timestamp() - time.time()
+    return min(max(seconds, default), MAX_PAUSE)

@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import bisect
 import datetime
+import itertools
 import json
 import os
 import re
 import urllib.parse
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
@@ -57,6 +59,31 @@ def fetch_replay(game_id: int, http: Http, source: str = "mooo", session: AwbwSe
         raise ReplayUnavailable(f"game {game_id}: not a zip: {data[:200]!r}")
     write_atomic(path, data)
     return path
+
+
+def fetch_replays(
+    game_ids: Iterable[int], http: Http, parallel: int = 1
+) -> Iterator[tuple[int, Path | ReplayUnavailable]]:
+    """Download mooo replays with up to ``parallel`` in flight (``http``'s rate
+    limit still spaces their starts), yielding each game's path, or why it is
+    unavailable, as it finishes. Stopping early waits for those in flight."""
+
+    def one(game_id: int) -> tuple[int, Path | ReplayUnavailable]:
+        try:
+            return game_id, fetch_replay(game_id, http)
+        except ReplayUnavailable as e:
+            return game_id, e
+
+    ids = iter(game_ids)
+    with ThreadPoolExecutor(parallel) as pool:
+        pending = {pool.submit(one, game_id) for game_id in itertools.islice(ids, parallel)}
+        while pending:
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                yield future.result()
+                game_id = next(ids, None)
+                if game_id is not None:
+                    pending.add(pool.submit(one, game_id))
 
 
 # --- awbw.mooo.com search index ---------------------------------------------
