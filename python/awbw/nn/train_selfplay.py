@@ -336,7 +336,7 @@ def fresh_losses(net: Any, g: FinishedGame, movement: bool, device: torch.device
         logp, value, _ = _forward(net, t, None)
         ce, ent, vce = selfplay_losses(logp, value, t)
         sums += [ce.sum().item(), (ce - ent).sum().item(), vce.sum().item()]
-    return sums / w.count
+    return [float(x) for x in sums / w.count]
 
 
 def _human_stream(ds: Dataset, cfg: SelfPlayConfig, movement: bool) -> Iterator[DecisionBatch]:
@@ -366,7 +366,7 @@ class Stats:
             self.v[k] += x
 
     def mean(self, key: str, by: str) -> float:
-        return self.v[key] / self.v[by] if self.v[by] else math.nan
+        return float(self.v[key] / self.v[by]) if self.v[by] else math.nan
 
     def clear(self) -> None:
         self.v.clear()
@@ -483,7 +483,8 @@ def train(
 
     def checkpoint(name: str, metrics: dict[str, Any]) -> None:
         progress = {"step": step, "samples": window.added, "games": int(totals.v["games"])}
-        save_policy(out / name, net, metrics=metrics, progress=progress, **setup)
+        # Plain floats: torch.load(weights_only=True) refuses numpy scalars.
+        save_policy(out / name, net, metrics=json.loads(json.dumps(metrics)), progress=progress, **setup)
 
     def report() -> dict[str, Any]:
         nonlocal t_log, evals_log
