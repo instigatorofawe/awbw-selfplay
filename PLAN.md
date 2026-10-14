@@ -752,6 +752,36 @@ knows what a player who watched every turn knows:
     and with `targets` gives the next pick's `policy_index`: channel × S² +
     y × S + x over the S × S bucket, then the 28 non-spatial ids, so
     `policy_size(40, 40) == NUM_ACTION_IDS`.
+- **Movement planes** (optional: `PolicyConfig.movement`; `encode_movement`,
+  movement encoder v1) add 10 index planes after the decision planes. They
+  count turns of moving on an empty board, where no unit blocks and fuel
+  never runs out. The network could work these out from terrain and units,
+  but only over many layers.
+  - **Counting turns** (`movement.h`'s `turns_from`): a Dijkstra over
+    (turn, points spent) labels with Dial's buckets. A step that doesn't fit
+    in the turn's remaining points waits for the next turn, so points don't
+    carry over, and a tile dearer than a whole turn is never entered. Tested
+    against a turn-by-turn expansion on 300 random boards.
+  - **`home`, `away`:** on each unit's tile, the turns its type needs from
+    the nearest factory its owner holds that builds it, and from the nearest
+    of the other side's, capped at 15. They show how far reinforcements are
+    and how overextended the unit is.
+    - `build_map` stores the turns from every factory to every tile, for
+      each of the 16 mover classes (movement type × points) it builds. It
+      uses the starting terrain in clear weather without CO bonuses
+      (`MapData::factory_turns`; 172 rows, 0.8 ms, for a 30×30 map with 24
+      factories).
+  - **`reach.{me,opp}.{foot,vehicle,air,naval}`:** the fewest turns (up to
+    3) that any of the side's units in the group needs to get to each tile.
+    - Mine count from now: a unit that has moved starts next turn, a stunned
+      one the turn after. The opponent's count from their next turn.
+    - CO movement bonuses, the weather and Sturm's and Lash's cost-1 moves
+      apply as they will then. The opponent's power and power weather end
+      before their turn.
+    - Carried units and enemies `me` can't see are left out.
+  - **Cost:** 24 µs per state on the benchmark board (12 searches), about 10×
+    the rest of a decision's encoding. On the box the loader still gives
+    15,900 decisions/s from one thread with them, against 38,400 without.
 - **104 globals (`float32`)**, named in `GLOBAL_NAMES`: for me, then the
   opponent, funds, income, power meter as a share of each power's cost, the
   costs, which power is on, power uses, properties, comtowers, unit count
@@ -935,12 +965,64 @@ knows what a player who watched every turn knows:
   arena, and search). Order does matter where luck, powers or End Turn
   come in, which the network has to learn.
 
+### Movement planes and auxiliary head (experiment)
+
+- **Movement planes** (`PolicyConfig.movement`, `--movement`): the 10 planes
+  of §6 after the decision planes.
+- **Auxiliary head** (`PolicyConfig.aux`, `--aux`): a second head like the
+  value head predicts what happens next (`loader.aux_targets`), as
+  KataGo's auxiliary heads do. These are predictions, not rewards: a reward
+  for material would punish trading units for position, or sacrificing
+  B-Copters into Anti-Air to charge a decisive power.
+  - Targets, for the player to move:
+    - the change in my and the opponent's army value and unit count by
+      the end of my turn, after their reply, three days on and at the
+      game's last state: 16 numbers, scaled by about their spread (10k, 12k,
+      20k and 45k funds; 2, 2, 5 and 9 units);
+    - the power bars: my COP and SCOP charged at my next turn, theirs at
+      theirs, whether I use a power before my turn ends, and whether they
+      use one in their next turn. These 6 are masked where the game has no
+      powers, the CO has no such power, or the game ends first.
+  - Loss: Huber over the changes plus masked cross-entropy, on 25% of the
+    decisions (`aux_fraction`), weight 1. Nothing at play time reads the
+    head.
+- **Cost on the 5070** (decisions/s, alone on the GPU): baseline 8,700,
+  aux 8,400, movement 5,600, both 5,500. The movement planes are the cost,
+  all of it on the GPU (the loader thread is at 20%). It isn't the
+  embedding's lookups: one one-hot matmul instead changes nothing under
+  `torch.compile`.
+- **Results on v1** (same schedule as the baseline above, one run each;
+  epoch 4):
+
+  | run | policy loss | top-1 | idle | selected | moved | factory | whole action | value, ratings (ECE) | without (ECE) |
+  |---|---|---|---|---|---|---|---|---|---|
+  | baseline | 1.1375 | 0.603 | 1.611 | 1.110 | 0.098 | 0.725 | 2.643 / 0.305 | 0.5147 (0.008) | 0.5487 (0.015) |
+  | movement | **1.1343** | **0.605** | **1.606** | 1.110 | 0.099 | 0.712 | **2.636 / 0.307** | 0.5118 (0.005) | 0.5448 (0.013) |
+  | aux | 1.1383 | 0.603 | 1.613 | 1.111 | 0.100 | 0.723 | 2.645 / 0.304 | 0.5087 (0.011) | 0.5424 (0.017) |
+  | both | 1.1389 | 0.603 | 1.610 | 1.117 | 0.102 | **0.708** | 2.646 / 0.305 | **0.5062** (0.008) | **0.5394** (0.014) |
+
+  - The movement planes help the policy a little (0.003, most of it in
+    the factory phase) and the value a little. With the aux head as well,
+    the policy loses that gain: selected and moved get worse, as if the
+    aux head takes trunk capacity the policy wants.
+  - The aux head helps the value: 0.006 alone, 0.009 with the planes,
+    about additive. It does nothing for the policy.
+  - Mid-schedule, the aux runs' value was worse and miscalibrated (epoch
+    2: ECE 0.08–0.10, against 0.03 at epoch 1); it settles as the learning
+    rate decays.
+  - The head's own predictions (both, epoch 4), squared error against
+    "no change": @1 0.127 (1.260), @2 0.386 (1.400), @6 0.399 (1.461),
+    @end 0.381 (1.127); power bars beat their base rate (my COP charged at
+    my next turn: log loss 0.171 against 0.589).
+  - One seed each, and the gaps are small. Run-to-run noise isn't
+    measured, so 0.003 in policy loss may be noise. The aux head's value
+    gain costs 3% of the speed; the movement planes' 0.003 costs 35%.
+
 ### Later
 
 - **Trunk:** a larger ResNet once the full archive is in; a transformer
   over tiles is an option.
-- **Heads:** auxiliary heads (§5): final ownership, army value N days
-  ahead.
+- **Heads:** final ownership as an auxiliary target.
 - **Policy gather on device.** `collect()` provides padded legal-action
   indices `[B, L_max]` (L_max ≈ 256, with an overflow fallback). The net
   gathers logits on the GPU, so only `[B, L_max]` crosses back to C++.
@@ -1020,8 +1102,9 @@ while training:
 
 - **C++ (googletest, `tests/cpp/`):** maps, state bookkeeping, snapshots,
   movement, damage, every action kind, the turn start, CO powers, the
-  network encoding (the decision planes included), legal actions and the
-  transposition key (148 tests). CI runs them on Linux and
+  network encoding (the decision and movement planes included), turns of
+  moving (against a turn-by-turn expansion), legal actions and the
+  transposition key (156 tests). CI runs them on Linux and
   macOS, in Release and under ASan/UBSan.
 - **Damage formula across all logged attacks:** every logged combat result
   must be in `outcomes()`. This checks the formula over the whole replay
@@ -1048,7 +1131,9 @@ while training:
 - **Policy network** (`tests/python/test_policy.py`): each decision's
   planes and label match stepping the action; the policy ignores padding,
   where the board sits and the rest of the batch; flips map back; training
-  resumes; arena games end or are adjudicated.
+  resumes; arena games end or are adjudicated. The auxiliary targets match
+  the game's later states. Networks with the movement planes and
+  auxiliary head train, save and score, and older checkpoints still load.
 - **Transposition key** (`test_hash.cpp`, **done**): moves and builds in
   either order give one key; slots, ids, the RNG and freed slots don't change
   it; every rule input does, cargo slots and Sonja's hidden HP included.
@@ -1061,7 +1146,9 @@ while training:
     of turn on a 30×30 board with ~50 units (0.3 µs); a fight with a Sonja
     unit whose display the opponent doesn't know (0.7 µs)
   - `encode` (2.1 µs for that board in a 32×32 window); a whole policy
-    decision, with the legal steps and the decision planes (2.9 µs)
+    decision, with the legal steps and the decision planes (2.9 µs); the
+    movement planes (24 µs); one uncapped `turns_from` over the board
+    (3.7 µs); a 30×30 map's factory turns (0.8 ms, 172 rows)
   - `legal_ids` and `legal_actions` on that board (§3)
   - `state_hash` (0.10 µs; `absl::Hash` over the raw bytes, which tells
     transposed states apart, 0.08 µs); transposition-table lookups (§8)
