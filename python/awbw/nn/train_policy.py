@@ -82,6 +82,7 @@ class PolicyTrainConfig:
     augment: bool = True
     compile: bool = False
     bf16: bool = True  # autocast the forward pass on CUDA (validation stays float32)
+    recompute: bool = False  # recompute blocks' activations in the backward pass: less memory, more time
     val_fraction: float = 0.05
     val_rows: float = 0.1  # share of the validation games' actions whose decisions are scored
     shards_at_once: int = 8
@@ -412,6 +413,7 @@ def train(
         net = PolicyValueNet(model_cfg or PolicyConfig()).to(device)
         opt = _optimizer(net, cfg)  # type: ignore[arg-type]
     net.train()
+    net.recompute = cfg.recompute
     forward = torch.compile(net, dynamic=False) if cfg.compile else net
     params = sum(p.numel() for p in net.parameters())
     log(

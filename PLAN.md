@@ -1026,10 +1026,60 @@ knows what a player who watched every turn knows:
     measured, so 0.003 in policy loss may be noise. The aux head's value
     gain costs 3% of the speed; the movement planes' 0.003 costs 35%.
 
+### Transformer trunk (`PolicyConfig.trunk`, experiment)
+
+The default trunk is the ResNet above (pre-activation residual blocks,
+global pooling every second block). `--trunk transformer` swaps the blocks
+for transformer blocks over the board's tiles; the embedding and heads are
+the same, so the two compare directly. `--channels` and `--blocks` are then
+its width and layers; `--heads` (4) and `--mlp-ratio` (4) are its own.
+
+- **Tokens:** one per tile of the bucket. Tiles off the board are masked
+  out as keys and stay zero, as in the ResNet.
+- **Positions:** 2-d rotary embeddings (`rope_angles`). Half of each
+  head's channel pairs turn with the row and half with the column, at
+  frequencies from π/2 to π/128 per tile. Attention then depends only on
+  the offset between two tiles, so a board gets the same outputs in any
+  bucket and wherever it sits in it (the ResNet's invariance, tested for
+  both trunks).
+- **Block:** pre-norm (RMS), queries and keys RMS-normed per head,
+  attention, then a SiLU MLP. The output layers start at zero, so each
+  block starts as the identity. There is no global pooling: attention
+  reads the whole board.
+- **The mask rides in an extra key channel** (`board_attention`): a key
+  off the board scores −10⁴. That way the kernel needs no attention mask,
+  so flash attention can run. Under torch.compile a boolean mask becomes a
+  dense [B, 1, N, N] bias for the memory-efficient kernel. Per-head
+  widths are padded to a multiple of 8: 16 pads to 24 and 32 to 40.
+- **Speed and memory on the 5070** (bf16, compiled, real v1-70k batches:
+  89% of decisions in the 24 bucket, 11% in 32, none in 40; measured while
+  sp1 shared the GPU, so compare within the table only):
+
+  | trunk | params | train, batch 128 | inference, batch 256 | train memory, batch 128 |
+  |---|---|---|---|---|
+  | ResNet 64×6 | 0.57M | 4,781/s | 62,566/s | 1.1 GiB |
+  | transformer 64×6, 4 heads | 0.41M | 2,159/s (mask: 1,297) | 15,210/s (mask: 9,936) | 3.3 GiB |
+  | transformer 96×6, 4 heads | 0.79M | 1,429/s (mask: 1,039) | 10,764/s (mask: 8,004) | 4.4 GiB |
+  | transformer 128×6, 4 heads | 1.32M | 903/s (mask: 818) | 7,091/s (mask: 6,844) | 5.5 GiB |
+
+  - At equal size the transformer trains at about 0.45× the ResNet's speed
+    and searches at about 0.25×: attention over 576–1,024 tokens costs most
+    of it.
+  - Its activations take memory: a 64×6 transformer needs 5.5 GiB to train
+    at batch 256, and a 128-wide one doesn't fit beside sp1.
+    `--recompute` recomputes each block's activations in the backward pass.
+    That brings 64×6 at batch 256 from 5.5 to 3.3 GiB and costs 18% of the
+    speed. 128×6 at batch 256 trains in 3.4 GiB at 780/s with it, and runs
+    out of memory without it. Eight heads of 16 channels are no faster than
+    four of 32 (735/s).
+- Not yet trained on v1-70k; it goes into the scaling grid beside the
+  ResNet.
+
 ### Later
 
-- **Trunk:** a larger ResNet once the full archive is in; a transformer
-  over tiles is an option.
+- **Trunk:** a larger ResNet once the full archive is in. Possible
+  transformer variants: attention in only some blocks of the ResNet (a
+  hybrid), and a token per unit instead of per tile.
 - **Heads:** final ownership as an auxiliary target.
 - **Policy gather on device.** `collect()` provides padded legal-action
   indices `[B, L_max]` (L_max ≈ 256, with an overflow fallback). The net

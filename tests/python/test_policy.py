@@ -4,6 +4,7 @@ import json
 import numpy as np
 import pytest
 import torch
+import torch.nn.functional as F
 
 from awbw import _core, engine, rules
 from awbw.agents import DRAW, PolicyAgent, RandomAgent, adjudicate, army_values, play, property_counts
@@ -28,9 +29,12 @@ from awbw.nn.model import (
     NUM_POLICY_PLANES,
     PolicyConfig,
     PolicyValueNet,
+    board_attention,
     flat_policy,
     legal_mask,
     masked_log_softmax,
+    rope_angles,
+    rotate,
 )
 from awbw.nn.policy import Policy, load_policy, policy_ids, save_policy
 from awbw.nn.train_critic import dihedral
@@ -291,19 +295,23 @@ def test_aux_targets_follow_the_game(cache, tmp_path):
     assert next(iter(decision_batches(ds, 64, split="all"))).aux_reg is None
 
 
-def _random_net() -> PolicyValueNet:
+TINY_TRANSFORMER = dataclasses.replace(TINY, trunk="transformer", heads=2, mlp_ratio=2)
+
+
+def _random_net(cfg: PolicyConfig = TINY) -> PolicyValueNet:
     torch.manual_seed(0)
-    net = PolicyValueNet(TINY)
+    net = PolicyValueNet(cfg)
     with torch.no_grad():
         for p in net.parameters():
             p.normal_(0, 0.3)
     return net.eval()
 
 
-def test_policy_ignores_padding_placement_and_batch(cache):
+@pytest.mark.parametrize("cfg", [TINY, TINY_TRANSFORMER], ids=["resnet", "transformer"])
+def test_policy_ignores_padding_placement_and_batch(cache, cfg):
     g = random_game(cache, 30)
     a = labels(g)
-    net = _random_net()
+    net = _random_net(cfg)
     planes16, globals_, nonspatial, _ = encode_decisions(g.states[:4], a.steps[:4], np.array([0, 1, 1, 2]), 16)
     planes24 = np.zeros((4, NUM_POLICY_PLANES, 24, 24), np.uint8)
     planes24[:, :, 5 : 5 + H, 9 : 9 + W] = planes16[:, :, :H, :W]
@@ -320,6 +328,26 @@ def test_policy_ignores_padding_placement_and_batch(cache):
         flat_policy(s16, n16), legal_mask(torch.from_numpy(planes16), torch.from_numpy(nonspatial))
     )
     torch.testing.assert_close(logp.exp().sum(1), torch.ones(4))
+
+
+def test_rotary_attention_reads_offsets_only():
+    cos, sin = rope_angles(5, 8, torch.device("cpu"))
+    q, k = torch.randn(8), torch.randn(8)
+
+    def score(qy, qx, ky, kx):
+        return float(rotate(q, cos[qy * 5 + qx], sin[qy * 5 + qx]) @ rotate(k, cos[ky * 5 + kx], sin[ky * 5 + kx]))
+
+    assert score(1, 2, 3, 0) == pytest.approx(score(2, 3, 4, 1), abs=1e-5)
+    assert score(1, 2, 3, 0) != pytest.approx(score(1, 2, 0, 3), abs=1e-3)  # another offset
+
+
+@pytest.mark.parametrize("d", [8, 16, 24, 32])
+def test_board_attention_reads_only_the_board(d):
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(3, 2, 36, d) for _ in range(3))
+    off = (torch.rand(3, 1, 36, 1) < 0.4).float()
+    want = F.scaled_dot_product_attention(q, k, v, attn_mask=(off == 0).transpose(-1, -2))
+    torch.testing.assert_close(board_attention(q, k, v, off), want)
 
 
 def test_undihedral_inverts_dihedral():
@@ -465,6 +493,10 @@ def test_cli_trains_and_evaluates_a_policy(cache, tmp_path, capsys):
     assert main(["train-policy", *args, "--out", str(tmp_path / "fewer"), *small, *fewer]) == 0
     info = load_policy(tmp_path / "fewer" / "best.pt")[1]
     assert info["train"]["hold_out_maps"] == [1, 2] and 0 < info["train_games"] <= 4
+    attention = ["--trunk", "transformer", "--heads", "4", "--mlp-ratio", "2", "--recompute"]
+    assert main(["train-policy", *args, "--out", str(tmp_path / "tf"), *small, *attention]) == 0
+    net = load_policy(tmp_path / "tf" / "best.pt")[0]
+    assert (net.cfg.trunk, net.cfg.heads, net.cfg.mlp_ratio) == ("transformer", 4, 2)
 
 
 def test_games_between_agents_end_or_are_adjudicated(cache):

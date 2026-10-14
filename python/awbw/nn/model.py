@@ -30,6 +30,14 @@ movement planes (turns from factories and to reach tiles, core/encode.h), and
 with ``PolicyConfig.aux`` a head like the value head predicts what happens
 next (``loader.aux_targets``): only training reads it.
 
+``PolicyConfig.trunk = "transformer"`` replaces the residual blocks with
+transformer blocks over the board's tiles, one token per tile: every tile
+attends to every tile on the board (off-board tiles are masked out as keys
+and stay zero), and positions enter as 2-d rotary embeddings (``rope_angles``),
+which make attention depend on the offset between two tiles only. So the
+invariances above hold for it too, and it needs no board summary: attention
+already reads the whole board.
+
 Each block reads its input through an RMS norm over each tile's channels
 (pre-norm) and starts as the identity (its last convolution is zero). Without
 the norm (``prenorm=False``, the first critics) activations grew about tenfold
@@ -48,6 +56,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 from .. import _core
 from ..data.loader import AUX_BINARY, AUX_REGRESSION
@@ -234,6 +243,7 @@ MOVEMENT_PLANES = tuple(_core.MOVEMENT_PLANES)  # after POLICY_PLANES, with Poli
 NUM_AUX_REGRESSION, NUM_AUX_BINARY = len(AUX_REGRESSION), len(AUX_BINARY)
 NUM_POLICY_GLOBALS = _core.NUM_GLOBALS + _core.NUM_SELECTION_GLOBALS
 LEGAL_PLANES = slice(_core.NUM_PLANES + 1, _core.NUM_PLANES + 1 + _core.NUM_CHANNELS)  # in the input
+TRUNKS = ("resnet", "transformer")
 
 
 @dataclass(frozen=True)
@@ -248,6 +258,83 @@ class PolicyConfig:
     ratings: bool = True
     movement: bool = False  # read the movement planes
     aux: bool = False  # predict the auxiliary targets
+    trunk: str = "resnet"  # or "transformer"; blocks and channels are then its layers and width
+    heads: int = 4  # transformer: attention heads, channels // heads wide each
+    mlp_ratio: int = 4  # transformer: hidden width of each tile's MLP, per channel
+
+    def __post_init__(self):
+        if self.trunk not in TRUNKS:
+            raise ValueError(f"trunk {self.trunk!r}: not one of {TRUNKS}")
+        if self.trunk == "transformer" and self.channels % (4 * self.heads):
+            raise ValueError(f"{self.channels} channels: not 4 per head for each of {self.heads} heads")
+
+
+def rope_angles(size: int, head_dim: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    """cos and sin [size * size, head_dim // 2] of 2-d rotary embeddings for the
+    tiles of a size x size bucket, row by row: the first half of a head's channel
+    pairs turn with the tile's row, the second half with its column, at
+    frequencies from pi/2 down to pi/128 radians per tile."""
+    n = head_dim // 4
+    freq = (math.pi / 2) * (1 / 64) ** (torch.arange(n, device=device) / max(n - 1, 1))
+    turns = torch.arange(size, device=device, dtype=torch.float32)[:, None] * freq  # [S, n]
+    angles = torch.cat([turns.repeat_interleave(size, 0), turns.repeat(size, 1)], 1)
+    return angles.cos(), angles.sin()
+
+
+def rotate(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """x [..., N, D] with each channel pair (i, i + D/2) turned by its tile's angle i."""
+    a, b = x.chunk(2, -1)
+    cos, sin = cos.to(x.dtype), sin.to(x.dtype)
+    return torch.cat([a * cos - b * sin, a * sin + b * cos], -1)
+
+
+def board_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, off: torch.Tensor) -> torch.Tensor:
+    """Attention [B, H, N, D] over the keys on the board; ``off`` [B, 1, N, 1] is 1
+    for a tile off it, else 0. The mask rides in an extra channel of the queries and
+    keys, which gives a key off the board a score of -1e4, so the kernel takes no
+    attention mask: flash attention takes none, and under torch.compile a mask
+    becomes a dense [B, 1, N, N] bias. The channels are padded with zeros to a
+    multiple of 8, as the kernels want. On the RTX 5070 that trains a 64-channel
+    transformer 1.7x as fast as an attention mask does."""
+    b, h, n, d = q.shape
+    extra = (-d - 1) % 8 + 1
+    zeros = q.new_zeros(b, h, n, extra - 1)
+    q = torch.cat([q, q.new_ones(b, h, n, 1), zeros], -1)
+    k = torch.cat([k, (off * (-1e4 * d**0.5)).to(k.dtype).expand(b, h, n, 1), zeros], -1)
+    v = torch.cat([v, zeros, v.new_zeros(b, h, n, 1)], -1)
+    return F.scaled_dot_product_attention(q, k, v, scale=d**-0.5)[..., :d]
+
+
+class AttentionBlock(nn.Module):
+    """Pre-norm transformer block over tiles [B, N, C]: attention among the board's
+    tiles, then each tile's MLP. Queries and keys are RMS-normed per head before
+    their rotary embedding. Starts as the identity (its output layers are zero),
+    and keeps tiles off the board zero."""
+
+    def __init__(self, channels: int, heads: int, mlp_ratio: int):
+        super().__init__()
+        self.heads = heads
+        self.norm1 = nn.RMSNorm(channels, eps=1e-5)
+        self.qkv = nn.Linear(channels, 3 * channels, bias=False)
+        self.q_norm = nn.RMSNorm(channels // heads, eps=1e-5)
+        self.k_norm = nn.RMSNorm(channels // heads, eps=1e-5)
+        self.out = nn.Linear(channels, channels)
+        self.norm2 = nn.RMSNorm(channels, eps=1e-5)
+        self.fc1 = nn.Linear(channels, mlp_ratio * channels)
+        self.fc2 = nn.Linear(mlp_ratio * channels, channels)
+        for layer in (self.out, self.fc2):
+            nn.init.zeros_(layer.weight)
+            nn.init.zeros_(layer.bias)
+
+    def forward(self, x: torch.Tensor, tile: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        """``tile`` [B, N, 1]: 1 on the board, 0 off it."""
+        b, n, c = x.shape
+        q, k, v = self.qkv(self.norm1(x)).view(b, n, 3, self.heads, c // self.heads).permute(2, 0, 3, 1, 4)
+        q = rotate(self.q_norm(q), cos, sin).to(v.dtype)
+        k = rotate(self.k_norm(k), cos, sin).to(v.dtype)
+        h = board_attention(q, k, v, (1 - tile)[:, None])
+        x = x + self.out(h.transpose(1, 2).reshape(b, n, c)) * tile
+        return x + self.fc2(F.silu(self.fc1(self.norm2(x)))) * tile
 
 
 class PolicyHead(nn.Module):
@@ -285,12 +372,19 @@ class PolicyValueNet(nn.Module):
         self.cfg = cfg = cfg or PolicyConfig()
         num_globals = NUM_POLICY_GLOBALS + (NUM_RATING_FEATURES if cfg.ratings else 0)
         self.embed = Embed(cfg.channels, num_globals, POLICY_PLANES + (MOVEMENT_PLANES if cfg.movement else ()))
-        self.blocks = nn.ModuleList(
-            Block(cfg.channels, cfg.pool_channels if (i + 1) % cfg.pool_every == 0 else 0) for i in range(cfg.blocks)
-        )
+        if cfg.trunk == "transformer":
+            self.blocks = nn.ModuleList(
+                AttentionBlock(cfg.channels, cfg.heads, cfg.mlp_ratio) for _ in range(cfg.blocks)
+            )
+        else:
+            self.blocks = nn.ModuleList(
+                Block(cfg.channels, cfg.pool_channels if (i + 1) % cfg.pool_every == 0 else 0)
+                for i in range(cfg.blocks)
+            )
         self.policy = PolicyHead(cfg, num_globals)
         self.value = ValueHead(cfg, num_globals)
         self.aux = ValueHead(cfg, num_globals, NUM_AUX_REGRESSION + NUM_AUX_BINARY) if cfg.aux else None
+        self.recompute = False  # training: recompute each block's activations in the backward pass
 
     def forward(
         self, planes: torch.Tensor, globals_: torch.Tensor, rating: torch.Tensor | None = None, aux: bool = False
@@ -303,9 +397,7 @@ class PolicyValueNet(nn.Module):
             extra = rating_features(rating, len(globals_), globals_.device).to(globals_.dtype)
             globals_ = torch.cat([globals_, extra], 1)
         mask, area = board_mask(planes)
-        x = self.embed(planes, globals_, mask)
-        for block in self.blocks:
-            x = block(x, mask, area)
+        x = self.trunk(self.embed(planes, globals_, mask), mask, area)
         spatial, nonspatial = self.policy(x, globals_, mask, area)
         value = self.value(x, globals_, mask, area)
         if aux:
@@ -313,6 +405,28 @@ class PolicyValueNet(nn.Module):
                 raise ValueError("this network has no auxiliary head (PolicyConfig.aux)")
             return spatial, nonspatial, value, self.aux(x, globals_, mask, area)
         return spatial, nonspatial, value
+
+    def trunk(self, x: torch.Tensor, mask: torch.Tensor, area: torch.Tensor) -> torch.Tensor:
+        """The blocks over embedded tiles [B, C, S, S]; the transformer's run on [B, S * S, C].
+        With ``recompute`` the backward pass recomputes what each block keeps for it
+        instead (less memory, a third more time)."""
+
+        def run(block: nn.Module, *args: torch.Tensor) -> torch.Tensor:
+            if self.recompute and torch.is_grad_enabled():
+                return checkpoint(block, *args, use_reentrant=False)
+            return block(*args)
+
+        if self.cfg.trunk == "resnet":
+            for block in self.blocks:
+                x = run(block, x, mask, area)
+            return x
+        b, c, s, _ = x.shape
+        t = x.flatten(2).transpose(1, 2)
+        tile = mask.flatten(2).transpose(1, 2)
+        cos, sin = rope_angles(s, c // self.cfg.heads, x.device)
+        for block in self.blocks:
+            t = run(block, t, tile, cos, sin)
+        return t.transpose(1, 2).reshape(b, c, s, s)
 
 
 def flat_policy(spatial: torch.Tensor, nonspatial: torch.Tensor) -> torch.Tensor:

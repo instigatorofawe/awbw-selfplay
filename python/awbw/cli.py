@@ -162,8 +162,12 @@ def main(argv: list[str] | None = None) -> int:
     tp.add_argument("--no-augment", dest="augment", action="store_false", default=None)
     tp.add_argument("--compile", action="store_true", default=None, help="torch.compile the network")
     tp.add_argument("--no-bf16", dest="bf16", action="store_false", default=None, help="train in float32 on CUDA too")
+    tp.add_argument("--recompute", action="store_true", default=None, help="less memory, about a third more time")
     tp.add_argument("--channels", type=int)
     tp.add_argument("--blocks", type=int)
+    tp.add_argument("--trunk", choices=["resnet", "transformer"], help="residual convolutions (default) or attention")
+    tp.add_argument("--heads", type=int, help="transformer: attention heads (default 4)")
+    tp.add_argument("--mlp-ratio", type=int, help="transformer: MLP width per channel (default 4)")
     tp.add_argument("--device", default="auto", help="cuda, mps, cpu or auto (default)")
     tp.add_argument("--resume", action="store_true", help="continue the run in --out from its last epoch")
 
