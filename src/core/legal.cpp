@@ -443,4 +443,22 @@ int action_steps(const MapData& m, const GameState& s, const Action& a, uint16_t
   }
 }
 
+int selection_steps(const GameState& s, const Selection& sel, uint16_t* out) {
+  switch (sel.phase) {
+    case kPhaseSelected:
+      out[0] = static_cast<uint16_t>(action_id(kChSelect, sel.tile));
+      return 1;
+    case kPhaseMoved:
+      // Picks change nothing, so the unit is still where it was picked.
+      out[0] = static_cast<uint16_t>(action_id(kChSelect, s.units[sel.unit].tile));
+      out[1] = static_cast<uint16_t>(action_id(kChMove, sel.tile));
+      return 2;
+    case kPhaseFactory:
+      out[0] = static_cast<uint16_t>(action_id(kChSelect, sel.tile));
+      return 1;
+    default:
+      return 0;
+  }
+}
+
 }  // namespace awbw

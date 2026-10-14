@@ -178,6 +178,20 @@ def main(argv: list[str] | None = None) -> int:
     ar.add_argument("--games", type=int, default=32, help="start positions, each played twice with seats swapped")
     ar.add_argument("--max-days", type=int, default=30, help="then more properties wins (default 30)")
     ar.add_argument("--temperature", type=float, default=0.0, help="0 (default): always the likeliest step")
+    ar.add_argument(
+        "--sims", type=int, default=0, help="search each decision with this many simulations (0: the prior)"
+    )
+    ar.add_argument("--opponent-sims", type=int, default=0, help="the same for an opponent policy")
+    ar.add_argument("--considered", type=int, default=16, help="steps the search's root considers (default 16)")
+    ar.add_argument("--gumbel", type=float, default=0.0, help="the root's Gumbel noise scale (default 0: none)")
+    ar.add_argument("--rescale", action="store_true", help="rescale Q by its spread at each node (mctx's way)")
+    ar.add_argument("--value-scale", type=float, default=0.1, help="how much Q counts against the prior (0.1)")
+    ar.add_argument("--compile", action="store_true", help="torch.compile the searching networks")
+    ar.add_argument(
+        "--state-values",
+        action="store_true",
+        help="decisions in progress take the value of the one they were picked from, not the network's",
+    )
     ar.add_argument("--ratings", type=int, nargs=2, metavar=("MOVER", "OPPONENT"), help="ratings the nets are told")
     ar.add_argument("--data", type=Path, help="v1 dataset whose validation games give the starts (default: v1)")
     ar.add_argument("--device", default="auto")
@@ -654,6 +668,7 @@ def _arena(args, http: Http) -> int:
     from .data.loader import in_validation
     from .data.shards import Dataset
     from .nn.policy import Policy
+    from .search import NetEvaluator, SearchAgent, SearchSettings
 
     ds = Dataset(args.data or cache_dir() / "datasets" / "v1")
     starts: list = []
@@ -664,13 +679,26 @@ def _arena(args, http: Http) -> int:
         for g in np.flatnonzero(in_validation(sh.g_id))[: args.games - len(starts)]:
             starts.append(_core.GameState.from_bytes(sh.state[sh.g_start[g]].tobytes()))
     ratings = tuple(args.ratings) if args.ratings else None
-    me = PolicyAgent(Policy.load(args.checkpoint, args.device), args.temperature, ratings, seed=args.seed)
-    if args.opponent == "random":
-        them = RandomAgent(args.seed + 1)
-    else:
-        them = PolicyAgent(Policy.load(args.opponent, args.device), args.temperature, ratings, seed=args.seed + 1)
+
+    def agent(path, sims: int, seed: int):
+        policy = Policy.load(path, args.device)
+        if sims <= 0:
+            return PolicyAgent(policy, args.temperature, ratings, seed=seed)
+        settings = SearchSettings(
+            sims, args.considered, args.gumbel, args.max_days, args.rescale, args.value_scale, not args.state_values
+        )
+        return SearchAgent(NetEvaluator(policy, ratings=ratings, compile=args.compile), settings, seed=seed)
+
+    me = agent(args.checkpoint, args.sims, args.seed)
+    them = (
+        RandomAgent(args.seed + 1)
+        if args.opponent == "random"
+        else agent(args.opponent, args.opponent_sims, args.seed + 1)
+    )
+    t0 = time.monotonic()
     first = play(starts, (me, them), max_days=args.max_days)
     second = play(starts, (them, me), max_days=args.max_days)
+    elapsed = time.monotonic() - t0
     tally = {"won": 0, "lost": 0, "drawn": 0}
     for seat, results in ((0, first), (1, second)):
         won = sum(r.winner == seat for r in results)
@@ -686,7 +714,13 @@ def _arena(args, http: Http) -> int:
             f"{days:.1f} days on average"
         )
     n = sum(tally.values())
-    print(f"{args.checkpoint} vs {args.opponent}: {tally['won']}-{tally['lost']}-{tally['drawn']} of {n} games")
+    me_name = f"{args.checkpoint}" + (f" ({args.sims} sims)" if args.sims > 0 else "")
+    them_name = f"{args.opponent}" + (
+        f" ({args.opponent_sims} sims)" if args.opponent != "random" and args.opponent_sims > 0 else ""
+    )
+    print(f"{me_name} vs {them_name}: {tally['won']}-{tally['lost']}-{tally['drawn']} of {n} games")
+    evals = sum(a.evaluator.evals for a in (me, them) if isinstance(a, SearchAgent))
+    print(f"{elapsed:.0f}s" + (f", {evals / elapsed:,.0f} network evaluations/s in search" if evals else ""))
     return 0
 
 

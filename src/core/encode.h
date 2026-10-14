@@ -224,6 +224,22 @@ int move_group(int move_type);
 // Encode the movement planes of `s` into planes [kNumMovementPlanes][h][w].
 void encode_movement(const MapData& m, const GameState& s, uint8_t* planes, int h, int w);
 
+// --- A whole decision, as the policy network reads it ------------------------
+
+// Planes per decision: encode()'s, then encode_selection()'s, then with
+// `movement` encode_movement()'s.
+constexpr int policy_planes(bool movement) {
+  return int{kNumPlanes} + kNumSelectionPlanes + (movement ? int{kNumMovementPlanes} : 0);
+}
+inline constexpr int kNumPolicyGlobals = int{kNumGlobals} + kNumSelectionGlobals;
+
+// Encode decision `sel`, from which legal_ids() gave the n ids `ids`: planes
+// [policy_planes(movement)][h][w], globals [kNumPolicyGlobals] and the
+// non-spatial ids' legality [kNumNonSpatialIds] (nullptr to leave it out).
+void encode_decision(const MapData& m, const GameState& s, const Selection& sel,
+                     const uint16_t* ids, int n, uint8_t* planes, int h, int w, float* globals,
+                     uint8_t* nonspatial, bool movement);
+
 // A policy's logits over an h x w window: the spatial ids at
 // channel * h * w + y * w + x, then the non-spatial ones in order.
 inline constexpr int policy_size(int h, int w) { return kNumChannels * h * w + kNumNonSpatialIds; }

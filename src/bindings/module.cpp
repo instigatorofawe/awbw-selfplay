@@ -23,6 +23,7 @@
 #include "core/map.h"
 #include "core/movegen.h"
 #include "core/movement.h"
+#include "core/search.h"
 #include "core/snapshot.h"
 #include "core/state.h"
 
@@ -257,9 +258,7 @@ void encode_policy_batch(StateRows states, PickRows picks, CountIn n_picks, Plan
                          bool movement) {
   using namespace awbw;
   const size_t n = states.shape(0);
-  const size_t all_planes =
-      size_t{kNumPlanes} + kNumSelectionPlanes + (movement ? kNumMovementPlanes : 0);
-  constexpr int kAllGlobals = int{kNumGlobals} + kNumSelectionGlobals;
+  const size_t all_planes = policy_planes(movement);
   if (states.shape(1) != sizeof(GameState))
     throw nb::value_error(
         ("states must have STATE_BYTES = " + std::to_string(sizeof(GameState)) + " columns")
@@ -271,7 +270,7 @@ void encode_policy_batch(StateRows states, PickRows picks, CountIn n_picks, Plan
         movement
             ? "planes must be [N, NUM_PLANES + NUM_SELECTION_PLANES + NUM_MOVEMENT_PLANES, H, W]"
             : "planes must be [N, NUM_PLANES + NUM_SELECTION_PLANES, H, W]");
-  if (globals.shape(0) != n || globals.shape(1) != kAllGlobals)
+  if (globals.shape(0) != n || globals.shape(1) != kNumPolicyGlobals)
     throw nb::value_error("globals must be [N, NUM_GLOBALS + NUM_SELECTION_GLOBALS]");
   if (nonspatial.shape(0) != n || nonspatial.shape(1) != kNumNonSpatialIds)
     throw nb::value_error("nonspatial must be [N, NUM_NONSPATIAL_IDS]");
@@ -309,15 +308,11 @@ void encode_policy_batch(StateRows states, PickRows picks, CountIn n_picks, Plan
         if (!ok && !targets) {
           error = "a pick isn't legal";
         } else {
-          uint8_t* p = planes.data() + i * plane_stride;
-          float* g = globals.data() + i * kAllGlobals;
-          encode(*md, s, p, h, w, g);
           legal_ids(*md, s, sel, ids);
-          encode_selection(*md, s, sel, ids.data(), static_cast<int>(ids.size()),
-                           p + size_t{kNumPlanes} * h * w, h, w, g + kNumGlobals,
-                           nonspatial.data() + i * kNumNonSpatialIds);
-          if (movement)
-            encode_movement(*md, s, p + (size_t{kNumPlanes} + kNumSelectionPlanes) * h * w, h, w);
+          encode_decision(*md, s, sel, ids.data(), static_cast<int>(ids.size()),
+                          planes.data() + i * plane_stride, h, w,
+                          globals.data() + i * kNumPolicyGlobals,
+                          nonspatial.data() + i * kNumNonSpatialIds, movement);
           if (targets) {
             const uint16_t want = picks.data()[i * 3 + k];
             const bool legal = ok && std::binary_search(ids.begin(), ids.end(), want);
@@ -381,6 +376,115 @@ StatsOut player_stats_batch(StateRows states) {
     }
   }
   return StatsOut(out, {n, size_t{kMaxPlayers}, size_t{kNumPlayerStats}}, owner);
+}
+
+// --- Search -------------------------------------------------------------------
+
+template <typename T>
+using Array = nb::ndarray<nb::numpy, T>;
+
+// A new zeroed numpy array that owns its memory; `data` points into it.
+template <typename T>
+Array<T> new_array(std::initializer_list<size_t> shape, T*& data) {
+  size_t n = 1;
+  for (size_t d : shape) n *= d;
+  data = new T[std::max<size_t>(n, 1)]();
+  nb::capsule owner(data, [](void* p) noexcept { delete[] static_cast<T*>(p); });
+  return Array<T>(data, shape, owner);
+}
+
+template <typename T, typename U>
+Array<T> array_of(const std::vector<U>& v) {
+  T* data;
+  Array<T> a = new_array<T>({v.size()}, data);
+  std::copy(v.begin(), v.end(), data);
+  return a;
+}
+
+nb::tuple search_batch(const awbw::BatchedSearch& bs) {
+  const size_t n = bs.leaves(), size = bs.size();
+  const size_t width = std::max(1, bs.max_legal());
+  uint8_t *planes, *movers;
+  float* globals;
+  int64_t* legal;
+  auto p = new_array<uint8_t>(
+      {n, static_cast<size_t>(awbw::policy_planes(bs.config().movement)), size, size}, planes);
+  auto g = new_array<float>({n, static_cast<size_t>(awbw::kNumPolicyGlobals)}, globals);
+  auto l = new_array<int64_t>({n, width}, legal);
+  auto mv = new_array<uint8_t>({n}, movers);
+  {
+    nb::gil_scoped_release release;
+    bs.write_batch(planes, globals, legal, static_cast<int>(width), movers);
+  }
+  return nb::make_tuple(p, g, l, mv);
+}
+
+using LogitIn = nb::ndarray<const float, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
+using ValueIn = nb::ndarray<const float, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
+
+void search_submit(awbw::BatchedSearch& bs, LogitIn logits, ValueIn values) {
+  const size_t n = bs.leaves();
+  if (logits.shape(0) != n || logits.shape(1) < static_cast<size_t>(bs.max_legal()))
+    throw nb::value_error("logits must be [leaves, >= max_legal()], as batch() gave them");
+  if (values.shape(0) != n) throw nb::value_error("values must be [leaves]");
+  nb::gil_scoped_release release;
+  bs.submit(logits.data(), static_cast<int>(logits.shape(1)), values.data());
+}
+
+// Samples as arrays, their steps flattened: sample i's are offsets[i]..offsets[i + 1].
+nb::dict search_samples(awbw::BatchedSearch& bs) {
+  const std::vector<awbw::SearchSample> v = bs.take_samples();
+  const size_t n = v.size();
+  size_t steps = 0;
+  for (const auto& smp : v) steps += smp.result.ids.size();
+  uint64_t* game;
+  int32_t *decision, *chosen, *sims;
+  uint8_t *states, *n_picks, *mover;
+  uint16_t* picks;
+  float *value, *net_value, *prior, *policy, *q;
+  int64_t *offsets, *ids;
+  uint32_t* visits;
+  nb::dict d;
+  d["game"] = new_array<uint64_t>({n}, game);
+  d["decision"] = new_array<int32_t>({n}, decision);
+  d["states"] = new_array<uint8_t>({n, sizeof(awbw::GameState)}, states);
+  d["picks"] = new_array<uint16_t>({n, 3}, picks);
+  d["n_picks"] = new_array<uint8_t>({n}, n_picks);
+  d["mover"] = new_array<uint8_t>({n}, mover);
+  d["chosen"] = new_array<int32_t>({n}, chosen);
+  d["sims"] = new_array<int32_t>({n}, sims);
+  d["value"] = new_array<float>({n}, value);
+  d["net_value"] = new_array<float>({n}, net_value);
+  d["offsets"] = new_array<int64_t>({n + 1}, offsets);
+  d["ids"] = new_array<int64_t>({steps}, ids);
+  d["prior"] = new_array<float>({steps}, prior);
+  d["policy"] = new_array<float>({steps}, policy);
+  d["visits"] = new_array<uint32_t>({steps}, visits);
+  d["q"] = new_array<float>({steps}, q);
+  size_t at = 0;
+  for (size_t i = 0; i < n; ++i) {
+    const awbw::SearchSample& smp = v[i];
+    const awbw::SearchResult& r = smp.result;
+    game[i] = smp.game;
+    decision[i] = smp.decision;
+    std::memcpy(states + i * sizeof(awbw::GameState), &smp.state, sizeof(awbw::GameState));
+    n_picks[i] = static_cast<uint8_t>(awbw::selection_steps(smp.state, smp.sel, picks + i * 3));
+    mover[i] = static_cast<uint8_t>(r.mover);
+    chosen[i] = r.id;
+    sims[i] = r.sims;
+    value[i] = r.value;
+    net_value[i] = r.net_value;
+    offsets[i] = static_cast<int64_t>(at);
+    for (size_t k = 0; k < r.ids.size(); ++k, ++at) {
+      ids[at] = r.ids[k];
+      prior[at] = r.prior[k];
+      policy[at] = r.policy[k];
+      visits[at] = r.visits[k];
+      q[at] = r.q[k];
+    }
+  }
+  offsets[n] = static_cast<int64_t>(at);
+  return d;
 }
 
 }  // namespace
@@ -1077,6 +1181,160 @@ NB_MODULE(_core, m) {
       "state"_a, "slot"_a, "from_"_a, "target"_a,
       "(attacker_hp, defender_hp, probability) results of the unit attacking from `from_` the "
       "unit on `target`.");
+  nb::class_<awbw::SearchConfig>(m, "SearchConfig", "Settings of a BatchedSearch (core/search.h).")
+      .def(
+          "__init__",
+          [](awbw::SearchConfig* c, int sims, int fast_sims, float full_fraction, int considered,
+             float gumbel_scale, float visit_scale, float value_scale, bool rescale,
+             bool pick_values, int max_days, int max_actions, bool movement, uint64_t seed) {
+            new (c) awbw::SearchConfig{.sims = sims,
+                                       .fast_sims = fast_sims,
+                                       .full_fraction = full_fraction,
+                                       .considered = considered,
+                                       .gumbel_scale = gumbel_scale,
+                                       .visit_scale = visit_scale,
+                                       .value_scale = value_scale,
+                                       .rescale = rescale,
+                                       .pick_values = pick_values,
+                                       .max_days = max_days,
+                                       .max_actions = max_actions,
+                                       .movement = movement,
+                                       .seed = seed};
+          },
+          nb::kw_only(), "sims"_a = 64, "fast_sims"_a = 0, "full_fraction"_a = 1.0f,
+          "considered"_a = 16, "gumbel_scale"_a = 1.0f, "visit_scale"_a = 50.0f,
+          "value_scale"_a = 0.1f, "rescale"_a = false, "pick_values"_a = true, "max_days"_a = 0,
+          "max_actions"_a = 0, "movement"_a = false, "seed"_a = 0)
+      .def_rw("sims", &awbw::SearchConfig::sims,
+              "simulations of a full search, after the root's own evaluation")
+      .def_rw("fast_sims", &awbw::SearchConfig::fast_sims,
+              "self-play: simulations of a fast search, played but not kept as a sample")
+      .def_rw("full_fraction", &awbw::SearchConfig::full_fraction,
+              "self-play: share of the searches that are full")
+      .def_rw("considered", &awbw::SearchConfig::considered,
+              "steps the root samples to consider (Gumbel top-k)")
+      .def_rw("gumbel_scale", &awbw::SearchConfig::gumbel_scale,
+              "0: no noise, the root considers the likeliest steps")
+      .def_rw("visit_scale", &awbw::SearchConfig::visit_scale,
+              "sigma(q) = (visit_scale + most visits) * value_scale * q")
+      .def_rw("value_scale", &awbw::SearchConfig::value_scale)
+      .def_rw("rescale", &awbw::SearchConfig::rescale,
+              "map Q to 0..1 by its spread among a node's steps (mctx's default), not (Q + 1) / 2")
+      .def_rw("pick_values", &awbw::SearchConfig::pick_values,
+              "decisions with a unit or factory picked take the network's value; else that of the\n"
+              "decision they were picked from (the same state)")
+      .def_rw("max_days", &awbw::SearchConfig::max_days,
+              "a game still going after this day is decided as a day limit decides it; 0: no cap")
+      .def_rw("max_actions", &awbw::SearchConfig::max_actions,
+              "self-play: a game ends after this many actions, decided the same way; 0: no cap")
+      .def_rw("movement", &awbw::SearchConfig::movement, "the network reads the movement planes")
+      .def_rw("seed", &awbw::SearchConfig::seed);
+
+  nb::class_<awbw::SearchResult>(m, "SearchResult", "One searched decision.")
+      .def_ro("id", &awbw::SearchResult::id, "the step chosen")
+      .def_ro("mover", &awbw::SearchResult::mover)
+      .def_ro("value", &awbw::SearchResult::value,
+              "the root's searched value (mean over its visits), from the mover's side")
+      .def_ro("net_value", &awbw::SearchResult::net_value, "the network's value of the root")
+      .def_ro("sims", &awbw::SearchResult::sims)
+      .def_prop_ro(
+          "ids", [](const awbw::SearchResult& r) { return array_of<int64_t>(r.ids); },
+          nb::rv_policy::move, "the legal steps, ascending")
+      .def_prop_ro(
+          "prior", [](const awbw::SearchResult& r) { return array_of<float>(r.prior); },
+          nb::rv_policy::move)
+      .def_prop_ro(
+          "policy", [](const awbw::SearchResult& r) { return array_of<float>(r.policy); },
+          nb::rv_policy::move, "the improved policy, softmax(logits + sigma(completed Q))")
+      .def_prop_ro(
+          "visits", [](const awbw::SearchResult& r) { return array_of<uint32_t>(r.visits); },
+          nb::rv_policy::move)
+      .def_prop_ro(
+          "q", [](const awbw::SearchResult& r) { return array_of<float>(r.q); },
+          nb::rv_policy::move, "each step's value from the mover's side (0 if unvisited)");
+
+  nb::class_<awbw::GameRecord>(m, "GameRecord", "How a self-play game ended.")
+      .def_ro("game", &awbw::GameRecord::game)
+      .def_ro("winner", &awbw::GameRecord::winner, "player index, or DRAW")
+      .def_ro("days", &awbw::GameRecord::days)
+      .def_ro("actions", &awbw::GameRecord::actions)
+      .def_ro("decisions", &awbw::GameRecord::decisions, "searched, full and fast")
+      .def_ro("capped", &awbw::GameRecord::capped,
+              "stopped by max_days or max_actions and decided as a day limit decides")
+      .def_ro("final_state", &awbw::GameRecord::final_state);
+
+  nb::class_<awbw::BatchedSearch>(
+      m, "BatchedSearch",
+      "Many Gumbel MCTS searches at once, with the network called in batches (core/search.h):\n"
+      "    while search.collect():\n"
+      "        planes, globals, legal, movers = search.batch()\n"
+      "        search.submit(logits, values)\n"
+      "Not thread-safe.")
+      .def(nb::init<const awbw::SearchConfig&, int>(), "config"_a, "size"_a,
+           "Leaves are encoded in a size x size window, which every map searched must fit.")
+      .def_prop_ro("config", &awbw::BatchedSearch::config)
+      .def_prop_ro("size", &awbw::BatchedSearch::size)
+      .def(
+          "add_root",
+          [](awbw::BatchedSearch& bs, const awbw::GameState& s, const awbw::Selection& sel) {
+            return bs.add_root(map_for(s), s, sel);
+          },
+          "state"_a, "selection"_a = awbw::Selection{},
+          "Search the decision `selection` in `state` and keep the result; returns its slot.")
+      .def(
+          "add_game",
+          [](awbw::BatchedSearch& bs, const awbw::GameState& s) {
+            return bs.add_game(map_for(s), s);
+          },
+          "state"_a,
+          "Play a game from `state` to its end, searching each decision with a choice; returns\n"
+          "its number. Samples and records come out of take_samples() and take_records().")
+      .def(
+          "collect",
+          [](awbw::BatchedSearch& bs) {
+            nb::gil_scoped_release release;
+            return bs.collect();
+          },
+          "Walk each search down to a leaf for the network, finishing the searches that are\n"
+          "done; returns the number of leaves, 0 once nothing is left to search.")
+      .def_prop_ro("leaves", &awbw::BatchedSearch::leaves)
+      .def("max_legal", &awbw::BatchedSearch::max_legal)
+      .def("batch", &search_batch,
+           "The leaves as the policy network reads them: planes [n, P, size, size] uint8 and\n"
+           "globals [n, NUM_GLOBALS + NUM_SELECTION_GLOBALS] float32 (as encode_policy_batch),\n"
+           "each leaf's legal steps as policy indices [n, max_legal()] int64 padded with -1,\n"
+           "and the player deciding at each [n] uint8.")
+      .def("submit", &search_submit, "logits"_a, "values"_a,
+           "The network's logits over each leaf's legal steps [n, >= max_legal()] float32 (in\n"
+           "batch()'s order), and its value [n] float32 for the player deciding there,\n"
+           "P(win) - P(loss).")
+      .def_prop_ro("active", &awbw::BatchedSearch::active,
+                   "searches not finished and games still going")
+      .def_prop_ro("slots", &awbw::BatchedSearch::slots)
+      .def("done", &awbw::BatchedSearch::done, "slot"_a)
+      .def(
+          "result",
+          [](const awbw::BatchedSearch& bs, int slot) {
+            if (!bs.done(slot)) throw nb::index_error("no finished search in that slot");
+            return bs.result(slot);
+          },
+          "slot"_a)
+      .def(
+          "take_samples", &search_samples,
+          "Self-play's full searches since the last call, as arrays: game, decision, states\n"
+          "[N, STATE_BYTES], picks [N, 3] and n_picks (as encode_policy_batch takes them), mover,\n"
+          "chosen, sims, value, net_value; then each sample's legal steps flattened, sample i's\n"
+          "from offsets[i] to offsets[i + 1]: ids, prior, policy (the improved policy, the\n"
+          "training target), visits and q.")
+      .def("take_records", &awbw::BatchedSearch::take_records,
+           "Self-play games finished since the last call.")
+      .def("clear", &awbw::BatchedSearch::clear, "Free every slot.");
+  m.attr("DRAW") = static_cast<int>(awbw::kDraw);
+  m.def(
+      "day_limit_winner",
+      [](const awbw::GameState& s) { return awbw::day_limit_winner(map_for(s), s); }, "state"_a,
+      "The winner of a game stopped at a day limit: more properties (comtowers and labs\n"
+      "included), then the larger army value; else DRAW.");
   m.def("cop_cost", &awbw::cop_cost, "co"_a, "uses"_a, "COP cost after `uses` power uses.");
   m.def("scop_cost", &awbw::scop_cost, "co"_a, "uses"_a, "SCOP cost after `uses` power uses.");
 }

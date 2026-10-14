@@ -322,4 +322,15 @@ void encode_movement(const MapData& m, const GameState& s, uint8_t* planes, int 
   }
 }
 
+void encode_decision(const MapData& m, const GameState& s, const Selection& sel,
+                     const uint16_t* ids, int n, uint8_t* planes, int h, int w, float* globals,
+                     uint8_t* nonspatial, bool movement) {
+  uint8_t scratch[kNumNonSpatialIds];
+  const size_t area = static_cast<size_t>(h) * w;
+  encode(m, s, planes, h, w, globals);
+  encode_selection(m, s, sel, ids, n, planes + kNumPlanes * area, h, w, globals + kNumGlobals,
+                   nonspatial ? nonspatial : scratch);
+  if (movement) encode_movement(m, s, planes + policy_planes(false) * area, h, w);
+}
+
 }  // namespace awbw

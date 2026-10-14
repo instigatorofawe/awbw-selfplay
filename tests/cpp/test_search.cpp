@@ -1,0 +1,382 @@
+#include <gtest/gtest.h>
+
+#include <algorithm>
+#include <cmath>
+#include <numeric>
+#include <random>
+#include <vector>
+
+#include "core/encode.h"
+#include "core/legal.h"
+#include "core/search.h"
+#include "test_util.h"
+
+namespace awbw {
+namespace {
+
+using testing::arena_start;
+using testing::kArena;
+using testing::make_map;
+using testing::make_state;
+using testing::put;
+
+// A stand-in network: a uniform prior, and as the value either 0 or, with
+// `material`, how far the mover leads in army value (from encode()'s
+// globals: tanh of the lead over 20,000 funds).
+struct FakeNet {
+  bool material = false;
+  float picked = 0;  // added to the value of a decision with an action in progress
+  int evals = 0;
+
+  // One collect / submit round; false once there was nothing to search.
+  bool round(BatchedSearch& bs) {
+    const int n = bs.collect();
+    if (n == 0) return false;
+    const int size = bs.size(), width = bs.max_legal();
+    const size_t plane_stride =
+        static_cast<size_t>(policy_planes(bs.config().movement)) * size * size;
+    std::vector<uint8_t> planes(n * plane_stride), movers(n);
+    std::vector<float> globals(static_cast<size_t>(n) * kNumPolicyGlobals);
+    std::vector<int64_t> legal(static_cast<size_t>(n) * width);
+    bs.write_batch(planes.data(), globals.data(), legal.data(), width, movers.data());
+    std::vector<float> logits(legal.size(), 0.0f), values(n, 0.0f);
+    for (int j = 0; j < n; ++j) {
+      const float* g = globals.data() + static_cast<size_t>(j) * kNumPolicyGlobals;
+      if (material) values[j] = std::tanh(5.0f * (g[kGArmyValue] - g[kSideGlobals + kGArmyValue]));
+      if (g[kNumGlobals + kSelGPhase + kPhaseIdle] == 0) values[j] += picked;
+    }
+    bs.submit(logits.data(), width, values.data());
+    evals += n;
+    return true;
+  }
+
+  void run(BatchedSearch& bs) {
+    while (round(bs)) {
+    }
+  }
+};
+
+// Orange Star's HQ and base at the top left, Blue Moon's HQ at the bottom right.
+const std::vector<std::string> kField = {
+    "HB...",  //
+    "....h",  //
+};
+
+int slot_at(const GameState& s, const MapData& m, int x, int y) { return s.unit_at[m.tile(x, y)]; }
+
+// make_state with the COs' power costs, so an empty meter can't use a power.
+GameState start(const MapData& m) {
+  GameState s = make_state(m);
+  for (Player& p : s.players) {
+    p.cop_cost = cop_cost(p.co, 0);
+    p.scop_cost = scop_cost(p.co, 0);
+  }
+  return s;
+}
+
+TEST(Search, SequentialHalvingSpreadsTheVisits) {
+  // Four steps: build, pick the Infantry, scrap it, end the turn. Scrapping
+  // the last unit loses, so it's the one dropped first.
+  const MapData m = make_map(kField);
+  GameState s = start(m);
+  put(s, m, kInfantry, 0, 2, 0);
+  put(s, m, kInfantry, 1, 3, 1);
+  s.players[0].funds = 1000;
+  SearchConfig cfg;
+  cfg.sims = 8;
+  cfg.gumbel_scale = 0;
+  BatchedSearch bs(cfg, 8);
+  const int slot = bs.add_root(m, s);
+  FakeNet net;
+  net.run(bs);
+  ASSERT_TRUE(bs.done(slot));
+  const SearchResult& r = bs.result(slot);
+  ASSERT_EQ(r.ids.size(), 4u);
+  std::vector<uint32_t> visits = r.visits;
+  std::sort(visits.begin(), visits.end());
+  EXPECT_EQ(visits, (std::vector<uint32_t>{1, 1, 3, 3}));
+  const int del = action_id(kChDelete, m.tile(2, 0));
+  const auto at = std::find(r.ids.begin(), r.ids.end(), del) - r.ids.begin();
+  EXPECT_EQ(r.visits[at], 1u);
+  EXPECT_FLOAT_EQ(r.q[at], -1.0f);
+  EXPECT_NE(r.id, del);
+  EXPECT_EQ(r.sims, 8);
+  EXPECT_EQ(net.evals, 1 + 8 - 1);  // the root, then a leaf per simulation but the loss
+  EXPECT_NEAR(std::accumulate(r.policy.begin(), r.policy.end(), 0.0), 1.0, 1e-5);
+  EXPECT_LT(r.policy[at], 0.05f);
+}
+
+TEST(Search, ValuesAreReadFromTheMoversSide) {
+  // As above with Blue Moon to move: scrapping their last unit loses for them.
+  const MapData m = make_map(kField);
+  GameState s = start(m);
+  put(s, m, kInfantry, 0, 2, 0);
+  put(s, m, kInfantry, 1, 3, 1);
+  s.active = 1;
+  SearchConfig cfg;
+  cfg.sims = 6;
+  cfg.gumbel_scale = 0;
+  BatchedSearch bs(cfg, 8);
+  const int slot = bs.add_root(m, s);
+  FakeNet().run(bs);
+  const SearchResult& r = bs.result(slot);
+  ASSERT_EQ(r.ids.size(), 3u);  // pick, scrap, end the turn
+  const int del = action_id(kChDelete, m.tile(3, 1));
+  const auto at = std::find(r.ids.begin(), r.ids.end(), del) - r.ids.begin();
+  EXPECT_EQ(r.mover, 1);
+  EXPECT_FLOAT_EQ(r.q[at], -1.0f);
+  EXPECT_NE(r.id, del);
+}
+
+TEST(Search, SelfPlayTakesAWinningCapture) {
+  // Orange Star's Infantry stands on Blue Moon's HQ with 10 points left: one
+  // more capture wins, three steps down (pick it, stay, capture).
+  const std::vector<std::string> rows = {"H...h"};
+  const MapData m = make_map(rows);
+  GameState s = start(m);
+  put(s, m, kInfantry, 0, 4, 0);
+  put(s, m, kInfantry, 1, 2, 0);
+  s.prop_points[m.prop[m.tile(4, 0)]] = 10;
+  SearchConfig cfg;
+  cfg.sims = 16;
+  cfg.gumbel_scale = 0;
+  cfg.max_days = 5;
+  BatchedSearch bs(cfg, 8);
+  bs.add_game(m, s);
+  FakeNet().run(bs);
+  const std::vector<GameRecord> recs = bs.take_records();
+  ASSERT_EQ(recs.size(), 1u);
+  EXPECT_EQ(recs[0].winner, 0);
+  EXPECT_EQ(recs[0].actions, 1);
+  EXPECT_EQ(recs[0].decisions, 3);
+  EXPECT_FALSE(recs[0].capped);
+  const std::vector<SearchSample> samples = bs.take_samples();
+  ASSERT_EQ(samples.size(), 3u);
+  // Sequential halving visits Wait as often as Capture, so the root's mean
+  // value is about half; the capture's Q and the improved policy show the win.
+  const SearchResult& last = samples[2].result;
+  ASSERT_EQ(last.ids,
+            (std::vector<uint16_t>{static_cast<uint16_t>(action_id(kChWait, m.tile(4, 0))),
+                                   static_cast<uint16_t>(action_id(kChCapture, m.tile(4, 0)))}));
+  EXPECT_EQ(last.id, last.ids[1]);
+  EXPECT_FLOAT_EQ(last.q[1], 1.0f);
+  EXPECT_GT(last.policy[1], 0.9f);
+}
+
+TEST(Search, ChanceNodesVisitResultsByTheirProbability) {
+  const std::vector<std::string> rows = {"H...h"};
+  const MapData m = make_map(rows);
+  GameState s = start(m);
+  const int tank = put(s, m, kTank, 0, 1, 0);
+  put(s, m, kTank, 1, 2, 0, 75);
+  put(s, m, kInfantry, 1, 4, 0);
+  const Selection moved{kPhaseMoved, static_cast<uint8_t>(tank),
+                        static_cast<uint16_t>(m.tile(1, 0))};
+  SearchConfig cfg;
+  cfg.sims = 120;
+  BatchedSearch bs(cfg, 8);
+  const int slot = bs.add_root(m, s, moved);
+  FakeNet net;
+  net.material = true;
+  while (net.round(bs)) {
+  }
+  const SearchResult& r = bs.result(slot);
+  ASSERT_EQ(r.ids.size(), 2u);  // Wait, Fire
+  EXPECT_EQ(r.visits[0] + r.visits[1], 120u);
+  const std::vector<SearchNode>& nodes = bs.nodes(slot);
+  const std::vector<SearchEdge>& edges = bs.edges(slot);
+  const SearchEdge& fire = edges[nodes[0].first + 1];
+  ASSERT_EQ(fire.id, action_id(kChFire, m.tile(2, 0)));
+  const SearchNode& chance = nodes[fire.child];
+  ASSERT_EQ(chance.kind, kNodeChance);
+  ASSERT_GT(chance.n, 3);
+  double total = 0;
+  for (int i = 0; i < chance.n; ++i) {
+    const SearchEdge& o = edges[chance.first + i];
+    total += o.prior;
+    const double seen = o.child == kNoNode ? 0 : nodes[o.child].visits;
+    EXPECT_LT(std::abs(seen - o.prior * chance.visits), 1.5) << "result " << i;
+  }
+  EXPECT_NEAR(total, 1.0, 1e-6);
+  // Firing on a damaged Tank gains army value, so it gets more visits and wins.
+  EXPECT_EQ(r.id, fire.id);
+  EXPECT_GT(r.q[1], r.q[0]);
+}
+
+TEST(Search, PicksTakeTheValueOfTheirState) {
+  const MapData m = make_map(kField);
+  GameState s = start(m);
+  put(s, m, kInfantry, 0, 2, 0);
+  put(s, m, kInfantry, 1, 3, 1);
+  s.players[0].funds = 1000;
+  for (const bool pick_values : {false, true}) {
+    SearchConfig cfg;
+    cfg.sims = 8;
+    cfg.pick_values = pick_values;
+    BatchedSearch bs(cfg, 8);
+    const int slot = bs.add_root(m, s);
+    FakeNet net;
+    net.picked = 0.5f;  // the network values the same state differently once a unit is picked
+    net.run(bs);
+    int picks = 0;
+    for (const SearchNode& n : bs.nodes(slot)) {
+      if (n.kind != kNodeDecision || n.sel.phase == kPhaseIdle) continue;
+      const float mine = n.mover == 0 ? n.raw : -n.raw;  // raw is from player 0's side
+      EXPECT_FLOAT_EQ(mine, pick_values ? 0.5f : 0.0f);
+      ++picks;
+    }
+    EXPECT_GT(picks, 0);
+  }
+}
+
+TEST(Search, ASingleLegalStepNeedsNoSearch) {
+  const std::vector<std::string> rows = {"H...h"};
+  const MapData m = make_map(rows);
+  GameState s = start(m);
+  const int inf = put(s, m, kInfantry, 0, 1, 0);
+  s.units[inf].flags |= kMoved;  // only End Turn is left
+  put(s, m, kInfantry, 1, 3, 0);
+  BatchedSearch bs(SearchConfig{}, 8);
+  const int slot = bs.add_root(m, s);
+  EXPECT_TRUE(bs.done(slot));
+  EXPECT_EQ(bs.collect(), 0);
+  EXPECT_EQ(bs.result(slot).id, kIdEndTurn);
+}
+
+// The tree's invariants: decisions with a choice, results that add up, and
+// visits that agree with their children's.
+void expect_sound_tree(const BatchedSearch& bs, int slot) {
+  const std::vector<SearchNode>& nodes = bs.nodes(slot);
+  const std::vector<SearchEdge>& edges = bs.edges(slot);
+  for (size_t i = 0; i < nodes.size(); ++i) {
+    const SearchNode& n = nodes[i];
+    uint32_t below = 0;
+    for (int k = 0; k < n.n; ++k) {
+      const SearchEdge& e = edges[n.first + k];
+      if (e.child != kNoNode) below += nodes[e.child].visits;
+    }
+    if (n.kind == kNodeDecision) {
+      EXPECT_GE(n.n, 2) << "a forced step got a node";
+      EXPECT_EQ(n.visits, below + (n.evaluated ? 1 : 0)) << "node " << i;
+    } else if (n.kind == kNodeChance) {
+      double total = 0;
+      for (int k = 0; k < n.n; ++k) total += edges[n.first + k].prior;
+      EXPECT_NEAR(total, 1.0, 1e-5);
+      EXPECT_EQ(n.visits, below);
+    } else {
+      EXPECT_EQ(n.n, 0);
+    }
+  }
+}
+
+struct Played {
+  std::vector<GameRecord> records;
+  std::vector<SearchSample> samples;
+  int evals = 0;
+};
+
+Played self_play(const MapData& m, const SearchConfig& cfg, int games, bool check_trees) {
+  std::mt19937 rng(11);
+  BatchedSearch bs(cfg, 16);
+  for (int g = 0; g < games; ++g) bs.add_game(m, arena_start(m, rng));
+  FakeNet net;
+  net.material = true;
+  Played out;
+  while (net.round(bs)) {
+    if (check_trees) {
+      for (int i = 0; i < bs.slots(); ++i) {
+        if (!bs.nodes(i).empty()) expect_sound_tree(bs, i);
+      }
+      if (::testing::Test::HasFailure()) break;
+    }
+    for (SearchSample& smp : bs.take_samples()) out.samples.push_back(std::move(smp));
+  }
+  for (SearchSample& smp : bs.take_samples()) out.samples.push_back(std::move(smp));
+  out.records = bs.take_records();
+  out.evals = net.evals;
+  return out;
+}
+
+TEST(Search, SelfPlayGamesEndWithSoundSamples) {
+  const MapData m = make_map(kArena);
+  SearchConfig cfg;
+  cfg.sims = 8;
+  cfg.considered = 4;
+  cfg.max_days = 3;
+  cfg.seed = 5;
+  const Played p = self_play(m, cfg, 4, true);
+  ASSERT_EQ(p.records.size(), 4u);
+  int decisions = 0;
+  for (const GameRecord& r : p.records) {
+    EXPECT_EQ(check_state(m, r.final_state), "");
+    EXPECT_TRUE(r.capped || r.final_state.winner != kNoOwner);
+    EXPECT_LE(r.days, 4);
+    decisions += r.decisions;
+  }
+  EXPECT_EQ(static_cast<int>(p.samples.size()), decisions);  // every search is full
+  EXPECT_GT(decisions, 100);
+  std::vector<uint16_t> ids;
+  for (const SearchSample& smp : p.samples) {
+    const SearchResult& r = smp.result;
+    ASSERT_EQ(check_state(m, smp.state), "");
+    legal_ids(m, smp.state, smp.sel, ids);
+    ASSERT_EQ(ids, r.ids);
+    EXPECT_TRUE(std::binary_search(ids.begin(), ids.end(), static_cast<uint16_t>(r.id)));
+    EXPECT_EQ(r.mover, smp.state.active);
+    EXPECT_EQ(r.sims, cfg.sims);
+    EXPECT_NEAR(std::accumulate(r.policy.begin(), r.policy.end(), 0.0), 1.0, 1e-5);
+    EXPECT_NEAR(std::accumulate(r.prior.begin(), r.prior.end(), 0.0), 1.0, 1e-5);
+    EXPECT_LE(std::abs(r.value), 1.0f);
+    // The picks reach the selection.
+    uint16_t picks[2];
+    const int k = selection_steps(smp.state, smp.sel, picks);
+    GameState t = smp.state;
+    Selection sel;
+    for (int j = 0; j < k; ++j) EXPECT_EQ(step(m, t, sel, picks[j]), kOk);
+    EXPECT_EQ(sel, smp.sel);
+    if (::testing::Test::HasFailure()) return;
+  }
+
+  // The same seed plays the same games.
+  const Played again = self_play(m, cfg, 4, false);
+  ASSERT_EQ(again.records.size(), p.records.size());
+  for (size_t i = 0; i < p.records.size(); ++i) {
+    EXPECT_EQ(again.records[i].game, p.records[i].game);
+    EXPECT_EQ(again.records[i].winner, p.records[i].winner);
+    EXPECT_EQ(again.records[i].actions, p.records[i].actions);
+  }
+  EXPECT_EQ(again.evals, p.evals);
+}
+
+TEST(Search, FastSearchesArePlayedButNotKept) {
+  const MapData m = make_map(kArena);
+  SearchConfig cfg;
+  cfg.sims = 8;
+  cfg.fast_sims = 2;
+  cfg.full_fraction = 0.25f;
+  cfg.considered = 4;
+  cfg.max_days = 2;
+  const Played p = self_play(m, cfg, 2, false);
+  int decisions = 0;
+  for (const GameRecord& r : p.records) decisions += r.decisions;
+  const double kept = static_cast<double>(p.samples.size()) / decisions;
+  EXPECT_GT(kept, 0.15);
+  EXPECT_LT(kept, 0.35);
+  for (const SearchSample& smp : p.samples) EXPECT_EQ(smp.result.sims, 8);
+}
+
+TEST(Search, ADayCapDecidesByPropertiesThenArmy) {
+  const std::vector<std::string> rows = {"H.#.h"};
+  const MapData m = make_map(rows);
+  GameState s = start(m);
+  put(s, m, kInfantry, 0, 1, 0);
+  put(s, m, kInfantry, 1, 3, 0);
+  EXPECT_EQ(day_limit_winner(m, s), kDraw);
+  s.units[slot_at(s, m, 3, 0)].hp = 55;
+  EXPECT_EQ(day_limit_winner(m, s), 0);  // the larger army
+  s.prop_owner[m.prop[m.tile(2, 0)]] = 1;
+  EXPECT_EQ(day_limit_winner(m, s), 1);  // more properties first
+}
+
+}  // namespace
+}  // namespace awbw

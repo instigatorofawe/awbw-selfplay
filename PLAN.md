@@ -30,16 +30,16 @@ awbw-selfplay/
   src/core/                   # C++20, no Python dependency
     tables.h                  # generated constexpr tables
     map  state  snapshot  movegen  combat  actions  encode   # done (.h/.cpp each); rng.h
-    hash                                                     # to come
-    search/                   # batched Gumbel MCTS
+    hash  legal  belief  movement                            # done
+    search                    # batched Gumbel MCTS (done)
   src/bindings/module.cpp     # thin nanobind layer
   python/awbw/
     rules/    maps.py
     engine.py                 # replay snapshot -> GameState glue
     replay/   sources.py  parse.py  combat_check.py  move_check.py  step_check.py  extract.py
     data/     shards.py  loader.py  build.py
-    nn/       model.py  critic.py  train_critic.py  policy.py  train_policy.py   # selfplay.py to come
-    render.py  agents/
+    nn/       model.py  critic.py  train_critic.py  policy.py  train_policy.py
+    agents.py  search.py      # arena agents; the network side of search, self-play
   tests/cpp/                  # googletest, fetched by CMake (AWBW_BUILD_TESTS)
   tests/python/               # pytest
   bench/                      # Google Benchmark, fetched by CMake (AWBW_BUILD_BENCHMARKS)
@@ -1029,49 +1029,150 @@ knows what a player who watched every turn knows:
 
 ## 8. Search: batched Gumbel MCTS (C++)
 
-- **Algorithm:** Gumbel AlphaZero (Danihelka et al., ICLR 2022).
-  - Gumbel-top-k plus sequential halving at the root.
-  - Completed-Q improved policy at interior nodes.
+`src/core/search.h` (**done**), driven from Python by `awbw.search`.
+
+- **Algorithm:** Gumbel AlphaZero (Danihelka et al., ICLR 2022), making
+  the same choices as DeepMind's mctx:
+  - At the root, Gumbel-top-k picks `considered` steps (16), and sequential
+    halving spreads the simulations over them. The step played is the
+    one left at the end.
+  - Below the root, a decision visits the step whose share of the visits is
+    furthest below its share of the improved policy, softmax(logits +
+    σ(completed Q)).
+  - An unvisited step's Q is the node's value mixed with its visited
+    steps' Qs (mctx's `qtransform_completed_by_mix_value`). σ(q) = (50 +
+    the most visits of a step) × 0.1 × q.
   - It improves the policy reliably even with few simulations. That matters
-    because one game has thousands of decisions.
+    because one game has about 1,100 decisions with a choice.
+  - **Q is mapped to 0..1 by its bounds, (Q + 1) / 2, not by its spread
+    among the node's steps,** which is mctx's default (`rescale`). Many
+    micro-steps are worth the same: which unit to pick first, say. Rescaling
+    stretches the value head's noise between them to the whole range, and
+    that overrides the prior. In the arena below, the same search loses
+    with it, 11–21, and wins without it, 24–8.
+  - **Values at picks:** picks change no state, but the value head reads the
+    selection too. On 800 human idle positions, the Qs of the root's visited
+    steps spread 0.34 on average (on −1..1) after 16 simulations. With
+    `pick_values` off, a decision with an action in progress takes the
+    value of the decision it was picked from instead (the network still
+    gives its prior), and the spread falls to 0.25. In the arena that made
+    no measurable difference (below), so the network's value is the
+    default.
+  - The improved policy at the root is the training target.
 - **Tree over micro-steps:**
-  - Every node stores `to_play`.
-  - **Backup flips the value's sign only when `to_play` changes, not every
-    ply.** A player makes many consecutive decisions within one turn.
-- **Chance nodes after Fire** (and any other stochastic step):
-  - exact merged outcome distribution from `outcomes()`
-  - children chosen by sampling ∝ probability, or by the lowest
-    visits-to-probability ratio
-- **Depth:** a turn has dozens of decisions, so with hundreds of simulations
-  the search rarely reaches the opponent's reply. The critic carries most of
-  the weight, which is why §5 comes first.
-  - Later: a transposition table keyed by `state_hash` (§2), in an
+  - There are three kinds of node:
+    - a decision: a state and a `Selection`;
+    - a chance node: a Fire, with one child per result;
+    - the end of the game.
+  - **Values are kept from player 0's side and read from the mover's, so
+    the sign changes only where the mover does, not at every step.** A
+    player makes many decisions in a row within a turn.
+  - Forced steps (one legal id) are taken on the way, without a node.
+  - Picks change no state, so a pick's node shares its parent's state. A
+    node stores a new state (6.5 KB) only where an action was applied: at
+    most one per simulation.
+- **Chance nodes after Fire:**
+  - **Results:** `fire_outcomes` gives them: `combat_outcomes` for the
+    attacker at its destination, or none if the move traps.
+  - **Sampling:** each visit goes to the result whose share of the visits
+    is furthest below its probability. That keeps every result within 1.5
+    visits of p × N (tested).
+  - **Other actions:** no other action has chance (missile aim, bombs and
+    traps are deterministic).
+- **Hidden information: the search sees the whole state,** internal HP and
+  hidden units included, although the network's input holds only what the
+  mover knows.
+  - A move into an unseen unit traps in the tree as it would in the game,
+    so the search effectively knows where hidden units are.
+  - Self-play is symmetric, so both sides get the same knowledge. Searching
+    a real game would need roots sampled from the beliefs (later).
+- **Day cap:** past `max_days`, the tree and self-play end a game as a day
+  limit decides it: properties, then army value (`day_limit_winner`, the
+  same rule as `agents.adjudicate`).
+- **Batching:** a `BatchedSearch` runs many slots. Each round, every slot
+  walks to one leaf (no virtual loss is needed), and the leaves go to the
+  network in one batch.
+  - **One decision:** `add_root(state, selection)` searches it and keeps
+    the result. `SearchAgent` uses this, so `agents.play` and the arena can
+    search.
+  - **Self-play:** `add_game(state)` plays a whole game, searching every
+    decision with a choice and taking the forced steps and luck in the
+    game itself.
+  - **Playout-cap randomization** (KataGo): a share `full_fraction` of the
+    searches are full (`sims`) and kept as samples. The rest use
+    `fast_sims` and only choose the step.
+  - **Output:** `take_samples()` gives each full search's state, picks,
+    legal steps, prior, improved policy, visits, Qs and root value.
+    `take_records()` gives the finished games.
+- **Not yet:**
+  - tree reuse between decisions;
+  - a transposition table keyed by `state_hash` (§2), in an
     `absl::flat_hash_map`. Different unit orders within a turn often reach
     the same position. Abseil (LTS 20260817.0) is fetched for the
     benchmarks so far: against `std::unordered_map`, 64-bit-key lookups are
     1.8 vs 2.0 ns at 4K entries and 9.5 vs 35 ns at 1M, and inserts 3–11×
-    faster (M4 Pro).
-- **Batching across games:**
-  - One `BatchedSearch` owns M concurrent games.
-  - Each round, each tree descends to one leaf. With M ≥ 512 that is enough
-    parallelism without virtual loss.
-- **Node storage:** a per-game arena; states are stored at expanded nodes
-  (~4 KB each). Re-simulating from the root along the path is the fallback if
-  memory becomes a problem.
-- **Self-play extras:**
-  - Playout-cap randomization (KataGo): full search on ~25% of decisions,
-    which are the ones recorded as policy targets; cheap search on the rest.
-  - Resignation threshold, with a fraction of games played out to check for
-    false resignations.
+    faster (M4 Pro);
+  - threads for collect, which is single-threaded;
+  - resignation (with a fraction of games played out to check for false
+    resignations).
+- **Depth:** a turn has dozens of decisions, so with tens of simulations the
+  search rarely reaches the opponent's reply. The value head carries most of
+  the weight.
 
 ```python
-search = awbw.BatchedSearch(maps, n_games=512, sims=64, cfg=cfg)
-while training:
-    planes, globals_, legal_idx = search.collect()  # GIL released inside
-    value, legal_logits = net(planes, globals_, legal_idx)  # on GPU
-    search.submit(legal_logits, value)  # expand + backup + advance
-    buffer.add(search.drain_samples())  # state bytes, sparse pi, z
+cfg = _core.SearchConfig(sims=64, fast_sims=16, full_fraction=0.25, max_days=30)
+search = _core.BatchedSearch(cfg, size=32)
+evaluate = NetEvaluator(Policy.load(path))  # gathers each leaf's legal logits on the GPU
+for start in starts:
+    search.add_game(start)
+while search.collect():  # the GIL is released in collect, batch and submit
+    planes, globals_, legal, movers = search.batch()
+    logits, values = evaluate(planes, globals_, legal, movers)
+    search.submit(logits, values)
+    buffer.add(search.take_samples())
 ```
+
+- **Speed:**
+  - **CPU** (`BM_Search`, M4 Pro, one core, a stand-in network): 230,000
+    simulations/s, 4.3 µs each, 2.5 µs of which is encoding the leaf.
+  - **With the network** (self-play, 64 simulations per decision, 256
+    games at once, the v1 baseline network on the RTX 5070, bf16): 7,300
+    evaluations/s eager and 22,300 under `torch.compile`
+    (`NetEvaluator(compile=True)`), or 341 searched decisions/s. The network
+    takes 74% of the time, encoding the batch 20% and the tree 5%. The arena
+    batches only its ~32 games' decisions, at 5,300 evaluations/s compiled.
+- **Strength** (`awbw arena --sims N`): the v1 baseline network (§7,
+  epoch 4) searching against its own prior played greedily (its likeliest
+  step), from validation starts, each played twice with seats swapped,
+  with a 30-day cap. The 32-game runs use the first 16 of the 64-game
+  runs' 32 starts.
+
+  | simulations | root noise | Q to 0..1 | values at picks | games | result |
+  |---|---|---|---|---|---|
+  | 16 | Gumbel | rescaled | network | 8 | 1–7 |
+  | 16 | none | rescaled | network | 32 | 11–21 |
+  | 16 | none | bounds | network | 32 | 24–8 |
+  | 64 | none | bounds | network | 32 | 17–15 |
+  | 16 | none | bounds | network | 64 | 38–26 |
+  | 16 | none | bounds | the state's | 64 | 39–25 |
+  | 64 | none | bounds | network | 64 | **46–18** |
+  | 64 | none | bounds | the state's | 64 | 43–21 |
+
+  - **Search beats the prior:** 59–61% at 16 simulations and 67–72% at 64,
+    over 64 games.
+  - **Rescaling Q loses** to its own prior, 11–21, where bounds win 24–8
+    on the same starts.
+  - **Noise:** 64 games give a standard error of about 6 points. It is more
+    in practice, since a start's two games are alike: with the same
+    settings, a 64-simulation run on the first 16 starts went 17–15, and
+    one on all 32 went 46–18.
+  - **Noise in the arena:** where the Qs say nothing, Gumbel noise at the
+    root plays a *sample* from the prior. The prior agent plays its argmax,
+    which is much stronger for an imitation policy. The arena therefore
+    searches without noise (`--gumbel 0`, the default), and self-play keeps
+    the noise for exploration.
+  - **Cost:** a decision costs `sims` + 1 network evaluations, fewer where
+    simulations end the game.
 
 - **Later optimization:** export the net to ONNX / Core ML / TensorRT and run
   inference inside C++ for actor-only processes.
@@ -1094,7 +1195,10 @@ while training:
   and `encode_policy_batch(state_bytes[N], picks[N, 3], n_picks[N]) ->
   planes, globals, non-spatial legality, targets`, writing into
   caller-provided numpy buffers; `policy_index` / `policy_size` (**done**).
-- **`BatchedSearch`:** as in §8.
+- **`BatchedSearch`** (**done**), `SearchConfig`, `SearchResult`,
+  `GameRecord`: as in §8. `batch()` returns new numpy arrays each round;
+  `submit` takes the logits of each leaf's legal steps. The object isn't
+  thread-safe.
 - **macOS:** Apple clang ships no OpenMP, so parallelism uses a `std::thread`
   pool.
 
@@ -1103,8 +1207,8 @@ while training:
 - **C++ (googletest, `tests/cpp/`):** maps, state bookkeeping, snapshots,
   movement, damage, every action kind, the turn start, CO powers, the
   network encoding (the decision and movement planes included), turns of
-  moving (against a turn-by-turn expansion), legal actions and the
-  transposition key (156 tests). CI runs them on Linux and
+  moving (against a turn-by-turn expansion), legal actions, the
+  transposition key and search (164 tests). CI runs them on Linux and
   macOS, in Release and under ASan/UBSan.
 - **Damage formula across all logged attacks:** every logged combat result
   must be in `outcomes()`. This checks the formula over the whole replay
@@ -1128,6 +1232,18 @@ while training:
   - HP and funds stay in range (**done**)
   - the legal-action mask is non-empty until the game ends, and an id not
     in it changes nothing (**done**)
+- **Search** (`test_search.cpp`, `tests/python/test_search.py`):
+  - sequential halving spreads the visits as mctx's schedule does;
+  - values are read from the mover's side, for either player;
+  - self-play takes a win three steps down;
+  - chance nodes visit results by their probability;
+  - trees stay sound through random self-play games on the legal-actions
+    test map, with forced steps getting no node and visits adding up;
+  - every sample's steps are its state's legal ids, and the same seed plays
+    the same games;
+  - fast searches are played but not kept;
+  - leaves encode exactly as `encode_policy_batch` does, and the gathered
+    logits give `Policy.score`'s prior.
 - **Policy network** (`tests/python/test_policy.py`): each decision's
   planes and label match stepping the action; the policy ignores padding,
   where the board sits and the rest of the batch; flips map back; training
@@ -1152,7 +1268,7 @@ while training:
   - `legal_ids` and `legal_actions` on that board (§3)
   - `state_hash` (0.10 µs; `absl::Hash` over the raw bytes, which tells
     transposed states apart, 0.08 µs); transposition-table lookups (§8)
-  - MCTS simulations/sec, with a dummy net and with the real net
+  - search: 230,000 simulations/s with a stand-in network (`BM_Search`, §8)
 
 ## 11. Milestones
 
@@ -1162,5 +1278,5 @@ while training:
 | M1 | C++ core + bindings: state, `from_snapshot`, movegen, all actions except CO powers, `outcomes`, turn start, `encode_batch` | Every logged attack in `outcomes()` (**done**); state, snapshots, movegen (**done**); apply and turn start, every checkable turn replayed exactly (**done**); `encode_batch`, v0 dataset, **critic v0** (**done**) |
 | M2 | Exact match: full replay stepping, all COs/powers, edge cases | CO powers' effects, missile aim, rain and snow (**done**); ≥ 99% of filtered replays fully verified; benchmarks in CI |
 | M3 | v1 datasets: all idle-phase states + action labels | Micro-step action space and legal mask (**done**); policy prior (behavior cloning) with a value head that matches critic v0 (**done**); baselines: random (**done**), greedy, critic-greedy 1-ply |
-| M4 | Batched Gumbel MCTS with chance nodes, `collect`/`submit` | Search + critic beats critic-greedy; sims/sec measured |
+| M4 | Batched Gumbel MCTS with chance nodes, `collect`/`submit` | Search with chance nodes, self-play mode, sims/sec measured (**done**); search beats its own prior in the arena (**done**: 46–18 at 64 simulations); vs critic-greedy |
 | M5 | Self-play loop: actors / learner / evaluator, mixed with human data | Elo rises across checkpoints vs. fixed baselines |

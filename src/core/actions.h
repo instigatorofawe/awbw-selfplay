@@ -102,6 +102,13 @@ Status apply(const MapData& m, GameState& s, const Action& a, const Detail& d = 
 // The fight as the damage formula sees it, for the unit in `slot` standing on `tile`.
 Combatant combatant(const MapData& m, const GameState& s, int slot, int tile);
 
+// The results Fire action `a` can have (combat_outcomes for the unit at its
+// destination), for search's chance nodes; Detail::att_hp / def_hp force one.
+// False, with `out` empty, if `a` isn't a Fire, its move runs into an enemy
+// the mover can't see (nothing is fought), or there is nothing to fight.
+bool fire_outcomes(const MapData& m, const GameState& s, const Action& a,
+                   std::vector<Outcome>& out);
+
 // Where the active player's power `level` (1 COP, 2 SCOP) would aim its
 // missiles now, as AWBW does: writes up to 3 tiles (kNoTile if there is no
 // target) and returns how many missiles the power fires.

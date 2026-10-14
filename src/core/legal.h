@@ -92,4 +92,8 @@ Status step(const MapData& m, GameState& s, Selection& sel, int id, const Detail
 // returns how many (0 for Resign, which has none).
 int action_steps(const MapData& m, const GameState& s, const Action& a, uint16_t* out);
 
+// The picks that reach `sel` from idle (the unit's or factory's tile, then
+// the unit's destination): writes up to 2 ids to `out` and returns how many.
+int selection_steps(const GameState& s, const Selection& sel, uint16_t* out);
+
 }  // namespace awbw

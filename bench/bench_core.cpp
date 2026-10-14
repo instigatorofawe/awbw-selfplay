@@ -23,6 +23,7 @@
 #include "core/legal.h"
 #include "core/movegen.h"
 #include "core/movement.h"
+#include "core/search.h"
 #include "test_util.h"
 
 namespace awbw {
@@ -407,6 +408,44 @@ void BM_TableInsert(benchmark::State& st) {
 }
 BENCHMARK(BM_TableInsert<absl::flat_hash_map<uint64_t, uint32_t>>)->Arg(4096)->Arg(1 << 20);
 BENCHMARK(BM_TableInsert<std::unordered_map<uint64_t, uint32_t>>)->Arg(4096)->Arg(1 << 20);
+
+// Searches from the board's idle decision, 64 simulations each, with a
+// stand-in network that answers every leaf with a uniform prior and a value
+// of 0: the search's own cost per simulation, the leaves' encoding in a 32x32
+// window included. The argument is the number of searches run together.
+void BM_Search(benchmark::State& st) {
+  const Board& b = board();
+  GameState s = b.state;
+  for (Player& p : s.players) {
+    p.cop_cost = cop_cost(p.co, 0);
+    p.scop_cost = scop_cost(p.co, 0);
+  }
+  const int roots = static_cast<int>(st.range(0));
+  SearchConfig cfg;
+  cfg.sims = 64;
+  const size_t plane_stride = size_t{policy_planes(false)} * 32 * 32;
+  std::vector<uint8_t> planes;
+  std::vector<float> globals, logits, values;
+  std::vector<int64_t> legal;
+  int64_t sims = 0;
+  for (auto _ : st) {
+    BatchedSearch bs(cfg, 32);
+    for (int i = 0; i < roots; ++i) bs.add_root(b.map, s);
+    while (const int n = bs.collect()) {
+      const int width = bs.max_legal();
+      planes.resize(n * plane_stride);
+      globals.resize(static_cast<size_t>(n) * kNumPolicyGlobals);
+      legal.resize(static_cast<size_t>(n) * width);
+      bs.write_batch(planes.data(), globals.data(), legal.data(), width, nullptr);
+      logits.assign(legal.size(), 0.0f);
+      values.assign(n, 0.0f);
+      bs.submit(logits.data(), width, values.data());
+    }
+    sims += int64_t{roots} * cfg.sims;
+  }
+  st.SetItemsProcessed(sims);
+}
+BENCHMARK(BM_Search)->Arg(1)->Arg(64);
 
 }  // namespace
 }  // namespace awbw

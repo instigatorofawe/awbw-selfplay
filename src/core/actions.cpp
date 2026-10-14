@@ -996,6 +996,21 @@ Combatant combatant(const MapData& m, const GameState& s, int slot, int tile) {
   return c;
 }
 
+bool fire_outcomes(const MapData& m, const GameState& s, const Action& a,
+                   std::vector<Outcome>& out) {
+  out.clear();
+  if (a.kind != kActFire || a.unit >= kMaxUnits || !s.units[a.unit].alive() ||
+      a.target >= m.n_tiles)
+    return false;
+  MovePlan mp;
+  if (plan_move(m, s, a.unit, a.to, {}, mp) != kOk || mp.trapped) return false;
+  const int ti = s.unit_at[a.target];
+  if (ti == kNoUnit || s.units[ti].owner == s.units[a.unit].owner) return false;
+  const int dest = mp.dest();
+  return combat_outcomes(combatant(m, s, a.unit, dest), combatant(m, s, ti, a.target),
+                         m.distance(dest, a.target), out);
+}
+
 int missile_targets(const MapData& m, const GameState& s, int level, uint16_t* out) {
   const Player& p = s.players[s.active];
   const int n = missile_count(p.co, level == 2);
