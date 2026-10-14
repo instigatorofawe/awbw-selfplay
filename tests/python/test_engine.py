@@ -254,3 +254,26 @@ def test_each_actions_steps_play_it(md):
         assert _core.step(t, sel, ids[-1]) == _core.apply(u, *a) == _core.OK
         assert t.to_bytes() == u.to_bytes()
     assert _core.action_steps(s, A["Resign"]) == []
+
+
+def test_state_hash_ignores_slots_ids_and_rng(md):
+    inf, tank = (60, U["Infantry"], 0, 1, 1, 100, 99, 0, 0, 0, 0), (70, U["Tank"], 1, 3, 1, 64, 50, 7, 0, 0, 0)
+    s = snapshot(md, [inf, tank])
+    t = snapshot(md, [inf, (55, *tank[1:])])  # other ids, so other slots (snapshots go by id)
+    t.seed(7)
+    assert s.to_bytes() != t.to_bytes()
+    assert _core.state_hash(s) == _core.state_hash(t)
+    moved = s.copy()
+    assert _core.apply(moved, A["Wait"], 0, (0, 1), None, 0) == _core.OK
+    assert _core.state_hash(moved) != _core.state_hash(s)
+    rows = np.stack([np.frombuffer(x.to_bytes(), np.uint8) for x in (s, t, moved)])
+    keys = _core.hash_batch(rows)
+    assert keys.dtype == np.uint64 and keys.tolist() == [_core.state_hash(x) for x in (s, t, moved)]
+
+    # A decision in progress: its unit by tile, not slot.
+    sel, other = _core.Selection(), _core.Selection()
+    assert _core.state_hash(s, sel) == _core.state_hash(s)
+    assert _core.step(s, sel, step_id("Select", md, 1, 1)) == _core.OK
+    assert _core.step(t, other, step_id("Select", md, 1, 1)) == _core.OK
+    assert sel.unit != other.unit
+    assert _core.state_hash(s, sel) == _core.state_hash(t, other) != _core.state_hash(s)

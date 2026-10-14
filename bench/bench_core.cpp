@@ -2,17 +2,24 @@
 //   cmake -S . -B build/cpp -DAWBW_BUILD_BENCHMARKS=ON && cmake --build build/cpp
 //   build/cpp/awbw_bench
 
+#include <absl/container/flat_hash_map.h>
+#include <absl/hash/hash.h>
 #include <benchmark/benchmark.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <memory>
+#include <random>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "core/actions.h"
 #include "core/combat.h"
 #include "core/encode.h"
+#include "core/hash.h"
 #include "core/legal.h"
 #include "core/movegen.h"
 #include "test_util.h"
@@ -278,6 +285,79 @@ void BM_EncodeDecision(benchmark::State& st) {
   }
 }
 BENCHMARK(BM_EncodeDecision);
+
+// The transposition-table key, from scratch.
+void BM_StateHash(benchmark::State& st) {
+  const Board& b = board();
+  for (auto _ : st) {
+    const GameState* s = &b.state;
+    benchmark::DoNotOptimize(s);
+    benchmark::DoNotOptimize(state_hash(*s));
+  }
+  st.counters["units"] = static_cast<double>(b.slots.size());
+}
+BENCHMARK(BM_StateHash);
+
+// For comparison: absl::Hash over the state's raw bytes, which would tell
+// transposed states apart (slots, ids, the RNG).
+void BM_StateBytesAbslHash(benchmark::State& st) {
+  const Board& b = board();
+  for (auto _ : st) {
+    const GameState* s = &b.state;
+    benchmark::DoNotOptimize(s);
+    benchmark::DoNotOptimize(
+        absl::HashOf(std::string_view(reinterpret_cast<const char*>(s), sizeof(GameState))));
+  }
+}
+BENCHMARK(BM_StateBytesAbslHash);
+
+// A transposition table's lookups: 64-bit keys to node indices, half the
+// probes found. Arg: entries.
+template <class Table>
+void BM_TableFind(benchmark::State& st) {
+  const int n = static_cast<int>(st.range(0));
+  uint64_t seed = 1;
+  auto next = [&] {  // splitmix64
+    uint64_t z = (seed += 0x9E3779B97F4A7C15ull);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+  };
+  Table table;
+  table.reserve(n);
+  std::vector<uint64_t> probes;
+  for (int i = 0; i < n; ++i) {
+    const uint64_t key = next();
+    table.emplace(key, static_cast<uint32_t>(i));
+    probes.push_back(i % 2 ? key : next());
+  }
+  std::shuffle(probes.begin(), probes.end(), std::mt19937_64(0));
+  size_t i = 0;
+  for (auto _ : st) {
+    const auto it = table.find(probes[i]);
+    benchmark::DoNotOptimize(it == table.end() ? 0u : it->second);
+    if (++i == probes.size()) i = 0;
+  }
+}
+BENCHMARK(BM_TableFind<absl::flat_hash_map<uint64_t, uint32_t>>)->Arg(4096)->Arg(1 << 20);
+BENCHMARK(BM_TableFind<std::unordered_map<uint64_t, uint32_t>>)->Arg(4096)->Arg(1 << 20);
+
+// Filling one: try_emplace of new keys, as expanding nodes does. Arg: entries.
+template <class Table>
+void BM_TableInsert(benchmark::State& st) {
+  const int n = static_cast<int>(st.range(0));
+  std::vector<uint64_t> keys(n);
+  uint64_t x = 0x1234;
+  for (uint64_t& k : keys) k = x = x * 6364136223846793005ull + 1442695040888963407ull;
+  for (auto _ : st) {
+    Table table;
+    for (int i = 0; i < n; ++i) table.try_emplace(keys[i], static_cast<uint32_t>(i));
+    benchmark::DoNotOptimize(table.size());
+  }
+  st.SetItemsProcessed(st.iterations() * n);
+}
+BENCHMARK(BM_TableInsert<absl::flat_hash_map<uint64_t, uint32_t>>)->Arg(4096)->Arg(1 << 20);
+BENCHMARK(BM_TableInsert<std::unordered_map<uint64_t, uint32_t>>)->Arg(4096)->Arg(1 << 20);
 
 }  // namespace
 }  // namespace awbw

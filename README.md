@@ -19,7 +19,7 @@ listed in PLAN.md.
 
 ## Setup
 
-Requires [uv](https://docs.astral.sh/uv/), CMake ≥ 3.27 and a C++20 compiler.
+Requires [uv](https://docs.astral.sh/uv/), CMake ≥ 3.28 and a C++20 compiler.
 
 ```sh
 uv sync                      # builds the C++ extension (rebuilt when src/ changes); installs torch

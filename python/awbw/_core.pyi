@@ -532,6 +532,20 @@ def legal_ids(state: GameState, selection: Selection = ...) -> Annotated[NDArray
     type. Every id leads on to a legal action; empty once the game is over.
     """
 
+def state_hash(state: GameState, selection: Selection = ...) -> int:
+    """
+    64-bit transposition-table key (core/hash.h): equal for states that play the same
+    whatever order of actions reached them, since unit slots and ids, the RNG and free
+    slots don't count. With a selection, the decision in progress (an idle one gives the
+    state's key). The same on every run.
+    """
+
+def hash_batch(states: Annotated[NDArray[numpy.uint8], dict(shape=(None, None), order='C', device='cpu', writable=False)]) -> Annotated[NDArray[numpy.uint64], dict(shape=(None,))]:
+    """
+    state_hash of raw states [N, STATE_BYTES] (uint64 [N]); their maps must be registered,
+    and states are checked first.
+    """
+
 def legal_mask(state: GameState, selection: Selection = ...) -> Annotated[NDArray[numpy.bool_], dict(shape=(None,))]:
     """legal_ids() as a mask over all NUM_ACTION_IDS ids."""
 

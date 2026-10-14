@@ -125,7 +125,12 @@ static_assert(std::is_trivially_copyable_v<GameState>);
   either, so `hp_hidden` holds their belief over each display 1–10 (same
   weights; never 0 at the true display), used only for units of a player
   who `hides_hp`.
-- **Zobrist hash:** not yet; added for the transposition table (§8).
+- **Transposition key** (`core/hash.h`, **done**): `state_hash(state, sel)`,
+  64 bits, the same for states that play the same whatever order reached
+  them. Unit slots and ids, the RNG and free slots don't count (no rule reads
+  them); units are hashed one by one and summed. Computed from scratch, not
+  incrementally: 0.10 µs on the §10 board (59 units). A selection's unit is
+  keyed by its tile.
 
 - **Cloning:** a memcpy (65 ns).
 - **Serialization:** the raw bytes. The same bytes are what the datasets store.
@@ -881,6 +886,55 @@ knows what a player who watched every turn knows:
     HP still moves little with the norm, because `army_value` already
     counts it and the edit contradicts that global.
 
+### Policy-value network (`PolicyValueNet`, done)
+
+- **Model** (`nn/model.py`): the critic's trunk and value head, reading the
+  decision in progress too (`encode_policy_batch`, §6: 18 more planes, 29
+  more globals). The policy head maps each tile's features through a 1×1
+  conv (64 channels) to a logit per (channel, tile), and the board summary
+  through an MLP to a logit per non-spatial id (End Turn, the powers,
+  Build + type), laid out as `policy_index` says; illegal steps are masked
+  before the softmax. 64 channels × 6 blocks: 0.57M parameters.
+- **Training** (`awbw train-policy`, `nn/train_policy.py`): cross-entropy of
+  the step taken over the legal ones, on every non-forced micro-step of the
+  v1 dataset's actions; the result trains the value head on 5% of
+  decisions only (a game's ~1,100 decisions share one result, and the
+  critic already overfits v0). One flip/transpose per batch, with the
+  spatial logits mapped back; ratings hidden at random as for the critic.
+  On CUDA the forward pass runs in bfloat16, losses and validation in
+  float32. `awbw eval-policy` scores validation decisions by phase;
+  `awbw arena` plays a checkpoint against a random mover or another
+  checkpoint from validation games' starts, each start twice with seats
+  swapped (`agents.py`).
+- **Speed** (decisions/s, batch 256): RTX 5070 bf16 compiled 9,060, fp32
+  compiled 5,602, bf16 eager 4,965, fp32 eager 3,902; M4 Pro (MPS) 1,260.
+  The 5070 needs `uv sync --extra cuda` (PyTorch's CUDA 13 wheels).
+- **Results on v1** (35,684 games; 4 epochs of 12.5% of the 41M training
+  decisions, 10 minutes each on the 5070): validation over 221,654
+  decisions of the validation games, and the value over their 53,871 turn
+  starts.
+
+  | epoch | policy loss | top-1 | idle | selected | moved | factory | whole action | value, ratings | without |
+  |---|---|---|---|---|---|---|---|---|---|
+  | uniform over legal steps | 2.464 | | 2.793 | 2.991 | 0.773 | 1.674 | | | |
+  | 1 | 1.214 | 0.580 | 1.681 | 1.227 | 0.110 | 0.797 | 2.822 / 0.278 | 0.5485 | 0.5831 |
+  | 2 | 1.170 | 0.593 | 1.641 | 1.157 | 0.104 | 0.756 | 2.718 / 0.292 | 0.5406 | 0.5726 |
+  | 3 | 1.148 | 0.600 | 1.620 | 1.126 | 0.100 | 0.737 | 2.668 / 0.302 | 0.5194 | 0.5536 |
+  | 4 | **1.138** | 0.603 | 1.611 | 1.110 | 0.098 | 0.725 | 2.643 / 0.305 | **0.5147** | **0.5487** |
+  | critic v0 on the same turn starts | | | | | | | | 0.5194 | 0.5526 |
+
+  Phase columns are log loss; "whole action" is the log loss / top-1 of
+  the action's micro-steps together. Epoch 4's value is calibrated (ECE
+  0.008; accuracy 72.5% with ratings, 68.3% without) and edges out
+  critic v0 trained on v0 alone.
+- **What the numbers mean:** many orders of a turn's moves transpose to the
+  same position, and humans pick among them arbitrarily, so top-1 accuracy
+  on the idle phase (which unit next) understates the policy, and no model
+  can get its log loss near 0. The order entropy is the same floor for
+  every model, so log loss still ranks models; the real test is play (the
+  arena, and search). Order does matter where luck, powers or End Turn
+  come in, which the network has to learn.
+
 ### Later
 
 - **Trunk:** a larger ResNet once the full archive is in; a transformer
@@ -909,8 +963,12 @@ knows what a player who watched every turn knows:
 - **Depth:** a turn has dozens of decisions, so with hundreds of simulations
   the search rarely reaches the opponent's reply. The critic carries most of
   the weight, which is why §5 comes first.
-  - Later: a transposition table keyed by Zobrist hash. Different unit orders
-    within a turn often reach the same position.
+  - Later: a transposition table keyed by `state_hash` (§2), in an
+    `absl::flat_hash_map`. Different unit orders within a turn often reach
+    the same position. Abseil (LTS 20260817.0) is fetched for the
+    benchmarks so far: against `std::unordered_map`, 64-bit-key lookups are
+    1.8 vs 2.0 ns at 4K entries and 9.5 vs 35 ns at 1M, and inserts 3–11×
+    faster (M4 Pro).
 - **Batching across games:**
   - One `BatchedSearch` owns M concurrent games.
   - Each round, each tree descends to one leaf. With M ≥ 512 that is enough
@@ -947,7 +1005,8 @@ while training:
     module functions `legal_ids(state, sel)`, `legal_mask(state, sel)`,
     `step(state, sel, id)`, `step_action`, `action_steps` with a `Selection`
     (**done**)
-  - `from_snapshot()`, `zobrist`
+  - `from_snapshot()`; `state_hash(state, sel)` and `hash_batch(state_bytes[N])`
+    (**done**)
   - zero-copy numpy views for debugging
 - **Batch functions:** `encode_batch(state_bytes[N]) -> planes, globals`
   and `encode_policy_batch(state_bytes[N], picks[N, 3], n_picks[N]) ->
@@ -961,8 +1020,8 @@ while training:
 
 - **C++ (googletest, `tests/cpp/`):** maps, state bookkeeping, snapshots,
   movement, damage, every action kind, the turn start, CO powers, the
-  network encoding (the decision planes included) and legal actions (140
-  tests). CI runs them on Linux and
+  network encoding (the decision planes included), legal actions and the
+  transposition key (148 tests). CI runs them on Linux and
   macOS, in Release and under ASan/UBSan.
 - **Damage formula across all logged attacks:** every logged combat result
   must be in `outcomes()`. This checks the formula over the whole replay
@@ -986,7 +1045,13 @@ while training:
   - HP and funds stay in range (**done**)
   - the legal-action mask is non-empty until the game ends, and an id not
     in it changes nothing (**done**)
-  - the incremental Zobrist hash equals a hash recomputed from scratch
+- **Policy network** (`tests/python/test_policy.py`): each decision's
+  planes and label match stepping the action; the policy ignores padding,
+  where the board sits and the rest of the batch; flips map back; training
+  resumes; arena games end or are adjudicated.
+- **Transposition key** (`test_hash.cpp`, **done**): moves and builds in
+  either order give one key; slots, ids, the RNG and freed slots don't change
+  it; every rule input does, cargo slots and Sonja's hidden HP included.
 - **Benchmarks** (Google Benchmark, `bench/`; current numbers on an Apple
   M-series laptop in parentheses):
   - random games/sec
@@ -995,8 +1060,11 @@ while training:
   - copy + `apply`: a move (0.5 µs), a fight with rolled luck (0.2 µs), end
     of turn on a 30×30 board with ~50 units (0.3 µs); a fight with a Sonja
     unit whose display the opponent doesn't know (0.7 µs)
-  - `encode` (2.1 µs for that board in a 32×32 window)
+  - `encode` (2.1 µs for that board in a 32×32 window); a whole policy
+    decision, with the legal steps and the decision planes (2.9 µs)
   - `legal_ids` and `legal_actions` on that board (§3)
+  - `state_hash` (0.10 µs; `absl::Hash` over the raw bytes, which tells
+    transposed states apart, 0.08 µs); transposition-table lookups (§8)
   - MCTS simulations/sec, with a dummy net and with the real net
 
 ## 11. Milestones
@@ -1006,6 +1074,6 @@ while training:
 | M0 | Replay ingestion (Python): download + cache, parser, rules JSON | Thousands of replays parsed; settings/filter stats known |
 | M1 | C++ core + bindings: state, `from_snapshot`, movegen, all actions except CO powers, `outcomes`, turn start, `encode_batch` | Every logged attack in `outcomes()` (**done**); state, snapshots, movegen (**done**); apply and turn start, every checkable turn replayed exactly (**done**); `encode_batch`, v0 dataset, **critic v0** (**done**) |
 | M2 | Exact match: full replay stepping, all COs/powers, edge cases | CO powers' effects, missile aim, rain and snow (**done**); ≥ 99% of filtered replays fully verified; benchmarks in CI |
-| M3 | v1 datasets: all idle-phase states + action labels | Micro-step action space and legal mask (**done**); **Critic v1** + policy prior (behavior cloning); baselines: random, greedy, critic-greedy 1-ply |
+| M3 | v1 datasets: all idle-phase states + action labels | Micro-step action space and legal mask (**done**); policy prior (behavior cloning) with a value head that matches critic v0 (**done**); baselines: random (**done**), greedy, critic-greedy 1-ply |
 | M4 | Batched Gumbel MCTS with chance nodes, `collect`/`submit` | Search + critic beats critic-greedy; sims/sec measured |
 | M5 | Self-play loop: actors / learner / evaluator, mixed with human data | Elo rises across checkpoints vs. fixed baselines |

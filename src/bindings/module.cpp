@@ -18,6 +18,7 @@
 #include "core/combat.h"
 #include "core/config.h"
 #include "core/encode.h"
+#include "core/hash.h"
 #include "core/legal.h"
 #include "core/map.h"
 #include "core/movegen.h"
@@ -175,6 +176,37 @@ awbw::GameState load_snapshot(const awbw::MapData& m, const awbw::Settings& sett
 using StateRows = nb::ndarray<const uint8_t, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
 using PlaneOut = nb::ndarray<uint8_t, nb::ndim<4>, nb::c_contig, nb::device::cpu>;
 using GlobalOut = nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
+
+nb::ndarray<nb::numpy, uint64_t, nb::ndim<1>> hash_batch(StateRows states) {
+  const size_t n = states.shape(0);
+  if (states.shape(1) != sizeof(awbw::GameState))
+    throw nb::value_error(
+        ("states must have STATE_BYTES = " + std::to_string(sizeof(awbw::GameState)) + " columns")
+            .c_str());
+  auto* keys = new uint64_t[n];
+  nb::capsule owner(keys, [](void* p) noexcept { delete[] static_cast<uint64_t*>(p); });
+  std::string error;
+  {
+    nb::gil_scoped_release release;
+    awbw::GameState s;
+    const awbw::MapData* md = nullptr;
+    for (size_t i = 0; i < n && error.empty(); ++i) {
+      std::memcpy(&s, states.data() + i * sizeof s, sizeof s);  // rows needn't be aligned
+      if (!md || md->id != s.map_id) md = awbw::find_map(s.map_id);
+      if (!md) {
+        error = "map " + std::to_string(s.map_id) + " is not registered";
+      } else if (std::string bad = awbw::check_state(*md, s); !bad.empty()) {
+        error = bad;
+      } else {
+        keys[i] = awbw::state_hash(s);
+        continue;
+      }
+      error = "state " + std::to_string(i) + ": " + error;
+    }
+  }
+  if (!error.empty()) throw nb::value_error(error.c_str());
+  return nb::ndarray<nb::numpy, uint64_t, nb::ndim<1>>(keys, {n}, owner);
+}
 
 void encode_batch(StateRows states, PlaneOut planes, GlobalOut globals) {
   const size_t n = states.shape(0);
@@ -839,6 +871,17 @@ NB_MODULE(_core, m) {
         "Legal micro-step ids from `selection`, ascending (int64). An id is\n"
         "CHANNELS index * MAX_TILES + tile, or ID_END_TURN, ID_COP, ID_SCOP, ID_BUILD + unit\n"
         "type. Every id leads on to a legal action; empty once the game is over.");
+  m.def(
+      "state_hash",
+      [](const awbw::GameState& s, const awbw::Selection& sel) { return awbw::state_hash(s, sel); },
+      "state"_a, "selection"_a = awbw::Selection{},
+      "64-bit transposition-table key (core/hash.h): equal for states that play the same\n"
+      "whatever order of actions reached them, since unit slots and ids, the RNG and free\n"
+      "slots don't count. With a selection, the decision in progress (an idle one gives the\n"
+      "state's key). The same on every run.");
+  m.def("hash_batch", &hash_batch, "states"_a,
+        "state_hash of raw states [N, STATE_BYTES] (uint64 [N]); their maps must be registered,\n"
+        "and states are checked first.");
   m.def(
       "legal_mask",
       [](const awbw::GameState& s, const awbw::Selection& sel) {

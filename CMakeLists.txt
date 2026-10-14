@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.27...4.4)
+cmake_minimum_required(VERSION 3.28...4.4)
 project(awbw_selfplay LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -36,6 +36,7 @@ add_library(awbw_core STATIC
   src/core/belief.cpp
   src/core/combat.cpp
   src/core/encode.cpp
+  src/core/hash.cpp
   src/core/legal.cpp
   src/core/map.cpp
   src/core/movegen.cpp
@@ -93,6 +94,7 @@ if(AWBW_BUILD_TESTS)
     tests/cpp/test_belief.cpp
     tests/cpp/test_combat.cpp
     tests/cpp/test_encode.cpp
+    tests/cpp/test_hash.cpp
     tests/cpp/test_hidden_hp.cpp
     tests/cpp/test_legal.cpp
     tests/cpp/test_map.cpp
@@ -115,7 +117,18 @@ if(AWBW_BUILD_BENCHMARKS)
   set(BENCHMARK_ENABLE_WERROR OFF CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(benchmark)
 
+  # Abseil's Swiss tables, measured against std::unordered_map as the
+  # transposition table search will use (BM_TableFind).
+  FetchContent_Declare(abseil
+    URL https://github.com/abseil/abseil-cpp/archive/refs/tags/20260817.0.tar.gz
+    URL_HASH SHA256=f7e05179df39c45434cad433f5783840bb3788ef322976f9138bc6b72b3a107d
+    EXCLUDE_FROM_ALL)  # build only the libraries linked
+  set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
+  set(ABSL_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+  set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(abseil)
+
   add_executable(awbw_bench bench/bench_core.cpp)
-  target_link_libraries(awbw_bench PRIVATE awbw_core benchmark::benchmark_main)
+  target_link_libraries(awbw_bench PRIVATE awbw_core benchmark::benchmark_main absl::flat_hash_map absl::hash)
   target_include_directories(awbw_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp)
 endif()
