@@ -10,13 +10,14 @@ from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
-from .data.shards import UNKNOWN_RATING, ShardWriter
+from .data.build import build_v1, game_ratings
+from .data.shards import ShardWriter
 from .league import fetch_rotation, load_rotation
 from .maps import fetch_map
 from .net import Http, HttpError, cache_dir
 from .replay import load_replay
 from .replay.combat_check import check_file
-from .replay.extract import DRAW, extract_v0
+from .replay.extract import extract_v0
 from .replay.move_check import MoveReport
 from .replay.move_check import check_replay as check_moves
 from .replay.sources import (
@@ -82,11 +83,16 @@ def main(argv: list[str] | None = None) -> int:
     mv.add_argument("--workers", type=int)
     mv.add_argument("--show", type=int, default=10, help="print this many failures (default 10)")
 
-    ds = sub.add_parser("dataset", help="build the v0 critic dataset (turn-start states + results) from replays")
+    ds = sub.add_parser(
+        "dataset", help="build a dataset from replays: v0 (turn-start states + results) or v1 (every action)"
+    )
     ds.add_argument("dir", nargs="?", type=Path, help="replay directory (default: the cache)")
-    ds.add_argument("--out", type=Path, help="dataset directory (default: cache/datasets/v0)")
+    ds.add_argument("--v1", action="store_true", help="a sample per action taken, labelled for the policy")
+    ds.add_argument("--out", type=Path, help="dataset directory (default: cache/datasets/v0 or v1)")
     ds.add_argument("--workers", type=int)
-    ds.add_argument("--games-per-shard", type=int, default=1000)
+    ds.add_argument(
+        "--games-per-shard", type=int, help="v0: games per shard (default 1000); v1: replays per shard (100)"
+    )
     ds.add_argument("--overwrite", action="store_true", help="replace a dataset already in --out")
 
     tc = sub.add_parser("check-turns", help="replay every turn with the engine and compare it with the next snapshot")
@@ -119,6 +125,37 @@ def main(argv: list[str] | None = None) -> int:
     ec.add_argument("--split", choices=["val", "train", "all"], default="val")
     ec.add_argument("--min-rating", type=int, default=0)
     ec.add_argument("--device", default="auto")
+
+    tp = sub.add_parser("train-policy", help="pre-train the policy-value network on a v1 dataset")
+    tp.add_argument("--data", type=Path, help="dataset directory (default: cache/datasets/v1)")
+    tp.add_argument("--out", type=Path, required=True, help="run directory for checkpoints and metrics.jsonl")
+    tp.add_argument("--epochs", type=int)
+    tp.add_argument("--fraction", type=float, help="share of the training decisions per epoch (default 0.25)")
+    tp.add_argument("--batch-size", type=int)
+    tp.add_argument("--lr", type=float)
+    tp.add_argument("--weight-decay", type=float)
+    tp.add_argument("--value-weight", type=float, help="weight of the value loss (default 1)")
+    tp.add_argument("--value-fraction", type=float, help="share of decisions whose result trains the value (0.05)")
+    tp.add_argument("--min-rating", type=int, help="keep games whose players are both rated at least this")
+    tp.add_argument("--rating-dropout", type=float, help="chance of hiding a sample's ratings (default 0.25)")
+    tp.add_argument("--val-rows", type=float, help="share of validation actions scored (default 0.1)")
+    tp.add_argument("--shards-at-once", type=int, help="shards whose decisions are shuffled together (default 8)")
+    tp.add_argument("--eval-every", type=int, help="steps between evaluations (default: once per epoch)")
+    tp.add_argument("--seed", type=int)
+    tp.add_argument("--no-augment", dest="augment", action="store_false", default=None)
+    tp.add_argument("--compile", action="store_true", default=None, help="torch.compile the network")
+    tp.add_argument("--channels", type=int)
+    tp.add_argument("--blocks", type=int)
+    tp.add_argument("--device", default="auto", help="cuda, mps, cpu or auto (default)")
+    tp.add_argument("--resume", action="store_true", help="continue the run in --out from its last epoch")
+
+    ep = sub.add_parser("eval-policy", help="validation metrics of a saved policy-value network")
+    ep.add_argument("checkpoint", type=Path)
+    ep.add_argument("--data", type=Path, help="dataset directory (default: cache/datasets/v1)")
+    ep.add_argument("--split", choices=["val", "train", "all"], default="val")
+    ep.add_argument("--rows", type=float, default=0.1, help="share of the split's actions scored (default 0.1)")
+    ep.add_argument("--min-rating", type=int, default=0)
+    ep.add_argument("--device", default="auto")
 
     va = sub.add_parser("value", help="a saved critic's view of a replay, turn by turn")
     va.add_argument("checkpoint", type=Path)
@@ -154,6 +191,8 @@ def main(argv: list[str] | None = None) -> int:
         "dataset": _dataset,
         "train-critic": _train_critic,
         "eval-critic": _eval_critic,
+        "train-policy": _train_policy,
+        "eval-policy": _eval_policy,
         "value": _value,
         "live": _live,
     }
@@ -404,13 +443,15 @@ def _cached_index() -> tuple[dict[int, IndexEntry], RatingHistory]:
 
 def _dataset(args, http: Http) -> int:
     root = args.dir or cache_dir() / "replays"
-    out = args.out or cache_dir() / "datasets" / "v0"
+    out = args.out or cache_dir() / "datasets" / ("v1" if args.v1 else "v0")
     paths = sorted(root.glob("*.zip"), key=lambda p: int(p.stem) if p.stem.isdigit() else 0)
     if args.overwrite:
         for old in [*out.glob("shard-*.npz"), out / "maps.npz", out / "meta.json"]:
             old.unlink(missing_ok=True)
-    writer = ShardWriter(out, games_per_shard=args.games_per_shard)
     index, history = _cached_index()
+    if args.v1:
+        return _dataset_v1(args, paths, out, index, history)
+    writer = ShardWriter(out, games_per_shard=args.games_per_shard or 1000)
     rejected: Counter = Counter()
     ratings_seen: Counter = Counter()
     ends: Counter = Counter()
@@ -422,17 +463,8 @@ def _dataset(args, http: Http) -> int:
             else:
                 unstepped += g.unstepped
                 hp_unknown += g.hp_unknown
-                ratings = (UNKNOWN_RATING, UNKNOWN_RATING)
-                if (entry := index.get(g.game_id)) is None:
-                    ratings_seen["not in an index"] += 1
-                elif g.winner != DRAW and tuple(p.lost for p in entry.players) != (g.winner != 0, g.winner != 1):
-                    ratings_seen["index result disagrees; dropped"] += 1
-                else:
-                    # The index's own row rates players after the game; take their rating from before it.
-                    before = [history.before(p.name, g.start_date) if g.start_date else None for p in entry.players]
-                    r0, r1 = (UNKNOWN_RATING if r is None else r for r in before)
-                    ratings = (r0, r1)
-                    ratings_seen["known" if None not in before else "a player has no earlier indexed game"] += 1
+                ratings, how = game_ratings(g, index, history)
+                ratings_seen[how] += 1
                 ends[g.end_action] += 1
                 writer.add(g, ratings)
             if n % 2000 == 0:
@@ -454,6 +486,28 @@ def _dataset(args, http: Http) -> int:
     print(f"rejected: {meta['rejected']}")
     print(f"ratings: {meta['ratings']}; ended by: {meta['ended_by']}")
     print(f"turns the engine couldn't step: {unstepped}; HP beliefs restarted after them: {hp_unknown}")
+    return 0
+
+
+def _dataset_v1(args, paths: list[Path], out: Path, index, history) -> int:
+    meta, st = build_v1(
+        paths,
+        out,
+        index,
+        history,
+        workers=args.workers,
+        replays_per_shard=args.games_per_shard or 100,
+        kind="v1: the state before every action taken, labelled with its micro-steps and the result",
+        built=datetime.date.today().isoformat(),
+        replays=len(paths),
+        min_days=MIN_DAYS,
+    )
+    size = sum(f.stat().st_size for f in out.glob("*.npz"))
+    print(f"{st.games} games, {st.samples:,} samples in {len(st.shards)} shards ({size / 1e6:.0f} MB) -> {out}")
+    print(f"labelled: {st.labelled:,} actions, {st.steps:,} micro-steps ({st.forced:,} forced)")
+    print(f"rejected: {meta['rejected']}")
+    print(f"ratings: {meta['ratings']}; ended by: {meta['ended_by']}")
+    print(f"turns the engine couldn't step: {st.unstepped}; HP beliefs restarted after them: {st.hp_unknown}")
     return 0
 
 
@@ -501,6 +555,57 @@ def _eval_critic(args, http: Http) -> int:
     print("  calibration (predicted win chance -> observed):")
     for pred, obs, n in m["calibration"]:
         print(f"    {pred:5.1%} -> {obs:5.1%}  ({n:,})")
+    return 0
+
+
+def _train_policy(args, http: Http) -> int:
+    from .nn.critic import pick_device
+    from .nn.model import PolicyConfig
+    from .nn.train_policy import PolicyTrainConfig, train
+
+    def given(cls):
+        return cls(**{k: getattr(args, k) for k in cls.__dataclass_fields__ if getattr(args, k, None) is not None})
+
+    def log(line: str) -> None:
+        print(line, flush=True)
+
+    data = args.data or cache_dir() / "datasets" / "v1"
+    device = pick_device(args.device)
+    train(data, args.out, given(PolicyTrainConfig), given(PolicyConfig), device=device, resume=args.resume, log=log)
+    return 0
+
+
+def _eval_policy(args, http: Http) -> int:
+    from .data.shards import Dataset
+    from .nn.critic import pick_device
+    from .nn.policy import load_policy
+    from .nn.train_critic import rating_filter
+    from .nn.train_policy import evaluate_policy, evaluate_value
+
+    device = pick_device(args.device)
+    ds = Dataset(args.data or cache_dir() / "datasets" / "v1")
+    net, info = load_policy(args.checkpoint, device)
+    val_fraction = info.get("train", {}).get("val_fraction", 0.05)
+    keep = rating_filter(args.min_rating)
+    pol = evaluate_policy(
+        net, ds, device, keep=keep, val_fraction=val_fraction, row_fraction=args.rows, split=args.split
+    )
+    print(f"{args.checkpoint}: {pol['n']:,} {args.split} decisions of {pol.get('actions', 0):,} actions")
+    print(f"  policy loss {pol['loss']:.4f} (uniform {pol['uniform']:.4f})  accuracy {pol['accuracy']:.3f}")
+    print(f"  whole actions: loss {pol['action_loss']:.4f}  accuracy {pol['action_accuracy']:.3f}")
+    print("  by phase:")
+    for name, m in pol["by_phase"].items():
+        print(
+            f"    {name:>8s}  {m['n']:9,d}  loss {m['loss']:.4f} (uniform {m['uniform']:.4f})  "
+            f"accuracy {m['accuracy']:.3f}"
+        )
+    for given in (True, False) if net.cfg.ratings else (True,):
+        v = evaluate_value(net, ds, device, keep=keep, val_fraction=val_fraction, split=args.split, ratings=given)
+        what = "with ratings" if given else "without ratings"
+        print(
+            f"  value at {v['n']:,} turn starts, {what}: loss {v['loss']:.4f}  accuracy {v['accuracy'] or 0:.3f}  "
+            f"brier {v['brier']:.4f}  ece {v['ece']:.4f}"
+        )
     return 0
 
 

@@ -213,6 +213,84 @@ void encode_batch(StateRows states, PlaneOut planes, GlobalOut globals) {
   if (!error.empty()) throw nb::value_error(error.c_str());
 }
 
+using PickRows = nb::ndarray<const uint16_t, nb::shape<-1, 3>, nb::c_contig, nb::device::cpu>;
+using CountIn = nb::ndarray<const uint8_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
+using MaskOut = nb::ndarray<uint8_t, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
+using TargetOut = nb::ndarray<int64_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
+
+void encode_policy_batch(StateRows states, PickRows picks, CountIn n_picks, PlaneOut planes,
+                         GlobalOut globals, MaskOut nonspatial, std::optional<TargetOut> targets) {
+  using namespace awbw;
+  const size_t n = states.shape(0);
+  constexpr int kAllPlanes = kNumPlanes + kNumSelectionPlanes;
+  constexpr int kAllGlobals = kNumGlobals + kNumSelectionGlobals;
+  if (states.shape(1) != sizeof(GameState))
+    throw nb::value_error(
+        ("states must have STATE_BYTES = " + std::to_string(sizeof(GameState)) + " columns")
+            .c_str());
+  if (picks.shape(0) != n || n_picks.shape(0) != n)
+    throw nb::value_error("picks must be [N, 3] and n_picks [N]");
+  if (planes.shape(0) != n || planes.shape(1) != kAllPlanes)
+    throw nb::value_error("planes must be [N, NUM_PLANES + NUM_SELECTION_PLANES, H, W]");
+  if (globals.shape(0) != n || globals.shape(1) != kAllGlobals)
+    throw nb::value_error("globals must be [N, NUM_GLOBALS + NUM_SELECTION_GLOBALS]");
+  if (nonspatial.shape(0) != n || nonspatial.shape(1) != kNumNonSpatialIds)
+    throw nb::value_error("nonspatial must be [N, NUM_NONSPATIAL_IDS]");
+  if (targets && targets->shape(0) != n) throw nb::value_error("targets must be [N]");
+  const int h = static_cast<int>(planes.shape(2)), w = static_cast<int>(planes.shape(3));
+  const size_t plane_stride = size_t{kAllPlanes} * h * w;
+  std::string error;
+  {
+    nb::gil_scoped_release release;
+    GameState s;
+    const MapData* md = nullptr;
+    std::vector<uint16_t> ids;
+    for (size_t i = 0; i < n && error.empty(); ++i) {
+      std::memcpy(&s, states.data() + i * sizeof s, sizeof s);
+      if (!md || md->id != s.map_id) md = find_map(s.map_id);
+      const int k = n_picks.data()[i];
+      if (!md) {
+        error = "map " + std::to_string(s.map_id) + " is not registered";
+      } else if (md->height > h || md->width > w) {
+        error = "map " + std::to_string(s.map_id) + " is " + std::to_string(md->width) + "x" +
+                std::to_string(md->height) + ", larger than the planes";
+      } else if (std::string bad = check_state(*md, s); !bad.empty()) {
+        error = bad;
+      } else if (k > (targets ? 2 : 3)) {
+        error = "too many picks";
+      } else {
+        // The picks only move the selection; the state stays as it is.
+        Selection sel;
+        bool ok = true;
+        for (int j = 0; j < k && ok; ++j) {
+          Action a;
+          const int id = picks.data()[i * 3 + j];
+          ok = !step_action(*md, s, sel, id, a) && step(*md, s, sel, id) == kOk;
+        }
+        if (!ok && !targets) {
+          error = "a pick isn't legal";
+        } else {
+          uint8_t* p = planes.data() + i * plane_stride;
+          float* g = globals.data() + i * kAllGlobals;
+          encode(*md, s, p, h, w, g);
+          legal_ids(*md, s, sel, ids);
+          encode_selection(*md, s, sel, ids.data(), static_cast<int>(ids.size()),
+                           p + size_t{kNumPlanes} * h * w, h, w, g + kNumGlobals,
+                           nonspatial.data() + i * kNumNonSpatialIds);
+          if (targets) {
+            const uint16_t want = picks.data()[i * 3 + k];
+            const bool legal = ok && std::binary_search(ids.begin(), ids.end(), want);
+            targets->data()[i] = legal ? policy_index(*md, want, h, w) : -1;
+          }
+          continue;
+        }
+      }
+      error = "state " + std::to_string(i) + ": " + error;
+    }
+  }
+  if (!error.empty()) throw nb::value_error(error.c_str());
+}
+
 }  // namespace
 
 NB_MODULE(_core, m) {
@@ -263,6 +341,45 @@ NB_MODULE(_core, m) {
         "(float32). Each board sits at the top-left of its H x W window, the rest 0. Every\n"
         "state's map must be registered and fit; states are checked before encoding.\n"
         "PLANES lists each plane's (name, number of values, categorical).");
+
+  m.attr("SELECTION_ENCODE_VERSION") = awbw::kSelectionEncodeVersion;
+  m.attr("NUM_SELECTION_PLANES") = static_cast<int>(awbw::kNumSelectionPlanes);
+  m.attr("NUM_SELECTION_GLOBALS") = static_cast<int>(awbw::kNumSelectionGlobals);
+  m.attr("NUM_NONSPATIAL_IDS") = awbw::kNumNonSpatialIds;
+  {
+    nb::list planes, globals;
+    for (const awbw::PlaneSpec& p : awbw::kSelectionPlanes)
+      planes.append(nb::make_tuple(p.name, p.values, p.categorical));
+    for (int i = 0; i < awbw::kNumSelectionGlobals; ++i)
+      globals.append(awbw::selection_global_name(i));
+    m.attr("SELECTION_PLANES") = nb::tuple(planes);
+    m.attr("SELECTION_GLOBAL_NAMES") = nb::tuple(globals);
+  }
+  m.def("policy_size", &awbw::policy_size, "h"_a, "w"_a,
+        "Number of policy logits over an h x w window: NUM_CHANNELS * h * w spatial ones,\n"
+        "then NUM_NONSPATIAL_IDS.");
+  m.def(
+      "policy_index",
+      [](const awbw::GameState& s, int id, int h, int w) {
+        const awbw::MapData& md = map_for(s);
+        if (id < 0 || id >= awbw::kNumActionIds) throw nb::value_error("not an action id");
+        if (md.height > h || md.width > w) throw nb::value_error("the map is larger than h x w");
+        return awbw::policy_index(md, id, h, w);
+      },
+      "state"_a, "id"_a, "h"_a, "w"_a,
+      "Where micro-step `id` is among the policy logits over an h x w window: the channel\n"
+      "times h * w plus y * w + x for a spatial id, NUM_CHANNELS * h * w plus its place\n"
+      "after ID_END_TURN for the others.");
+  m.def("encode_policy_batch", &encode_policy_batch, "states"_a, "picks"_a, "n_picks"_a, "planes"_a,
+        "globals"_a, "nonspatial"_a, "targets"_a = nb::none(),
+        "Encode decisions for the policy network. Decision i is in state i after its first\n"
+        "n_picks[i] picks (micro-steps that don't complete an action) of picks[i] [N, 3]:\n"
+        "planes [N, NUM_PLANES + NUM_SELECTION_PLANES, H, W] (encode_batch's, then\n"
+        "SELECTION_PLANES), globals [N, NUM_GLOBALS + NUM_SELECTION_GLOBALS] and the\n"
+        "legality of the non-spatial ids [N, NUM_NONSPATIAL_IDS] (uint8). With `targets`\n"
+        "[N] (int64), the step taken next, picks[i][n_picks[i]], goes there as its\n"
+        "policy_index, or -1 if it (or a pick before it) isn't legal; without, a pick\n"
+        "that isn't legal raises.");
 
   m.attr("OK") = static_cast<int>(awbw::kOk);
   m.attr("TRAPPED") = static_cast<int>(awbw::kTrapped);
@@ -667,6 +784,7 @@ NB_MODULE(_core, m) {
         "Unhide", "Explode", "Fire", "AttackSeam", "Repair",  "Launch", "Unload1", "Unload2"};
     for (const char* n : names) channels.append(n);
     m.attr("CHANNELS") = nb::tuple(channels);
+    m.attr("NUM_CHANNELS") = static_cast<int>(awbw::kNumChannels);
     m.attr("PHASES") = nb::make_tuple("idle", "selected", "moved", "factory");
   }
   m.attr("ID_END_TURN") = awbw::kIdEndTurn;

@@ -164,4 +164,48 @@ void encode(const MapData& m, const GameState& s, uint8_t* planes, int h, int w,
   g[kGMovedFirst] = me == 0;
 }
 
+std::string selection_global_name(int i) {
+  static const char* const kPhaseNames[4] = {"idle", "selected", "moved", "factory"};
+  if (i >= kSelGPhase && i < kSelGPhase + 4) return std::string("phase.") + kPhaseNames[i];
+  if (i >= kSelGUnitType && i < kNumSelectionGlobals)
+    return std::string("picked.") + kUnits[i - kSelGUnitType].name;
+  return "";
+}
+
+void encode_selection(const MapData& m, const GameState& s, const Selection& sel,
+                      const uint16_t* ids, int n, uint8_t* planes, int h, int w, float* g,
+                      uint8_t* nonspatial) {
+  std::memset(planes, 0, sizeof(uint8_t) * kNumSelectionPlanes * h * w);
+  std::fill(g, g + kNumSelectionGlobals, 0.0f);
+  std::memset(nonspatial, 0, kNumNonSpatialIds);
+  auto cell = [&](int plane, int tile) -> uint8_t& {
+    return planes[(static_cast<size_t>(plane) * h + m.y_of(tile)) * w + m.x_of(tile)];
+  };
+  g[kSelGPhase + sel.phase] = 1.0f;
+  switch (sel.phase) {
+    case kPhaseSelected:
+      cell(kSelPick, sel.tile) = 1;
+      g[kSelGUnitType + s.units[sel.unit].type] = 1.0f;
+      break;
+    case kPhaseMoved:
+      cell(kSelPick, s.units[sel.unit].tile) = 1;
+      cell(kSelPick, sel.tile) |= 2;
+      g[kSelGUnitType + s.units[sel.unit].type] = 1.0f;
+      break;
+    case kPhaseFactory:
+      cell(kSelPick, sel.tile) = 4;
+      break;
+    default:
+      break;
+  }
+  for (int i = 0; i < n; ++i) {
+    const int id = ids[i];
+    if (id >= kIdEndTurn) {
+      nonspatial[id - kIdEndTurn] = 1;
+    } else {
+      cell(kSelLegal + id / kMaxTiles, id % kMaxTiles) = 1;
+    }
+  }
+}
+
 }  // namespace awbw

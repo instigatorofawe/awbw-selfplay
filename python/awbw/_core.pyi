@@ -62,6 +62,43 @@ def encode_batch(states: Annotated[NDArray[numpy.uint8], dict(shape=(None, None)
     PLANES lists each plane's (name, number of values, categorical).
     """
 
+SELECTION_ENCODE_VERSION: int = 1
+
+NUM_SELECTION_PLANES: int = 18
+
+NUM_SELECTION_GLOBALS: int = 29
+
+NUM_NONSPATIAL_IDS: int = 28
+
+SELECTION_PLANES: tuple = ...
+
+SELECTION_GLOBAL_NAMES: tuple = ...
+
+def policy_size(h: int, w: int) -> int:
+    """
+    Number of policy logits over an h x w window: NUM_CHANNELS * h * w spatial ones,
+    then NUM_NONSPATIAL_IDS.
+    """
+
+def policy_index(state: GameState, id: int, h: int, w: int) -> int:
+    """
+    Where micro-step `id` is among the policy logits over an h x w window: the channel
+    times h * w plus y * w + x for a spatial id, NUM_CHANNELS * h * w plus its place
+    after ID_END_TURN for the others.
+    """
+
+def encode_policy_batch(states: Annotated[NDArray[numpy.uint8], dict(shape=(None, None), order='C', device='cpu', writable=False)], picks: Annotated[NDArray[numpy.uint16], dict(shape=(None, 3), order='C', device='cpu', writable=False)], n_picks: Annotated[NDArray[numpy.uint8], dict(shape=(None,), order='C', device='cpu', writable=False)], planes: Annotated[NDArray[numpy.uint8], dict(shape=(None, None, None, None), order='C', device='cpu')], globals: Annotated[NDArray[numpy.float32], dict(shape=(None, None), order='C', device='cpu')], nonspatial: Annotated[NDArray[numpy.uint8], dict(shape=(None, None), order='C', device='cpu')], targets: Annotated[NDArray[numpy.int64], dict(shape=(None,), order='C', device='cpu')] | None = None) -> None:
+    """
+    Encode decisions for the policy network. Decision i is in state i after its first
+    n_picks[i] picks (micro-steps that don't complete an action) of picks[i] [N, 3]:
+    planes [N, NUM_PLANES + NUM_SELECTION_PLANES, H, W] (encode_batch's, then
+    SELECTION_PLANES), globals [N, NUM_GLOBALS + NUM_SELECTION_GLOBALS] and the
+    legality of the non-spatial ids [N, NUM_NONSPATIAL_IDS] (uint8). With `targets`
+    [N] (int64), the step taken next, picks[i][n_picks[i]], goes there as its
+    policy_index, or -1 if it (or a pick before it) isn't legal; without, a pick
+    that isn't legal raises.
+    """
+
 OK: int = 0
 
 TRAPPED: int = 1
@@ -433,6 +470,8 @@ def apply(state: GameState, kind: int, unit: int = -1, to: tuple[int, int] | Non
     """
 
 CHANNELS: tuple = ...
+
+NUM_CHANNELS: int = 17
 
 PHASES: tuple = ('idle', 'selected', 'moved', 'factory')
 

@@ -6,6 +6,7 @@
 
 #include "core/belief.h"
 #include "core/encode.h"
+#include "core/legal.h"
 #include "test_util.h"
 
 namespace awbw {
@@ -241,6 +242,109 @@ TEST(Encode, GlobalNamesAreUnique) {
   EXPECT_EQ(static_cast<int>(names.size()), kNumGlobals);
   EXPECT_EQ(global_name(kSideGlobals + kGCo + kSasha), "opp.co.Sasha");
   EXPECT_EQ(global_name(kGWeather + int{kRain}), "weather.rain");
+}
+
+struct EncodedSelection {
+  int h, w;
+  std::vector<uint8_t> planes, nonspatial;
+  std::vector<float> globals;
+  std::vector<uint16_t> ids;
+
+  EncodedSelection(const MapData& m, const GameState& s, const Selection& sel, int h_ = 6,
+                   int w_ = 7)
+      : h(h_),
+        w(w_),
+        planes(size_t{kNumSelectionPlanes} * h_ * w_, 0xAB),
+        nonspatial(kNumNonSpatialIds, 0xAB),
+        globals(kNumSelectionGlobals, -1.0f) {
+    legal_ids(m, s, sel, ids);
+    encode_selection(m, s, sel, ids.data(), static_cast<int>(ids.size()), planes.data(), h, w,
+                     globals.data(), nonspatial.data());
+  }
+  int at(int plane, int x, int y) const {
+    return planes[(static_cast<size_t>(plane) * h + y) * w + x];
+  }
+  // Every legal plane's cells and the non-spatial mask, as the ids they mark.
+  std::vector<uint16_t> marked(const MapData& m) const {
+    std::vector<uint16_t> out;
+    for (int c = 0; c < kNumChannels; ++c)
+      for (int t = 0; t < m.n_tiles; ++t)
+        if (at(kSelLegal + c, m.x_of(t), m.y_of(t))) out.push_back(action_id(c, t));
+    for (int k = 0; k < kNumNonSpatialIds; ++k)
+      if (nonspatial[k]) out.push_back(static_cast<uint16_t>(kIdEndTurn + k));
+    return out;
+  }
+};
+
+TEST(EncodeSelection, MarksThePickAndWhatIsLegal) {
+  const MapData m = make_map({"B....", ".....", "....b"});
+  GameState s = make_state(m);
+  const int tank = put(s, m, kTank, 0, 1, 1);
+  put(s, m, kInfantry, 1, 3, 1);
+  s.players[0].funds = 1000;
+  s.players[0].cop_cost = cop_cost(s.players[0].co, 0);
+  s.players[0].scop_cost = scop_cost(s.players[0].co, 0);
+  s.players[0].power = s.players[0].cop_cost;  // enough for the COP only
+
+  const EncodedSelection idle(m, s, Selection{});
+  EXPECT_EQ(idle.marked(m), idle.ids);
+  EXPECT_EQ(idle.at(kSelLegal + int{kChSelect}, 1, 1), 1);  // the Tank
+  EXPECT_EQ(idle.at(kSelLegal + int{kChSelect}, 0, 0), 1);  // the base
+  EXPECT_EQ(idle.at(kSelLegal + int{kChDelete}, 1, 1), 1);
+  EXPECT_EQ(idle.nonspatial[kIdEndTurn - kIdEndTurn], 1);
+  EXPECT_EQ(idle.nonspatial[kIdCop - kIdEndTurn], 1);
+  EXPECT_EQ(idle.nonspatial[kIdScop - kIdEndTurn], 0);
+  EXPECT_FLOAT_EQ(idle.globals[kSelGPhase + int{kPhaseIdle}], 1.0f);
+  for (int t = 0; t < m.n_tiles; ++t) EXPECT_EQ(idle.at(kSelPick, m.x_of(t), m.y_of(t)), 0);
+  // Outside the 5 x 3 board everything is 0, whatever the buffer held.
+  EXPECT_EQ(idle.at(kSelLegal + int{kChSelect}, 6, 5), 0);
+
+  const Selection picked{kPhaseSelected, static_cast<uint8_t>(tank),
+                         static_cast<uint16_t>(m.tile(1, 1))};
+  const EncodedSelection sel(m, s, picked);
+  EXPECT_EQ(sel.marked(m), sel.ids);
+  EXPECT_EQ(sel.at(kSelPick, 1, 1), 1);
+  EXPECT_EQ(sel.at(kSelLegal + int{kChMove}, 2, 1), 1);
+  EXPECT_EQ(sel.at(kSelLegal + int{kChMove}, 3, 1), 0);  // the enemy's tile
+  EXPECT_FLOAT_EQ(sel.globals[kSelGPhase + int{kPhaseSelected}], 1.0f);
+  EXPECT_FLOAT_EQ(sel.globals[kSelGUnitType + int{kTank}], 1.0f);
+  EXPECT_EQ(sel.nonspatial[0], 0);
+
+  const Selection moved{kPhaseMoved, static_cast<uint8_t>(tank),
+                        static_cast<uint16_t>(m.tile(2, 1))};
+  const EncodedSelection mv(m, s, moved);
+  EXPECT_EQ(mv.marked(m), mv.ids);
+  EXPECT_EQ(mv.at(kSelPick, 1, 1), 1);
+  EXPECT_EQ(mv.at(kSelPick, 2, 1), 2);
+  EXPECT_EQ(mv.at(kSelLegal + int{kChWait}, 2, 1), 1);
+  EXPECT_EQ(mv.at(kSelLegal + int{kChFire}, 3, 1), 1);
+  const Selection stays{kPhaseMoved, static_cast<uint8_t>(tank),
+                        static_cast<uint16_t>(m.tile(1, 1))};
+  EXPECT_EQ(EncodedSelection(m, s, stays).at(kSelPick, 1, 1), 3);
+
+  const Selection base{kPhaseFactory, kNoUnit, static_cast<uint16_t>(m.tile(0, 0))};
+  const EncodedSelection fac(m, s, base);
+  EXPECT_EQ(fac.marked(m), fac.ids);
+  EXPECT_EQ(fac.at(kSelPick, 0, 0), 4);
+  EXPECT_EQ(fac.nonspatial[kIdBuild + kInfantry - kIdEndTurn], 1);
+  EXPECT_EQ(fac.nonspatial[kIdBuild + kTank - kIdEndTurn], 0);
+  EXPECT_FLOAT_EQ(fac.globals[kSelGPhase + int{kPhaseFactory}], 1.0f);
+}
+
+TEST(EncodeSelection, PolicyIndexLaysIdsOutOverTheWindow) {
+  const MapData m = make_map({"....", "...."});
+  EXPECT_EQ(policy_index(m, action_id(kChMove, m.tile(3, 1)), 6, 7), (kChMove * 6 + 1) * 7 + 3);
+  EXPECT_EQ(policy_index(m, kIdEndTurn, 6, 7), kNumChannels * 6 * 7);
+  EXPECT_EQ(policy_index(m, kIdBuild + kTank, 6, 7), kNumChannels * 6 * 7 + 3 + kTank);
+  EXPECT_EQ(policy_size(6, 7), kNumChannels * 6 * 7 + kNumNonSpatialIds);
+  EXPECT_EQ(policy_size(kMaxHeight, kMaxWidth), kNumActionIds);
+}
+
+TEST(EncodeSelection, GlobalNamesAreUnique) {
+  std::set<std::string> names;
+  for (int i = 0; i < kNumSelectionGlobals; ++i) names.insert(selection_global_name(i));
+  EXPECT_EQ(static_cast<int>(names.size()), kNumSelectionGlobals);
+  EXPECT_EQ(selection_global_name(kSelGUnitType + int{kTank}), "picked.Tank");
 }
 
 }  // namespace

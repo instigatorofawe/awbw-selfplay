@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 
+#include "core/legal.h"
 #include "core/map.h"
 #include "core/state.h"
 #include "core/tables.h"
@@ -119,5 +120,62 @@ std::string global_name(int i);
 // board sits at the top-left of the h x w window and every other cell is 0.
 // Needs m.height <= h, m.width <= w, and a state that passes check_state.
 void encode(const MapData& m, const GameState& s, uint8_t* planes, int h, int w, float* globals);
+
+// --- The decision in progress (policy input) --------------------------------
+//
+// The policy network reads encode()'s output plus the micro-step decision
+// being made (legal.h's Selection): the picked unit's or factory's tile, the
+// tile the unit moves to, the phase, and where each channel's step is legal.
+// The non-spatial ids' legality comes back on its own, for the mask over the
+// policy logits; the spatial ids' mask is the legal planes.
+//
+// Bump kSelectionEncodeVersion whenever one of these changes meaning.
+inline constexpr int kSelectionEncodeVersion = 1;
+
+enum SelectionPlane : uint8_t {
+  kSelPick,   // 0; 1 the picked unit's tile, 2 where it moves, 3 both (it stays), 4 the factory
+  kSelLegal,  // kNumChannels planes: 1 where the channel's step is legal (legal.h's Channel)
+  kNumSelectionPlanes = kSelLegal + kNumChannels,
+};
+
+inline constexpr PlaneSpec kSelectionPlanes[kNumSelectionPlanes] = {
+    {"pick", 5, true},          {"legal.select", 2, false},      {"legal.delete", 2, false},
+    {"legal.move", 2, false},   {"legal.wait", 2, false},        {"legal.capture", 2, false},
+    {"legal.load", 2, false},   {"legal.join", 2, false},        {"legal.supply", 2, false},
+    {"legal.hide", 2, false},   {"legal.unhide", 2, false},      {"legal.explode", 2, false},
+    {"legal.fire", 2, false},   {"legal.attack_seam", 2, false}, {"legal.repair", 2, false},
+    {"legal.launch", 2, false}, {"legal.unload1", 2, false},     {"legal.unload2", 2, false},
+};
+
+enum SelectionGlobal : uint8_t {
+  kSelGPhase,                      // one-hot Phase
+  kSelGUnitType = kSelGPhase + 4,  // one-hot type of the picked unit
+  kNumSelectionGlobals = kSelGUnitType + kNumUnitTypes,
+};
+
+// The ids after the spatial ones: End Turn, COP, SCOP, then Build + type.
+inline constexpr int kNumNonSpatialIds = kNumActionIds - kIdEndTurn;
+
+// "phase.idle", "picked.Infantry", ...
+std::string selection_global_name(int i);
+
+// Encode the decision `sel`, from which legal_ids() gave the n ids `ids`,
+// into planes [kNumSelectionPlanes][h][w] and globals [kNumSelectionGlobals],
+// laid out as encode()'s, and the non-spatial ids' legality
+// [kNumNonSpatialIds] as 0 / 1.
+void encode_selection(const MapData& m, const GameState& s, const Selection& sel,
+                      const uint16_t* ids, int n, uint8_t* planes, int h, int w, float* globals,
+                      uint8_t* nonspatial);
+
+// A policy's logits over an h x w window: the spatial ids at
+// channel * h * w + y * w + x, then the non-spatial ones in order.
+inline constexpr int policy_size(int h, int w) { return kNumChannels * h * w + kNumNonSpatialIds; }
+
+// Where step `id` is among those logits.
+inline int policy_index(const MapData& m, int id, int h, int w) {
+  if (id >= kIdEndTurn) return kNumChannels * h * w + (id - kIdEndTurn);
+  const int tile = id % kMaxTiles;
+  return (id / kMaxTiles * h + m.y_of(tile)) * w + m.x_of(tile);
+}
 
 }  // namespace awbw

@@ -13,7 +13,7 @@ from awbw.maps import map_path
 from awbw.net import cache_dir
 from awbw.replay import load_replay
 from awbw.replay.combat_check import check_file
-from awbw.replay.extract import extract_v0
+from awbw.replay.extract import extract_v0, extract_v1
 from awbw.replay.move_check import check_replay as check_moves
 from awbw.replay.step_check import check_file as check_turns
 
@@ -160,3 +160,29 @@ def test_random_micro_steps_from_logged_positions(path):
             assert len(ids), f"no legal step on day {s.day}"
             assert _core.step(s, sel, int(rng.choice(ids))) in (_core.OK, _core.TRAPPED)
             assert s.check() == ""
+
+
+@pytest.mark.skipif(not PATHS, reason="no cached replays")
+@pytest.mark.parametrize("path", PATHS[-20:], ids=[p.stem for p in PATHS[-20:]])
+def test_v1_labels_every_action_with_legal_steps(path):
+    """v1's turn starts are v0's samples, and each action's micro-steps are legal in
+    turn from the state it was taken in, with the counts recorded."""
+    g = extract_v1(path)
+    if isinstance(g, str):
+        pytest.skip(g)
+    v0 = extract_v0(path)
+    assert not isinstance(v0, str)
+    a = g.actions
+    assert a is not None
+    assert (g.states[a.action == 0] == v0.states).all()
+    assert len(set(a.turn[a.action == 0].tolist())) == len(v0.states)
+    assert (a.n_steps > 0).mean() > 0.95
+    for i in range(0, len(g.states), 7):
+        s, sel = _core.GameState.from_bytes(g.states[i].tobytes()), _core.Selection()
+        for k in range(int(a.n_steps[i])):
+            legal = _core.legal_ids(s, sel)
+            assert a.steps[i, k] in legal and len(legal) == a.n_legal[i, k]
+            if k + 1 < a.n_steps[i]:
+                assert _core.step(s, sel, int(a.steps[i, k])) == _core.OK
+        if a.n_steps[i]:
+            assert _core.step(s, sel, int(a.steps[i, a.n_steps[i] - 1])) in (_core.OK, _core.TRAPPED)

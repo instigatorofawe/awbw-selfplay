@@ -19,7 +19,8 @@ move costs, and CO powers with immediate effects.
 
 ``step_turn`` runs the same check from a given start state, to carry the
 engine's HP beliefs (what watching every turn tells players) into the next
-snapshot.
+snapshot, and can record each action with the state it was taken in (policy
+training labels).
 """
 
 from __future__ import annotations
@@ -38,6 +39,17 @@ from .parse import ReplayFormatError, load_replay
 # A unit's internal HP, HP belief and hidden-HP belief (GameState.hp_belief and
 # hidden_belief), by AWBW unit id.
 Beliefs = tuple[int, list[int], list[int]]
+
+
+@dataclass(slots=True)
+class Labelled:
+    """An action a player took, with the state they took it in."""
+
+    state: bytes  # the raw GameState before the action
+    kind: int  # ACTIONS value
+    steps: list[int]  # the micro-step ids that play it (legal.h)
+    n_legal: list[int]  # how many ids were legal at each of those steps
+
 
 A = _core.ACTIONS
 _FLAGS = _core.UNIT_MOVED | _core.UNIT_HIDDEN | _core.UNIT_CAPTURING
@@ -203,6 +215,9 @@ class _TurnStepper:
         self.end_beliefs: dict[int, Beliefs] | None = None
         self.unchecked: frozenset[int] = frozenset()  # units (AWBW ids) left out of the end-of-turn check
         self.check_legal = False  # also check each logged action is among the legal ones
+        # With a dict: each applied action by log index, with the state before it.
+        # A search branch that fails is overwritten by the one that passes.
+        self.trace: dict[int, Labelled] | None = None
 
     def _hp_seen(self, uid: int, hp: int) -> int | None:
         """What the end-of-turn check compares of a unit's HP."""
@@ -291,9 +306,17 @@ class _TurnStepper:
             raise Diverged("unknown unit", f"unit {uid} is not in the engine state", index)
         return slot
 
-    def _apply(self, state: _core.GameState, index: int, kind: str, **kw: Any) -> int:
-        if self.check_legal and not _is_legal(state, kind, kw):
-            raise Diverged(f"illegal: {kind}", f"not among the legal actions: {kw}", index)
+    def _apply(self, state: _core.GameState, index: int, kind: str, label: bool = True, **kw: Any) -> int:
+        """Apply a logged action; ``label``: a player's decision (to record in ``trace``)."""
+        if self.check_legal or (label and self.trace is not None):
+            walked = _walk_steps(state, kind, kw)
+            if walked is None and self.check_legal:
+                raise Diverged(f"illegal: {kind}", f"not among the legal actions: {kw}", index)
+            if label and self.trace is not None:
+                if walked is None:
+                    self.trace.pop(index, None)  # left unlabelled
+                else:
+                    self.trace[index] = Labelled(state.to_bytes(), A[kind], *walked)
         st = _core.apply(state, A[kind], **kw)
         if st not in (_core.OK, _core.TRAPPED):
             raise Diverged(f"{kind}: {_core.status_name(st)}", f"engine rejects {kind} {kw}", index)
@@ -657,7 +680,7 @@ class _TurnStepper:
             if self.expected is None:
                 return  # the game ended in this turn
             # Cut off at the max turn length: AWBW ends the turn itself.
-            self._apply(state, n, "EndTurn")
+            self._apply(state, n, "EndTurn", label=False)
         exp = self.expected
         if exp is None:
             return
@@ -926,17 +949,22 @@ def _unit_ids(obj: Any) -> set[int]:
     return out
 
 
-def _is_legal(state: _core.GameState, kind: str, kw: dict[str, Any]) -> bool:
-    """Whether each micro-step that plays the action is legal in turn."""
+def _walk_steps(state: _core.GameState, kind: str, kw: dict[str, Any]) -> tuple[list[int], list[int]] | None:
+    """The micro-step ids that play the action and how many ids were legal at each,
+    or None if one of them isn't legal."""
     args = {k: kw[k] for k in ("unit", "to", "target", "arg") if k in kw}
     ids = _core.action_steps(state, A[kind], **args)
     sel = _core.Selection()
+    n_legal = []
     for n, i in enumerate(ids):
-        if i not in _core.legal_ids(state, sel):
-            return False
+        legal = _core.legal_ids(state, sel)
+        j = int(legal.searchsorted(i))
+        if j == len(legal) or legal[j] != i:
+            return None
+        n_legal.append(len(legal))
         if n + 1 < len(ids):
             _core.step(state, sel, i)  # a pick: only the selection changes
-    return True
+    return ids, n_legal
 
 
 class _Skip(Exception):
@@ -984,7 +1012,11 @@ def check_turns(replay: Replay, md: _core.MapData) -> list[tuple[TurnCheck, int]
 
 
 def step_turn(
-    replay: Replay, md: _core.MapData, k: int, start: _core.GameState
+    replay: Replay,
+    md: _core.MapData,
+    k: int,
+    start: _core.GameState,
+    trace: dict[int, Labelled] | None = None,
 ) -> tuple[_core.GameState, dict[int, Beliefs] | None, str]:
     """Step turn ``k`` of a replay from ``start`` (its snapshot, with HP beliefs) and
     check it against turn ``k + 1``'s snapshot.
@@ -993,11 +1025,15 @@ def step_turn(
     end of turn ``k`` by AWBW unit id, or None if the turn couldn't be stepped
     or didn't match; and why not ("" if it matched). Raises ValueError if the
     next snapshot can't be loaded.
+
+    With ``trace``, each action the player took is put there by log index
+    (``Labelled``); its contents mean nothing unless the turn matched.
     """
     turn, nxt = replay.turns[k], replay.turns[k + 1]
     order = replay.player_ids
     j = (order.index(turn.player_id) + 1) % len(order)
     stepper = _TurnStepper(replay, md, turn, nxt)
+    stepper.trace = trace
     assert stepper.expected is not None
     if turn.actions is None:
         return stepper.expected, None, "no actions logged"
@@ -1012,6 +1048,26 @@ def step_turn(
     except (KeyError, TypeError, ValueError, IndexError) as e:  # a log entry missing what the checker reads
         return stepper.expected, None, f"unreadable log ({type(e).__name__})"
     return stepper.expected, stepper.end_beliefs, ""
+
+
+def step_last_turn(replay: Replay, md: _core.MapData, start: _core.GameState, trace: dict[int, Labelled]) -> str:
+    """Step a replay's last turn, the one the game ends in, from ``start``, recording
+    its actions in ``trace`` as step_turn does. No snapshot follows it, so only
+    the log checks it. Returns why it couldn't be stepped ("" if it was)."""
+    turn = replay.turns[-1]
+    if turn.actions is None:
+        return "no actions logged"
+    stepper = _TurnStepper(replay, md, turn, None)
+    stepper.trace = trace
+    try:
+        stepper.run(start)
+    except _Skip as e:
+        return str(e)
+    except Diverged as e:
+        return e.category
+    except (KeyError, TypeError, ValueError, IndexError) as e:
+        return f"unreadable log ({type(e).__name__})"
+    return ""
 
 
 def step_spectator_turn(

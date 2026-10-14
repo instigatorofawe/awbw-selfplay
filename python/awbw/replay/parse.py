@@ -34,12 +34,17 @@ class ReplayFormatError(ValueError):
 
 
 def load_replay(source: str | Path | bytes) -> Replay:
-    """Parse a replay zip from a path or from its bytes."""
+    """Parse a replay zip from a path or from its bytes. A replay missing a field
+    the parser reads (some old ones have buildings without a terrain id) raises
+    ReplayFormatError too."""
     data = source if isinstance(source, bytes) else Path(source).read_bytes()
     snapshots, actions = _read_entries(data)
-    replay = parse_snapshots(snapshots)
-    if actions is not None:
-        _attach_actions(replay, actions)
+    try:
+        replay = parse_snapshots(snapshots)
+        if actions is not None:
+            _attach_actions(replay, actions)
+    except (KeyError, TypeError, AttributeError) as e:
+        raise ReplayFormatError(f"malformed snapshot or log ({type(e).__name__}: {e})") from e
     return replay
 
 

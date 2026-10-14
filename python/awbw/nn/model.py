@@ -1,4 +1,5 @@
-"""The critic: a residual network over tiles that values a position for the player to move.
+"""Networks over tiles: the critic, which values a position for the player to move,
+and the policy-value network, which also scores the micro-steps of a decision.
 
 The input is ``encode_batch``'s output. Index planes (terrain, unit, ...) are
 embedded and summed per tile, quantity planes (HP, fuel, ...) are scaled to
@@ -19,6 +20,13 @@ Every few blocks also add a summary of the whole board (masked mean and max
 of some channels, as in KataGo's global pooling), since who is ahead depends
 on all of it.
 
+``PolicyValueNet`` has the same trunk and value head, reads the decision in
+progress too (``encode_policy_batch``: the pick so far, the phase and one
+plane per channel marking where its step is legal), and adds a policy head:
+a logit per (channel, tile) from each tile's features and one per non-spatial
+id (End Turn, the powers, Build + type) from the board summary, laid out as
+``_core.policy_index`` says.
+
 Each block reads its input through an RMS norm over each tile's channels
 (pre-norm) and starts as the identity (its last convolution is zero). Without
 the norm (``prenorm=False``, the first critics) activations grew about tenfold
@@ -31,6 +39,7 @@ the head.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -105,19 +114,20 @@ class TileNorm(nn.Module):
 
 
 class Embed(nn.Module):
-    """Planes and globals to [B, C, S, S] features, zero off the board."""
+    """Planes and globals to [B, C, S, S] features, zero off the board. ``planes``:
+    (name, number of values, categorical) of each input plane."""
 
-    def __init__(self, channels: int, num_globals: int = _core.NUM_GLOBALS):
+    def __init__(self, channels: int, num_globals: int = _core.NUM_GLOBALS, planes: tuple | None = None):
         super().__init__()
-        planes = [(int(n), bool(cat)) for _, n, cat in _core.PLANES]
-        cat = [i for i, (_, c) in enumerate(planes) if c]
-        qty = [i for i, (_, c) in enumerate(planes) if not c]
-        sizes = [planes[i][0] for i in cat]
+        spec = [(int(n), bool(c)) for _, n, c in (planes or _core.PLANES)]
+        cat = [i for i, (_, c) in enumerate(spec) if c]
+        qty = [i for i, (_, c) in enumerate(spec) if not c]
+        sizes = [spec[i][0] for i in cat]
         offsets = [sum(sizes[:j]) for j in range(len(sizes))]
         self.register_buffer("cat_planes", torch.tensor(cat), persistent=False)
         self.register_buffer("qty_planes", torch.tensor(qty), persistent=False)
         self.register_buffer("offsets", torch.tensor(offsets).view(1, -1, 1, 1), persistent=False)
-        scale = [1.0 / max(planes[i][0] - 1, 1) for i in qty]
+        scale = [1.0 / max(spec[i][0] - 1, 1) for i in qty]
         self.register_buffer("qty_scale", torch.tensor(scale).view(1, -1, 1, 1), persistent=False)
         self.table = nn.Embedding(sum(sizes), channels)
         nn.init.normal_(self.table.weight, std=0.5)
@@ -165,7 +175,7 @@ class Block(nn.Module):
 class ValueHead(nn.Module):
     """Win/draw/loss logits from the board summary and the globals."""
 
-    def __init__(self, cfg: CriticConfig, num_globals: int = _core.NUM_GLOBALS):
+    def __init__(self, cfg: CriticConfig | PolicyConfig, num_globals: int = _core.NUM_GLOBALS):
         super().__init__()
         self.norm = ChannelNorm(cfg.channels)
         self.conv = nn.Conv2d(cfg.channels, cfg.head_channels, 1)
@@ -210,3 +220,96 @@ def value_of(logits: torch.Tensor) -> torch.Tensor:
     """Expected result in [-1, 1] for the player to move: P(win) - P(loss)."""
     p = logits.float().softmax(-1)
     return p[:, WIN] - p[:, LOSS]
+
+
+# --- Policy and value --------------------------------------------------------
+
+POLICY_PLANES = tuple(_core.PLANES) + tuple(_core.SELECTION_PLANES)
+NUM_POLICY_PLANES = len(POLICY_PLANES)
+NUM_POLICY_GLOBALS = _core.NUM_GLOBALS + _core.NUM_SELECTION_GLOBALS
+LEGAL_PLANES = slice(_core.NUM_PLANES + 1, _core.NUM_PLANES + 1 + _core.NUM_CHANNELS)  # in the input
+
+
+@dataclass(frozen=True)
+class PolicyConfig:
+    channels: int = 64
+    blocks: int = 6
+    pool_every: int = 2
+    pool_channels: int = 32
+    head_channels: int = 32  # value head
+    head_hidden: int = 128
+    policy_channels: int = 64  # per-tile hidden layer of the policy head
+    ratings: bool = True
+
+
+class PolicyHead(nn.Module):
+    """Logits per (channel, tile) [B, NUM_CHANNELS, S, S] and per non-spatial id
+    [B, NUM_NONSPATIAL_IDS]."""
+
+    def __init__(self, cfg: PolicyConfig, num_globals: int):
+        super().__init__()
+        self.norm = ChannelNorm(cfg.channels)
+        self.conv1 = nn.Conv2d(cfg.channels, cfg.policy_channels, 1)
+        self.conv2 = nn.Conv2d(cfg.policy_channels, _core.NUM_CHANNELS, 1)
+        self.fc1 = nn.Linear(3 * cfg.policy_channels + num_globals, cfg.head_hidden)
+        self.fc2 = nn.Linear(cfg.head_hidden, _core.NUM_NONSPATIAL_IDS)
+
+    def forward(
+        self, x: torch.Tensor, globals_: torch.Tensor, mask: torch.Tensor, area: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        h = F.silu(self.conv1(F.silu(self.norm(x)))) * mask
+        spatial = self.conv2(h)
+        summary = torch.cat([masked_pool(h, mask, area), globals_], 1)
+        return spatial, self.fc2(F.silu(self.fc1(summary)))
+
+
+class PolicyValueNet(nn.Module):
+    """Encoded decisions (``encode_policy_batch``), and optionally the players'
+    ratings, to policy logits and win/draw/loss logits [B, 3] for the player to move.
+
+    ``forward`` returns the policy as its spatial part [B, NUM_CHANNELS, S, S] and
+    its non-spatial part [B, NUM_NONSPATIAL_IDS] (``flat_policy`` joins them in
+    ``policy_index`` order), so augmentation can map the spatial logits back.
+    """
+
+    def __init__(self, cfg: PolicyConfig | None = None):
+        super().__init__()
+        self.cfg = cfg = cfg or PolicyConfig()
+        num_globals = NUM_POLICY_GLOBALS + (NUM_RATING_FEATURES if cfg.ratings else 0)
+        self.embed = Embed(cfg.channels, num_globals, POLICY_PLANES)
+        self.blocks = nn.ModuleList(
+            Block(cfg.channels, cfg.pool_channels if (i + 1) % cfg.pool_every == 0 else 0) for i in range(cfg.blocks)
+        )
+        self.policy = PolicyHead(cfg, num_globals)
+        self.value = ValueHead(cfg, num_globals)
+
+    def forward(
+        self, planes: torch.Tensor, globals_: torch.Tensor, rating: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """(spatial policy logits, non-spatial policy logits, value logits); ``rating``
+        as in CriticNet."""
+        if self.cfg.ratings:
+            extra = rating_features(rating, len(globals_), globals_.device).to(globals_.dtype)
+            globals_ = torch.cat([globals_, extra], 1)
+        mask, area = board_mask(planes)
+        x = self.embed(planes, globals_, mask)
+        for block in self.blocks:
+            x = block(x, mask, area)
+        spatial, nonspatial = self.policy(x, globals_, mask, area)
+        return spatial, nonspatial, self.value(x, globals_, mask, area)
+
+
+def flat_policy(spatial: torch.Tensor, nonspatial: torch.Tensor) -> torch.Tensor:
+    """[B, policy_size(S, S)] logits, in ``_core.policy_index`` order."""
+    return torch.cat([spatial.flatten(1), nonspatial], 1)
+
+
+def legal_mask(planes: torch.Tensor, nonspatial: torch.Tensor) -> torch.Tensor:
+    """[B, policy_size(S, S)] bool: the legal steps, from the input's legal planes
+    and the non-spatial legality ``encode_policy_batch`` gives."""
+    return torch.cat([planes[:, LEGAL_PLANES].flatten(1), nonspatial], 1) != 0
+
+
+def masked_log_softmax(logits: torch.Tensor, legal: torch.Tensor) -> torch.Tensor:
+    """Log-probabilities over the legal steps; -inf elsewhere."""
+    return logits.float().masked_fill(~legal, -math.inf).log_softmax(-1)
