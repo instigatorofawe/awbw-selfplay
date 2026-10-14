@@ -153,7 +153,8 @@ class BatchedSearch {
   // search) and keep the result; returns the slot. The game must be going.
   int add_root(const MapData& m, const GameState& s, const Selection& sel = {});
   // Play a game from `s` to its end, searching each decision with a choice;
-  // returns the game's number. Finished games come out of take_records().
+  // returns the game's number. Finished games come out of take_records(). The
+  // game's luck is seeded from the config's seed and its number.
   uint64_t add_game(const MapData& m, const GameState& s);
 
   // Walk each searching slot down to a leaf for the network, finishing the

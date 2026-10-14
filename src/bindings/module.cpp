@@ -442,7 +442,7 @@ nb::dict search_samples(awbw::BatchedSearch& bs) {
   uint8_t *states, *n_picks, *mover;
   uint16_t* picks;
   float *value, *net_value, *prior, *policy, *q;
-  int64_t *offsets, *ids;
+  int64_t *offsets, *ids, *index;
   uint32_t* visits;
   nb::dict d;
   d["game"] = new_array<uint64_t>({n}, game);
@@ -457,6 +457,7 @@ nb::dict search_samples(awbw::BatchedSearch& bs) {
   d["net_value"] = new_array<float>({n}, net_value);
   d["offsets"] = new_array<int64_t>({n + 1}, offsets);
   d["ids"] = new_array<int64_t>({steps}, ids);
+  d["index"] = new_array<int64_t>({steps}, index);
   d["prior"] = new_array<float>({steps}, prior);
   d["policy"] = new_array<float>({steps}, policy);
   d["visits"] = new_array<uint32_t>({steps}, visits);
@@ -475,8 +476,10 @@ nb::dict search_samples(awbw::BatchedSearch& bs) {
     value[i] = r.value;
     net_value[i] = r.net_value;
     offsets[i] = static_cast<int64_t>(at);
+    const awbw::MapData& md = map_for(smp.state);
     for (size_t k = 0; k < r.ids.size(); ++k, ++at) {
       ids[at] = r.ids[k];
+      index[at] = awbw::policy_index(md, r.ids[k], bs.size(), bs.size());
       prior[at] = r.prior[k];
       policy[at] = r.policy[k];
       visits[at] = r.visits[k];
@@ -1324,8 +1327,9 @@ NB_MODULE(_core, m) {
           "Self-play's full searches since the last call, as arrays: game, decision, states\n"
           "[N, STATE_BYTES], picks [N, 3] and n_picks (as encode_policy_batch takes them), mover,\n"
           "chosen, sims, value, net_value; then each sample's legal steps flattened, sample i's\n"
-          "from offsets[i] to offsets[i + 1]: ids, prior, policy (the improved policy, the\n"
-          "training target), visits and q.")
+          "from offsets[i] to offsets[i + 1]: ids, index (each id's policy_index in the\n"
+          "search's size x size window), prior, policy (the improved policy, the training\n"
+          "target), visits and q.")
       .def("take_records", &awbw::BatchedSearch::take_records,
            "Self-play games finished since the last call.")
       .def("clear", &awbw::BatchedSearch::clear, "Free every slot.");

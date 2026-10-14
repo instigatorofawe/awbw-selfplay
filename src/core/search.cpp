@@ -141,6 +141,7 @@ uint64_t BatchedSearch::add_game(const MapData& m, const GameState& s) {
   sl.game_no = next_game_++;
   sl.actions = sl.decisions = 0;
   rng_seed(sl.rng, cfg_.seed ^ (0xD1B54A32D192ED03ull * (sl.game_no + 1)));
+  rng_seed(sl.game.rng, rng_next(sl.rng));  // games from one start draw their own luck
   begin_decision(sl);
   return sl.game_no;
 }

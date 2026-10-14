@@ -164,6 +164,36 @@ def main(argv: list[str] | None = None) -> int:
     tp.add_argument("--device", default="auto", help="cuda, mps, cpu or auto (default)")
     tp.add_argument("--resume", action="store_true", help="continue the run in --out from its last epoch")
 
+    sp = sub.add_parser("train-selfplay", help="train a policy-value network by self-play with search")
+    sp.add_argument("init", type=Path, help="policy checkpoint to start from")
+    sp.add_argument("--out", type=Path, required=True, help="run directory for checkpoints and metrics.jsonl")
+    sp.add_argument("--data", type=Path, help="v1 dataset: training games' starts and human batches (default: v1)")
+    sp.add_argument("--sims", type=int, help="simulations of a full search, kept as a sample (default 64)")
+    sp.add_argument("--fast-sims", type=int, help="simulations of the other searches (default 16)")
+    sp.add_argument("--full-fraction", type=float, help="share of searches that are full (default 0.25)")
+    sp.add_argument("--considered", type=int, help="steps the root considers (default 16)")
+    sp.add_argument("--gumbel-scale", type=float, help="the root's Gumbel noise (default 1)")
+    sp.add_argument("--max-days", type=int, help="then a day limit decides the game (default 30)")
+    sp.add_argument("--parallel", type=int, help="games at once (default 512)")
+    sp.add_argument("--window", type=int, help="self-play samples kept (default 300,000)")
+    sp.add_argument("--min-window", type=int, help="samples before training starts (default 20,000)")
+    sp.add_argument("--train-ratio", type=float, help="samples trained on per sample added (default 4)")
+    sp.add_argument("--batch-size", type=int)
+    sp.add_argument("--lr", type=float, help="default 2e-4")
+    sp.add_argument("--weight-decay", type=float)
+    sp.add_argument("--value-weight", type=float)
+    sp.add_argument("--value-fraction", type=float, help="share of samples whose result trains the value (0.25)")
+    sp.add_argument("--human-fraction", type=float, help="share of batches from human games (default 0.25)")
+    sp.add_argument("--checkpoint-every", type=int, help="training steps between checkpoints (default 2000)")
+    sp.add_argument("--log-every", type=float, help="seconds between log lines (default 60)")
+    sp.add_argument("--max-steps", type=int, help="stop after this many training steps (default: never)")
+    sp.add_argument("--seed", type=int)
+    sp.add_argument("--no-augment", dest="augment", action="store_false", default=None)
+    sp.add_argument("--compile", action="store_true", default=None, help="torch.compile search and training")
+    sp.add_argument("--no-bf16", dest="bf16", action="store_false", default=None)
+    sp.add_argument("--device", default="auto")
+    sp.add_argument("--resume", action="store_true", help="continue the run in --out from last.pt")
+
     ep = sub.add_parser("eval-policy", help="validation metrics of a saved policy-value network")
     ep.add_argument("checkpoint", type=Path)
     ep.add_argument("--data", type=Path, help="dataset directory (default: cache/datasets/v1)")
@@ -196,6 +226,20 @@ def main(argv: list[str] | None = None) -> int:
     ar.add_argument("--data", type=Path, help="v1 dataset whose validation games give the starts (default: v1)")
     ar.add_argument("--device", default="auto")
     ar.add_argument("--seed", type=int, default=0)
+
+    ld = sub.add_parser("ladder", help="rate each checkpoint of a self-play run against a fixed baseline")
+    ld.add_argument("run", type=Path, help="self-play run directory (its net-NNNNNN.pt)")
+    ld.add_argument("--baseline", type=Path, required=True, help="the policy checkpoint every one plays")
+    ld.add_argument("--games", type=int, default=100, help="validation starts, each played twice (default 100)")
+    ld.add_argument("--every", type=int, default=0, help="only checkpoints at multiples of this step")
+    ld.add_argument("--sims", type=int, default=0, help="both sides search with this many (default 0: the priors)")
+    ld.add_argument("--considered", type=int, default=16)
+    ld.add_argument("--max-days", type=int, default=30)
+    ld.add_argument("--watch", type=float, default=0, help="seconds between looks for new checkpoints (0: once)")
+    ld.add_argument("--compile", action="store_true", help="torch.compile the searching networks")
+    ld.add_argument("--data", type=Path, help="v1 dataset whose validation games give the starts (default: v1)")
+    ld.add_argument("--device", default="auto")
+    ld.set_defaults(temperature=0.0, gumbel=0.0, rescale=False, value_scale=0.1, state_values=False)
 
     va = sub.add_parser("value", help="a saved critic's view of a replay, turn by turn")
     va.add_argument("checkpoint", type=Path)
@@ -232,8 +276,10 @@ def main(argv: list[str] | None = None) -> int:
         "train-critic": _train_critic,
         "eval-critic": _eval_critic,
         "train-policy": _train_policy,
+        "train-selfplay": _train_selfplay,
         "eval-policy": _eval_policy,
         "arena": _arena,
+        "ladder": _ladder,
         "value": _value,
         "live": _live,
     }
@@ -621,6 +667,22 @@ def _train_policy(args, http: Http) -> int:
     return 0
 
 
+def _train_selfplay(args, http: Http) -> int:
+    from .nn.critic import pick_device
+    from .nn.train_selfplay import SelfPlayConfig, train
+
+    cfg = SelfPlayConfig(
+        **{k: getattr(args, k) for k in SelfPlayConfig.__dataclass_fields__ if getattr(args, k, None) is not None}
+    )
+
+    def log(line: str) -> None:
+        print(line, flush=True)
+
+    data = args.data or cache_dir() / "datasets" / "v1"
+    train(args.init, args.out, cfg, data=data, device=pick_device(args.device), resume=args.resume, log=log)
+    return 0
+
+
 def _eval_policy(args, http: Http) -> int:
     from .data.shards import Dataset
     from .nn.critic import pick_device
@@ -660,27 +722,14 @@ def _eval_policy(args, http: Http) -> int:
     return 0
 
 
-def _arena(args, http: Http) -> int:
-    import numpy as np
-
-    from . import _core
-    from .agents import DRAW, PolicyAgent, RandomAgent, play
-    from .data.loader import in_validation
-    from .data.shards import Dataset
+def _agent_maker(args, ratings):
+    """``make(path, sims, seed)``: an agent playing a saved policy, searching with
+    ``sims`` simulations or (0) playing its prior, as the arena's flags say."""
+    from .agents import PolicyAgent
     from .nn.policy import Policy
     from .search import NetEvaluator, SearchAgent, SearchSettings
 
-    ds = Dataset(args.data or cache_dir() / "datasets" / "v1")
-    starts: list = []
-    for i in range(len(ds.shards)):
-        if len(starts) >= args.games:
-            break
-        sh = ds.load(i)
-        for g in np.flatnonzero(in_validation(sh.g_id))[: args.games - len(starts)]:
-            starts.append(_core.GameState.from_bytes(sh.state[sh.g_start[g]].tobytes()))
-    ratings = tuple(args.ratings) if args.ratings else None
-
-    def agent(path, sims: int, seed: int):
+    def make(path, sims: int, seed: int):
         policy = Policy.load(path, args.device)
         if sims <= 0:
             return PolicyAgent(policy, args.temperature, ratings, seed=seed)
@@ -689,39 +738,67 @@ def _arena(args, http: Http) -> int:
         )
         return SearchAgent(NetEvaluator(policy, ratings=ratings, compile=args.compile), settings, seed=seed)
 
-    me = agent(args.checkpoint, args.sims, args.seed)
-    them = (
-        RandomAgent(args.seed + 1)
-        if args.opponent == "random"
-        else agent(args.opponent, args.opponent_sims, args.seed + 1)
-    )
+    return make
+
+
+def _arena(args, http: Http) -> int:
+    import numpy as np
+
+    from .agents import RandomAgent
+    from .data.shards import Dataset
+    from .ladder import match, validation_starts
+    from .search import SearchAgent
+
+    starts = validation_starts(Dataset(args.data or cache_dir() / "datasets" / "v1"), args.games)
+    make = _agent_maker(args, tuple(args.ratings) if args.ratings else None)
+    me = make(args.checkpoint, args.sims, args.seed)
+    if args.opponent == "random":
+        them = RandomAgent(args.seed + 1)
+    else:
+        them = make(args.opponent, args.opponent_sims, args.seed + 1)
     t0 = time.monotonic()
-    first = play(starts, (me, them), max_days=args.max_days)
-    second = play(starts, (them, me), max_days=args.max_days)
+    r = match(me, them, starts, args.max_days)
     elapsed = time.monotonic() - t0
-    tally = {"won": 0, "lost": 0, "drawn": 0}
-    for seat, results in ((0, first), (1, second)):
-        won = sum(r.winner == seat for r in results)
-        drawn = sum(r.winner == DRAW for r in results)
-        lost = len(results) - won - drawn
-        tally["won"] += won
-        tally["lost"] += lost
-        tally["drawn"] += drawn
-        ended = sum(r.decided == "game over" for r in results)
-        days = np.mean([r.days for r in results])
+    for seat, results in enumerate(r.by_seat):
+        won = sum(g.winner == seat for g in results)
+        drawn = sum(g.winner == 2 for g in results)
+        ended = sum(g.decided == "game over" for g in results)
+        days = np.mean([g.days for g in results])
         print(
-            f"as player {seat + 1}: won {won}, lost {lost}, drawn {drawn}; {ended} ended before the day limit, "
-            f"{days:.1f} days on average"
+            f"as player {seat + 1}: won {won}, lost {len(results) - won - drawn}, drawn {drawn}; "
+            f"{ended} ended before the day limit, {days:.1f} days on average"
         )
-    n = sum(tally.values())
     me_name = f"{args.checkpoint}" + (f" ({args.sims} sims)" if args.sims > 0 else "")
     them_name = f"{args.opponent}" + (
         f" ({args.opponent_sims} sims)" if args.opponent != "random" and args.opponent_sims > 0 else ""
     )
-    print(f"{me_name} vs {them_name}: {tally['won']}-{tally['lost']}-{tally['drawn']} of {n} games")
+    print(f"{me_name} vs {them_name}: {r.won}-{r.lost}-{r.drawn} of {r.games} games")
     evals = sum(a.evaluator.evals for a in (me, them) if isinstance(a, SearchAgent))
     print(f"{elapsed:.0f}s" + (f", {evals / elapsed:,.0f} network evaluations/s in search" if evals else ""))
     return 0
+
+
+def _ladder(args, http: Http) -> int:
+    from .data.shards import Dataset
+    from .ladder import ladder, validation_starts
+
+    starts = validation_starts(Dataset(args.data or cache_dir() / "datasets" / "v1"), args.games)
+    make = _agent_maker(args, None)
+    settings = {"sims": args.sims, "considered": args.considered, "temperature": args.temperature}
+    while True:
+        ladder(
+            args.run,
+            args.baseline,
+            lambda path, seed: make(path, args.sims, seed),
+            starts,
+            every=args.every,
+            max_days=args.max_days,
+            settings=settings,
+            log=lambda line: print(line, flush=True),
+        )
+        if not args.watch:
+            return 0
+        time.sleep(args.watch)
 
 
 def _value(args, http: Http) -> int:

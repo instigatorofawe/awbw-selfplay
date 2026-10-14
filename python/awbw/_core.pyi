@@ -853,8 +853,9 @@ class BatchedSearch:
         Self-play's full searches since the last call, as arrays: game, decision, states
         [N, STATE_BYTES], picks [N, 3] and n_picks (as encode_policy_batch takes them), mover,
         chosen, sims, value, net_value; then each sample's legal steps flattened, sample i's
-        from offsets[i] to offsets[i + 1]: ids, prior, policy (the improved policy, the
-        training target), visits and q.
+        from offsets[i] to offsets[i + 1]: ids, index (each id's policy_index in the
+        search's size x size window), prior, policy (the improved policy, the training
+        target), visits and q.
         """
 
     def take_records(self) -> list[GameRecord]:

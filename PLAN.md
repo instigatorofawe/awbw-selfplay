@@ -38,8 +38,9 @@ awbw-selfplay/
     engine.py                 # replay snapshot -> GameState glue
     replay/   sources.py  parse.py  combat_check.py  move_check.py  step_check.py  extract.py
     data/     shards.py  loader.py  build.py
-    nn/       model.py  critic.py  train_critic.py  policy.py  train_policy.py
+    nn/       model.py  critic.py  train_critic.py  policy.py  train_policy.py  train_selfplay.py
     agents.py  search.py      # arena agents; the network side of search, self-play
+    ladder.py                 # matches from fixed starts; checkpoints rated against a baseline
   tests/cpp/                  # googletest, fetched by CMake (AWBW_BUILD_TESTS)
   tests/python/               # pytest
   bench/                      # Google Benchmark, fetched by CMake (AWBW_BUILD_BENCHMARKS)
@@ -1191,6 +1192,54 @@ while search.collect():  # the GIL is released in collect, batch and submit
 
 - **Later optimization:** export the net to ONNX / Core ML / TensorRT and run
   inference inside C++ for actor-only processes.
+
+### Self-play training (M5, `awbw train-selfplay`)
+
+One process alternates rounds of search with steps of training
+(`nn/train_selfplay.py`). There are no separate actors, learner or gating:
+the search always uses the network being trained, the same module.
+
+- **Starts:** the first states of the v1 dataset's training games (33,860),
+  in random order. Validation games stay unseen for the arena and ladder.
+  Each game's luck is seeded on its own, so two games from one start differ.
+- **Games:** `parallel` (512) at once, in one `BatchedSearch` per board
+  bucket. Each round, every search collects its leaves and the network
+  scores them on the GPU.
+  - Searches use playout caps: 25% are full (64 simulations) and become
+    samples; the rest use 16 and only choose the step.
+  - Gumbel noise at the root (scale 1) explores.
+  - A 30-day cap ends the game, decided as a day limit would.
+- **Samples:** when a game ends, each of its full searches is labelled with
+  the result for its mover and goes into the window. That is the state,
+  the picks so far, and the improved policy as up to 192 (policy index,
+  probability) pairs, the likeliest kept and renormalized. The most legal
+  steps in v1 is 160.
+  - Before a game's samples go in, the network's losses on them are logged
+    as **fresh**: a game it hasn't trained on yet, so fresh against train
+    shows overfitting.
+- **Window:** the latest 300,000 samples, oldest out first. That is
+  2.3 GB, mostly states (6.5 KB each). Training batches take one bucket at a
+  time, chosen by its share of the window.
+- **Training:** a fixed ratio of 4 self-play samples trained on per sample
+  added, from 20,000 in the window on.
+  - **Self-play batches:** the cross-entropy of the improved policy, and
+    the result's cross-entropy on a random 25% of the samples (a game's
+    samples share their result).
+  - **Human batches:** 25% of the steps, as in pre-training: the step
+    taken, and the result on 5%. They anchor the policy to human play.
+  - AdamW at 2e-4 after 200 warm-up steps, with no decay. Flips and
+    transposes as in pre-training.
+  - **Ratings:** self-play tells the network none, at the leaves and in
+    training; human batches keep theirs, hidden at random.
+- **Output:** `metrics.jsonl` every minute, with games/h, game length, the
+  share capped, the first player's wins, and train, fresh and human losses.
+  `net-NNNNNN.pt` every 2,000 steps; `last.pt` + `optimizer.pt` for
+  `--resume`, after which the window starts empty.
+- **Ladder** (`awbw ladder RUN --baseline PATH`): each checkpoint plays the
+  baseline from the first 100 validation starts, each played twice with
+  seats swapped. It plays the priors, or with `--sims` both sides search.
+  The score gives an Elo difference with its standard error, appended to
+  `RUN/ladder.jsonl`; `--watch` keeps rating new checkpoints.
 
 ## 9. Bindings (nanobind)
 
