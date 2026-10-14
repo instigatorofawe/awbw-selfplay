@@ -1,14 +1,18 @@
 """Polite HTTP client: one shared rate limit, retries with backoff, size caps.
 
 A 429 or 503 is the server asking us to slow down: every thread waits out its
-Retry-After, and requests are spaced twice as far apart from then on.
+Retry-After, and requests are spaced twice as far apart from then on. Other
+5xx answers, timeouts and dropped connections are retried after a backoff.
+Each retry is reported on stderr and counted in ``Http.retried``.
 """
 
 from __future__ import annotations
 
 import contextlib
+import http.client
 import json
 import os
+import sys
 import threading
 import time
 import urllib.error
@@ -50,6 +54,7 @@ class Http:
         self.timeout = timeout
         self.retries = retries
         self.cookies: dict[str, str] = {}
+        self.retried = 0
         self._lock = threading.Lock()
         self._next_request = 0.0
 
@@ -96,14 +101,22 @@ class Http:
                 retryable = e.code == 429 or e.code >= 500
                 if not retryable or attempt == self.retries:
                     raise HttpError(req.full_url, e.code, e.read(4096)) from e
+                e.close()
+                self._note_retry(req, f"HTTP {e.code}", attempt)
                 if e.code in (429, 503):
                     self._slow_down(retry_after(e.headers, 2.0 * 2**attempt))
                     continue
-            except (urllib.error.URLError, TimeoutError):
+            except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException) as e:
                 if attempt == self.retries:
                     raise
+                self._note_retry(req, repr(e), attempt)
             time.sleep(2.0 * 2**attempt)
         raise AssertionError("unreachable")
+
+    def _note_retry(self, req: urllib.request.Request, why: str, attempt: int) -> None:
+        with self._lock:
+            self.retried += 1
+        print(f"{req.full_url}: {why}; retry {attempt + 1} of {self.retries}", file=sys.stderr)
 
     def _remember_cookies(self, headers: Message) -> None:
         for header in headers.get_all("Set-Cookie") or []:

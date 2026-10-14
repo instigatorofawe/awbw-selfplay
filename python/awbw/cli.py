@@ -300,7 +300,7 @@ def _crawl(args, http: Http) -> int:
                 per_hour = 3600 * (fetched + failed) / (time.monotonic() - start)
                 print(
                     f"fetched={fetched} failed={failed} cache={used / 1e9:.2f} GB"
-                    f" ({per_hour:,.0f}/h, {http.min_interval:g}s between requests)",
+                    f" ({per_hour:,.0f}/h, {http.min_interval:g}s between requests, {http.retried} retries)",
                     file=sys.stderr,
                 )
             if used >= cap:

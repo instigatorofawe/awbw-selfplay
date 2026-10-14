@@ -129,6 +129,29 @@ def test_http_slows_down_when_the_server_asks(monkeypatch):
     assert len(calls) == 2
     assert slept and 4.5 < slept[0] <= 5.0  # waited out Retry-After, not the usual backoff
     assert http.min_interval == 1.0  # and spaces requests further apart from now on
+    assert http.retried == 1
+
+
+def test_http_retries_a_dropped_connection(monkeypatch, capsys):
+    class Response(io.BytesIO):
+        status = 200
+        headers = Message()
+
+    calls = []
+
+    def urlopen(req, timeout):
+        calls.append(req.full_url)
+        if len(calls) == 1:
+            raise ConnectionResetError(54, "Connection reset by peer")
+        return Response(b"ok")
+
+    slept = []
+    monkeypatch.setattr(net.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(net.time, "sleep", slept.append)
+    http = Http(min_interval=0.25)
+    assert http.get("http://example.test/a") == b"ok"
+    assert len(calls) == 2 and http.retried == 1 and http.min_interval == 0.25
+    assert "Connection reset by peer" in capsys.readouterr().err
 
 
 def test_fetch_replays_keeps_n_in_flight(monkeypatch, tmp_path):
