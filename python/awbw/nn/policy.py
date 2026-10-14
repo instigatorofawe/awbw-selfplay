@@ -24,14 +24,21 @@ FORMAT = "awbw-policy"
 VERSION = 1
 
 
-def policy_encoder_signature() -> dict[str, Any]:
-    return encoder_signature() | {
+def policy_encoder_signature(movement: bool = False) -> dict[str, Any]:
+    """What a network with (or without) the movement planes reads."""
+    sig = encoder_signature() | {
         "selection_version": _core.SELECTION_ENCODE_VERSION,
         "selection_planes": [[name, n, cat] for name, n, cat in _core.SELECTION_PLANES],
         "selection_globals": list(_core.SELECTION_GLOBAL_NAMES),
         "channels": list(_core.CHANNELS),
         "nonspatial": _core.NUM_NONSPATIAL_IDS,
     }
+    if movement:
+        sig |= {
+            "movement_version": _core.MOVEMENT_ENCODE_VERSION,
+            "movement_planes": [[name, n, cat] for name, n, cat in _core.MOVEMENT_PLANES],
+        }
+    return sig
 
 
 def save_policy(path: Path, net: PolicyValueNet, **info: Any) -> None:
@@ -40,7 +47,7 @@ def save_policy(path: Path, net: PolicyValueNet, **info: Any) -> None:
         "format": FORMAT,
         "version": VERSION,
         "config": asdict(net.cfg),
-        "encoder": policy_encoder_signature(),
+        "encoder": policy_encoder_signature(net.cfg.movement),
         "state_dict": net.state_dict(),
         "info": info,
     }
@@ -54,9 +61,10 @@ def load_policy(path: Path, device: torch.device | str = "cpu") -> tuple[PolicyV
     ck = torch.load(path, map_location=device, weights_only=True)
     if ck.get("format") != FORMAT or ck.get("version") != VERSION:
         raise ValueError(f"{path}: not an {FORMAT} v{VERSION} checkpoint")
-    if ck["encoder"] != policy_encoder_signature():
+    cfg = PolicyConfig(**ck["config"])
+    if ck["encoder"] != policy_encoder_signature(cfg.movement):
         raise ValueError(f"{path}: trained on other input features than the engine's encoders give; retrain")
-    net = PolicyValueNet(PolicyConfig(**ck["config"]))
+    net = PolicyValueNet(cfg)
     net.load_state_dict(ck["state_dict"])
     return net.to(device).eval(), ck["info"]
 
@@ -138,7 +146,7 @@ class Policy:
             for b in range(0, len(rows), batch_size):
                 sel = rows[b : b + batch_size]
                 planes, globals_, nonspatial, _ = encode_decisions(
-                    states[sel], picks[sel], n_picks[sel], int(size), targets=False
+                    states[sel], picks[sel], n_picks[sel], int(size), targets=False, movement=self.net.cfg.movement
                 )
                 p = torch.from_numpy(planes).to(self.device)
                 ns = torch.from_numpy(nonspatial).to(self.device)

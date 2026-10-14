@@ -22,6 +22,7 @@
 #include "core/hash.h"
 #include "core/legal.h"
 #include "core/movegen.h"
+#include "core/movement.h"
 #include "test_util.h"
 
 namespace awbw {
@@ -285,6 +286,54 @@ void BM_EncodeDecision(benchmark::State& st) {
   }
 }
 BENCHMARK(BM_EncodeDecision);
+
+// The movement planes: factory turns on unit tiles and a reach search per
+// group of units that move alike.
+void BM_EncodeMovement(benchmark::State& st) {
+  const Board& b = board();
+  std::vector<uint8_t> planes(size_t{kNumMovementPlanes} * 32 * 32);
+  for (auto _ : st) {
+    encode_movement(b.map, b.state, planes.data(), 32, 32);
+    benchmark::DoNotOptimize(planes.data());
+    benchmark::ClobberMemory();
+  }
+}
+BENCHMARK(BM_EncodeMovement);
+
+// One turns_from search over the whole 30x30 board, uncapped (a factory's row).
+void BM_TurnsFrom(benchmark::State& st) {
+  const Board& b = board();
+  std::vector<uint8_t> turns(b.map.n_tiles);
+  const uint16_t source = static_cast<uint16_t>(b.map.tile(15, 15));
+  const uint8_t delay = 0;
+  for (auto _ : st) {
+    turns_from(b.map, b.map.move_cost[kClear][kMoveTread], 6, &source, &delay, 1, kMaxTurns,
+               turns.data());
+    benchmark::DoNotOptimize(turns.data());
+  }
+}
+BENCHMARK(BM_TurnsFrom);
+
+// A map's factory rows: 30x30 with 16 bases, 4 airports and 4 ports.
+void BM_FactoryTurns(benchmark::State& st) {
+  std::vector<std::string> rows;
+  const char* pattern = "..F..=..M..#.._..R..F..=..~~..";
+  for (int y = 0; y < 30; ++y) {
+    std::string row;
+    for (int x = 0; x < 30; ++x) row += pattern[(x * 7 + y * 3) % 30];
+    rows.push_back(row);
+  }
+  for (int i = 0; i < 16; ++i) rows[1 + i % 4 * 7][2 + i / 4 * 7] = i % 2 ? 'b' : 'B';
+  for (int i = 0; i < 4; ++i) rows[4 + i * 7][5] = i % 2 ? 'a' : 'A';
+  for (int i = 0; i < 4; ++i) rows[4 + i * 7][26] = i % 2 ? 'p' : 'P';
+  MapData m = make_map(rows);
+  for (auto _ : st) {
+    compute_factory_turns(m);
+    benchmark::DoNotOptimize(m.factory_turns.data());
+  }
+  st.counters["rows"] = static_cast<double>(m.factory_turns.size() / m.n_tiles);
+}
+BENCHMARK(BM_FactoryTurns);
 
 // The transposition-table key, from scratch.
 void BM_StateHash(benchmark::State& st) {

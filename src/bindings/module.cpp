@@ -22,6 +22,7 @@
 #include "core/legal.h"
 #include "core/map.h"
 #include "core/movegen.h"
+#include "core/movement.h"
 #include "core/snapshot.h"
 #include "core/state.h"
 
@@ -252,10 +253,12 @@ using MaskOut = nb::ndarray<uint8_t, nb::ndim<2>, nb::c_contig, nb::device::cpu>
 using TargetOut = nb::ndarray<int64_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 
 void encode_policy_batch(StateRows states, PickRows picks, CountIn n_picks, PlaneOut planes,
-                         GlobalOut globals, MaskOut nonspatial, std::optional<TargetOut> targets) {
+                         GlobalOut globals, MaskOut nonspatial, std::optional<TargetOut> targets,
+                         bool movement) {
   using namespace awbw;
   const size_t n = states.shape(0);
-  constexpr int kAllPlanes = int{kNumPlanes} + kNumSelectionPlanes;
+  const size_t all_planes =
+      size_t{kNumPlanes} + kNumSelectionPlanes + (movement ? kNumMovementPlanes : 0);
   constexpr int kAllGlobals = int{kNumGlobals} + kNumSelectionGlobals;
   if (states.shape(1) != sizeof(GameState))
     throw nb::value_error(
@@ -263,15 +266,18 @@ void encode_policy_batch(StateRows states, PickRows picks, CountIn n_picks, Plan
             .c_str());
   if (picks.shape(0) != n || n_picks.shape(0) != n)
     throw nb::value_error("picks must be [N, 3] and n_picks [N]");
-  if (planes.shape(0) != n || planes.shape(1) != kAllPlanes)
-    throw nb::value_error("planes must be [N, NUM_PLANES + NUM_SELECTION_PLANES, H, W]");
+  if (planes.shape(0) != n || planes.shape(1) != all_planes)
+    throw nb::value_error(
+        movement
+            ? "planes must be [N, NUM_PLANES + NUM_SELECTION_PLANES + NUM_MOVEMENT_PLANES, H, W]"
+            : "planes must be [N, NUM_PLANES + NUM_SELECTION_PLANES, H, W]");
   if (globals.shape(0) != n || globals.shape(1) != kAllGlobals)
     throw nb::value_error("globals must be [N, NUM_GLOBALS + NUM_SELECTION_GLOBALS]");
   if (nonspatial.shape(0) != n || nonspatial.shape(1) != kNumNonSpatialIds)
     throw nb::value_error("nonspatial must be [N, NUM_NONSPATIAL_IDS]");
   if (targets && targets->shape(0) != n) throw nb::value_error("targets must be [N]");
   const int h = static_cast<int>(planes.shape(2)), w = static_cast<int>(planes.shape(3));
-  const size_t plane_stride = size_t{kAllPlanes} * h * w;
+  const size_t plane_stride = all_planes * h * w;
   std::string error;
   {
     nb::gil_scoped_release release;
@@ -310,6 +316,8 @@ void encode_policy_batch(StateRows states, PickRows picks, CountIn n_picks, Plan
           encode_selection(*md, s, sel, ids.data(), static_cast<int>(ids.size()),
                            p + size_t{kNumPlanes} * h * w, h, w, g + kNumGlobals,
                            nonspatial.data() + i * kNumNonSpatialIds);
+          if (movement)
+            encode_movement(*md, s, p + (size_t{kNumPlanes} + kNumSelectionPlanes) * h * w, h, w);
           if (targets) {
             const uint16_t want = picks.data()[i * 3 + k];
             const bool legal = ok && std::binary_search(ids.begin(), ids.end(), want);
@@ -322,6 +330,57 @@ void encode_policy_batch(StateRows states, PickRows picks, CountIn n_picks, Plan
     }
   }
   if (!error.empty()) throw nb::value_error(error.c_str());
+}
+
+using StatsOut = nb::ndarray<nb::numpy, int32_t, nb::ndim<3>>;
+
+// Per player of each state: what the auxiliary training targets read.
+enum PlayerStat {
+  kStatArmyValue,  // cost x displayed HP / 10, carried and hidden units included
+  kStatUnits,
+  kStatPower,
+  kStatCopCost,
+  kStatScopCost,
+  kStatPowerUses,
+  kStatPowerOn,
+  kStatUsePowers,  // the game's setting
+  kNumPlayerStats
+};
+
+StatsOut player_stats_batch(StateRows states) {
+  using namespace awbw;
+  const size_t n = states.shape(0);
+  if (states.shape(1) != sizeof(GameState))
+    throw nb::value_error(
+        ("states must have STATE_BYTES = " + std::to_string(sizeof(GameState)) + " columns")
+            .c_str());
+  auto* out = new int32_t[n * kMaxPlayers * kNumPlayerStats]();
+  nb::capsule owner(out, [](void* p) noexcept { delete[] static_cast<int32_t*>(p); });
+  {
+    nb::gil_scoped_release release;
+    GameState s;
+    for (size_t i = 0; i < n; ++i) {
+      std::memcpy(&s, states.data() + i * sizeof s, sizeof s);
+      int32_t* row = out + i * kMaxPlayers * kNumPlayerStats;
+      for (const Unit& u : s.units) {
+        if (!u.alive() || u.owner >= kMaxPlayers) continue;
+        int32_t* f = row + u.owner * kNumPlayerStats;
+        f[kStatArmyValue] += kUnits[u.type].cost * displayed_hp(u.hp) / 10;
+        f[kStatUnits] += 1;
+      }
+      for (int p = 0; p < kMaxPlayers; ++p) {
+        int32_t* f = row + p * kNumPlayerStats;
+        const Player& pl = s.players[p];
+        f[kStatPower] = pl.power;
+        f[kStatCopCost] = pl.cop_cost;
+        f[kStatScopCost] = pl.scop_cost;
+        f[kStatPowerUses] = pl.power_uses;
+        f[kStatPowerOn] = pl.power_on;
+        f[kStatUsePowers] = s.settings.use_powers;
+      }
+    }
+  }
+  return StatsOut(out, {n, size_t{kMaxPlayers}, size_t{kNumPlayerStats}}, owner);
 }
 
 }  // namespace
@@ -403,8 +462,16 @@ NB_MODULE(_core, m) {
       "Where micro-step `id` is among the policy logits over an h x w window: the channel\n"
       "times h * w plus y * w + x for a spatial id, NUM_CHANNELS * h * w plus its place\n"
       "after ID_END_TURN for the others.");
+  m.attr("MOVEMENT_ENCODE_VERSION") = awbw::kMovementEncodeVersion;
+  m.attr("NUM_MOVEMENT_PLANES") = static_cast<int>(awbw::kNumMovementPlanes);
+  {
+    nb::list planes;
+    for (const awbw::PlaneSpec& p : awbw::kMovementPlanes)
+      planes.append(nb::make_tuple(p.name, p.values, p.categorical));
+    m.attr("MOVEMENT_PLANES") = nb::tuple(planes);
+  }
   m.def("encode_policy_batch", &encode_policy_batch, "states"_a, "picks"_a, "n_picks"_a, "planes"_a,
-        "globals"_a, "nonspatial"_a, "targets"_a = nb::none(),
+        "globals"_a, "nonspatial"_a, "targets"_a = nb::none(), "movement"_a = false,
         "Encode decisions for the policy network. Decision i is in state i after its first\n"
         "n_picks[i] picks (micro-steps that don't complete an action) of picks[i] [N, 3]:\n"
         "planes [N, NUM_PLANES + NUM_SELECTION_PLANES, H, W] (encode_batch's, then\n"
@@ -412,7 +479,14 @@ NB_MODULE(_core, m) {
         "legality of the non-spatial ids [N, NUM_NONSPATIAL_IDS] (uint8). With `targets`\n"
         "[N] (int64), the step taken next, picks[i][n_picks[i]], goes there as its\n"
         "policy_index, or -1 if it (or a pick before it) isn't legal; without, a pick\n"
-        "that isn't legal raises.");
+        "that isn't legal raises. With `movement`, MOVEMENT_PLANES follow in planes (turns\n"
+        "from factories and to reach tiles; core/encode.h).");
+  m.attr("PLAYER_STATS") = nb::make_tuple("army_value", "units", "power", "cop_cost", "scop_cost",
+                                          "power_uses", "power_on", "use_powers");
+  m.def("player_stats_batch", &player_stats_batch, "states"_a,
+        "Per player of raw states [N, STATE_BYTES], by player index: PLAYER_STATS as int32\n"
+        "[N, 2, len(PLAYER_STATS)]. The army value is cost x displayed HP / 10 over every\n"
+        "unit, carried and hidden ones included.");
 
   m.attr("OK") = static_cast<int>(awbw::kOk);
   m.attr("TRAPPED") = static_cast<int>(awbw::kTrapped);
@@ -437,6 +511,24 @@ NB_MODULE(_core, m) {
             return out;
           },
           "(x, y, terrain kind, starting country) for each tile with per-game state.")
+      .def(
+          "factory_turns",
+          [](const awbw::MapData& md, int prop, int unit_type) {
+            if (prop < 0 || prop >= md.n_props) throw nb::index_error("no such property");
+            if (unit_type < 0 || unit_type >= awbw::kNumUnitTypes)
+              throw nb::value_error("not a unit type");
+            const int row = md.factory_row[prop][awbw::kMovers.of_type[unit_type]];
+            if (row == awbw::kNoRow) throw nb::value_error("the property doesn't build that type");
+            auto* data = new uint8_t[md.n_tiles];
+            std::memcpy(data, md.turns_row(row), md.n_tiles);
+            nb::capsule owner(data, [](void* p) noexcept { delete[] static_cast<uint8_t*>(p); });
+            return nb::ndarray<nb::numpy, uint8_t, nb::ndim<2>>(
+                data, {static_cast<size_t>(md.height), static_cast<size_t>(md.width)}, owner);
+          },
+          "prop"_a, "unit_type"_a,
+          "Turns a unit of `unit_type` needs from factory `prop` (an index into props()) to\n"
+          "each tile [height, width], on the starting terrain in clear weather without CO\n"
+          "bonuses; 255 where it can't go.")
       .def("tile", &awbw::MapData::tile, "x"_a, "y"_a);
 
   m.def(

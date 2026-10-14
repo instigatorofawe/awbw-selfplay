@@ -25,7 +25,10 @@ progress too (``encode_policy_batch``: the pick so far, the phase and one
 plane per channel marking where its step is legal), and adds a policy head:
 a logit per (channel, tile) from each tile's features and one per non-spatial
 id (End Turn, the powers, Build + type) from the board summary, laid out as
-``_core.policy_index`` says.
+``_core.policy_index`` says. With ``PolicyConfig.movement`` it also reads the
+movement planes (turns from factories and to reach tiles, core/encode.h), and
+with ``PolicyConfig.aux`` a head like the value head predicts what happens
+next (``loader.aux_targets``): only training reads it.
 
 Each block reads its input through an RMS norm over each tile's channels
 (pre-norm) and starts as the identity (its last convolution is zero). Without
@@ -47,6 +50,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .. import _core
+from ..data.loader import AUX_BINARY, AUX_REGRESSION
 
 TERRAIN = 0  # plane index; terrain 0 is off the board
 LOSS, DRAW, WIN = 0, 1, 2  # output classes, for the player to move
@@ -173,14 +177,14 @@ class Block(nn.Module):
 
 
 class ValueHead(nn.Module):
-    """Win/draw/loss logits from the board summary and the globals."""
+    """Win/draw/loss logits (or ``outputs`` others) from the board summary and the globals."""
 
-    def __init__(self, cfg: CriticConfig | PolicyConfig, num_globals: int = _core.NUM_GLOBALS):
+    def __init__(self, cfg: CriticConfig | PolicyConfig, num_globals: int = _core.NUM_GLOBALS, outputs: int = 3):
         super().__init__()
         self.norm = ChannelNorm(cfg.channels)
         self.conv = nn.Conv2d(cfg.channels, cfg.head_channels, 1)
         self.fc1 = nn.Linear(3 * cfg.head_channels + num_globals, cfg.head_hidden)
-        self.fc2 = nn.Linear(cfg.head_hidden, 3)
+        self.fc2 = nn.Linear(cfg.head_hidden, outputs)
 
     def forward(self, x: torch.Tensor, globals_: torch.Tensor, mask: torch.Tensor, area: torch.Tensor) -> torch.Tensor:
         h = F.silu(self.conv(F.silu(self.norm(x))))  # pooling reads only the board
@@ -226,6 +230,8 @@ def value_of(logits: torch.Tensor) -> torch.Tensor:
 
 POLICY_PLANES = tuple(_core.PLANES) + tuple(_core.SELECTION_PLANES)
 NUM_POLICY_PLANES = len(POLICY_PLANES)
+MOVEMENT_PLANES = tuple(_core.MOVEMENT_PLANES)  # after POLICY_PLANES, with PolicyConfig.movement
+NUM_AUX_REGRESSION, NUM_AUX_BINARY = len(AUX_REGRESSION), len(AUX_BINARY)
 NUM_POLICY_GLOBALS = _core.NUM_GLOBALS + _core.NUM_SELECTION_GLOBALS
 LEGAL_PLANES = slice(_core.NUM_PLANES + 1, _core.NUM_PLANES + 1 + _core.NUM_CHANNELS)  # in the input
 
@@ -240,6 +246,8 @@ class PolicyConfig:
     head_hidden: int = 128
     policy_channels: int = 64  # per-tile hidden layer of the policy head
     ratings: bool = True
+    movement: bool = False  # read the movement planes
+    aux: bool = False  # predict the auxiliary targets
 
 
 class PolicyHead(nn.Module):
@@ -276,18 +284,21 @@ class PolicyValueNet(nn.Module):
         super().__init__()
         self.cfg = cfg = cfg or PolicyConfig()
         num_globals = NUM_POLICY_GLOBALS + (NUM_RATING_FEATURES if cfg.ratings else 0)
-        self.embed = Embed(cfg.channels, num_globals, POLICY_PLANES)
+        self.embed = Embed(cfg.channels, num_globals, POLICY_PLANES + (MOVEMENT_PLANES if cfg.movement else ()))
         self.blocks = nn.ModuleList(
             Block(cfg.channels, cfg.pool_channels if (i + 1) % cfg.pool_every == 0 else 0) for i in range(cfg.blocks)
         )
         self.policy = PolicyHead(cfg, num_globals)
         self.value = ValueHead(cfg, num_globals)
+        self.aux = ValueHead(cfg, num_globals, NUM_AUX_REGRESSION + NUM_AUX_BINARY) if cfg.aux else None
 
     def forward(
-        self, planes: torch.Tensor, globals_: torch.Tensor, rating: torch.Tensor | None = None
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        self, planes: torch.Tensor, globals_: torch.Tensor, rating: torch.Tensor | None = None, aux: bool = False
+    ) -> tuple[torch.Tensor, ...]:
         """(spatial policy logits, non-spatial policy logits, value logits); ``rating``
-        as in CriticNet."""
+        as in CriticNet. With ``aux`` (and ``cfg.aux``) a fourth: the auxiliary
+        predictions [B, NUM_AUX_REGRESSION + NUM_AUX_BINARY], the scaled changes of
+        AUX_REGRESSION and then logits for AUX_BINARY."""
         if self.cfg.ratings:
             extra = rating_features(rating, len(globals_), globals_.device).to(globals_.dtype)
             globals_ = torch.cat([globals_, extra], 1)
@@ -296,7 +307,12 @@ class PolicyValueNet(nn.Module):
         for block in self.blocks:
             x = block(x, mask, area)
         spatial, nonspatial = self.policy(x, globals_, mask, area)
-        return spatial, nonspatial, self.value(x, globals_, mask, area)
+        value = self.value(x, globals_, mask, area)
+        if aux:
+            if self.aux is None:
+                raise ValueError("this network has no auxiliary head (PolicyConfig.aux)")
+            return spatial, nonspatial, value, self.aux(x, globals_, mask, area)
+        return spatial, nonspatial, value
 
 
 def flat_policy(spatial: torch.Tensor, nonspatial: torch.Tensor) -> torch.Tensor:

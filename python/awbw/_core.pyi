@@ -87,7 +87,13 @@ def policy_index(state: GameState, id: int, h: int, w: int) -> int:
     after ID_END_TURN for the others.
     """
 
-def encode_policy_batch(states: Annotated[NDArray[numpy.uint8], dict(shape=(None, None), order='C', device='cpu', writable=False)], picks: Annotated[NDArray[numpy.uint16], dict(shape=(None, 3), order='C', device='cpu', writable=False)], n_picks: Annotated[NDArray[numpy.uint8], dict(shape=(None,), order='C', device='cpu', writable=False)], planes: Annotated[NDArray[numpy.uint8], dict(shape=(None, None, None, None), order='C', device='cpu')], globals: Annotated[NDArray[numpy.float32], dict(shape=(None, None), order='C', device='cpu')], nonspatial: Annotated[NDArray[numpy.uint8], dict(shape=(None, None), order='C', device='cpu')], targets: Annotated[NDArray[numpy.int64], dict(shape=(None,), order='C', device='cpu')] | None = None) -> None:
+MOVEMENT_ENCODE_VERSION: int = 1
+
+NUM_MOVEMENT_PLANES: int = 10
+
+MOVEMENT_PLANES: tuple = ...
+
+def encode_policy_batch(states: Annotated[NDArray[numpy.uint8], dict(shape=(None, None), order='C', device='cpu', writable=False)], picks: Annotated[NDArray[numpy.uint16], dict(shape=(None, 3), order='C', device='cpu', writable=False)], n_picks: Annotated[NDArray[numpy.uint8], dict(shape=(None,), order='C', device='cpu', writable=False)], planes: Annotated[NDArray[numpy.uint8], dict(shape=(None, None, None, None), order='C', device='cpu')], globals: Annotated[NDArray[numpy.float32], dict(shape=(None, None), order='C', device='cpu')], nonspatial: Annotated[NDArray[numpy.uint8], dict(shape=(None, None), order='C', device='cpu')], targets: Annotated[NDArray[numpy.int64], dict(shape=(None,), order='C', device='cpu')] | None = None, movement: bool = False) -> None:
     """
     Encode decisions for the policy network. Decision i is in state i after its first
     n_picks[i] picks (micro-steps that don't complete an action) of picks[i] [N, 3]:
@@ -96,7 +102,17 @@ def encode_policy_batch(states: Annotated[NDArray[numpy.uint8], dict(shape=(None
     legality of the non-spatial ids [N, NUM_NONSPATIAL_IDS] (uint8). With `targets`
     [N] (int64), the step taken next, picks[i][n_picks[i]], goes there as its
     policy_index, or -1 if it (or a pick before it) isn't legal; without, a pick
-    that isn't legal raises.
+    that isn't legal raises. With `movement`, MOVEMENT_PLANES follow in planes (turns
+    from factories and to reach tiles; core/encode.h).
+    """
+
+PLAYER_STATS: tuple = ...
+
+def player_stats_batch(states: Annotated[NDArray[numpy.uint8], dict(shape=(None, None), order='C', device='cpu', writable=False)]) -> Annotated[NDArray[numpy.int32], dict(shape=(None, None, None))]:
+    """
+    Per player of raw states [N, STATE_BYTES], by player index: PLAYER_STATS as int32
+    [N, 2, len(PLAYER_STATS)]. The army value is cost x displayed HP / 10 over every
+    unit, carried and hidden ones included.
     """
 
 OK: int = 0
@@ -124,6 +140,13 @@ class MapData:
     def props(self) -> list[tuple[int, int, int, int]]:
         """
         (x, y, terrain kind, starting country) for each tile with per-game state.
+        """
+
+    def factory_turns(self, prop: int, unit_type: int) -> Annotated[NDArray[numpy.uint8], dict(shape=(None, None))]:
+        """
+        Turns a unit of `unit_type` needs from factory `prop` (an index into props()) to
+        each tile [height, width], on the starting terrain in clear weather without CO
+        bonuses; 255 where it can't go.
         """
 
     def tile(self, x: int, y: int) -> int: ...

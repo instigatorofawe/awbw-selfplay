@@ -167,6 +167,63 @@ void encode_selection(const MapData& m, const GameState& s, const Selection& sel
                       const uint16_t* ids, int n, uint8_t* planes, int h, int w, float* globals,
                       uint8_t* nonspatial);
 
+// --- Movement (optional policy input) ----------------------------------------
+//
+// How many turns units need to get places, counted on an empty board where no
+// unit blocks and fuel never runs out (movement.h). The network could work
+// these out from the terrain and units, but only over many layers. Laid out
+// as encode()'s.
+//
+// Factory planes: on each unit's tile, the turns its type needs from the
+// nearest factory its owner holds that builds it, and from the nearest of the
+// other side's, as precomputed per map (MapData::factory_turns): how far
+// reinforcements are, and how overextended the unit is.
+//
+// Reach planes: per side and movement group, the fewest turns any of the
+// side's units in the group needs to get to each tile. Turns count from the
+// side's next chance to move: mine from this one (a unit that has moved
+// starts next turn, a stunned one the turn after), the opponent's from their
+// next turn (a stunned one the turn after). Each unit moves with its CO's
+// bonuses and in the weather it will have then: mine as they are now, the
+// opponent's once the powers and power weather that end at their turn start
+// are over; Sturm's and Lash's moves cost 1, except in snow. Carried units and
+// enemies I can't see are left out.
+//
+// Bump kMovementEncodeVersion whenever one of these changes meaning.
+inline constexpr int kMovementEncodeVersion = 1;
+inline constexpr int kFactoryTurnsCap = 15;
+inline constexpr int kReachTurns = 3;
+
+enum MoveGroup : uint8_t {
+  kGroupFoot,     // Foot, Boot
+  kGroupVehicle,  // Tread, Tire, Pipe
+  kGroupAir,
+  kGroupNaval,  // Sea, Lander
+  kNumMoveGroups
+};
+
+enum MovementPlane : uint8_t {
+  kMovHome,   // 0 none or out of reach; else 1 + the turns from its owner's nearest
+              // factory, capped at kFactoryTurnsCap
+  kMovAway,   // the same from the other side's factories
+  kMovReach,  // 2 x kNumMoveGroups planes, mine then the opponent's, by MoveGroup: 1 + the
+              // fewest turns (0 where one of the units stands), or 0 past kReachTurns
+  kNumMovementPlanes = kMovReach + 2 * kNumMoveGroups,
+};
+
+inline constexpr PlaneSpec kMovementPlanes[kNumMovementPlanes] = {
+    {"home", kFactoryTurnsCap + 2, true},      {"away", kFactoryTurnsCap + 2, true},
+    {"reach.me.foot", kReachTurns + 2, true},  {"reach.me.vehicle", kReachTurns + 2, true},
+    {"reach.me.air", kReachTurns + 2, true},   {"reach.me.naval", kReachTurns + 2, true},
+    {"reach.opp.foot", kReachTurns + 2, true}, {"reach.opp.vehicle", kReachTurns + 2, true},
+    {"reach.opp.air", kReachTurns + 2, true},  {"reach.opp.naval", kReachTurns + 2, true},
+};
+
+int move_group(int move_type);
+
+// Encode the movement planes of `s` into planes [kNumMovementPlanes][h][w].
+void encode_movement(const MapData& m, const GameState& s, uint8_t* planes, int h, int w);
+
 // A policy's logits over an h x w window: the spatial ids at
 // channel * h * w + y * w + x, then the non-spatial ones in order.
 inline constexpr int policy_size(int h, int w) { return kNumChannels * h * w + kNumNonSpatialIds; }

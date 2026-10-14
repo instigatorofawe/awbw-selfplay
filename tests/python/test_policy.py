@@ -9,16 +9,20 @@ from awbw import _core, engine, rules
 from awbw.agents import DRAW, PolicyAgent, RandomAgent, adjudicate, army_values, play, property_counts
 from awbw.cli import main
 from awbw.data.loader import (
+    AUX_BINARY,
+    AUX_REGRESSION,
     PHASE_FACTORY,
     PHASE_IDLE,
     PHASE_MOVED,
     PHASE_SELECTED,
+    aux_targets,
     decision_batches,
     encode_decisions,
     in_validation,
 )
 from awbw.data.shards import Dataset, ShardWriter
 from awbw.nn.model import (
+    MOVEMENT_PLANES,
     NUM_POLICY_GLOBALS,
     NUM_POLICY_PLANES,
     PolicyConfig,
@@ -217,6 +221,67 @@ def test_encode_decisions_flags_steps_that_are_not_legal(cache):
     assert nonspatial[0, 0] == 1 and target is not None and target[0] >= 0  # End Turn is legal
 
 
+def test_movement_planes_follow_the_others(cache):
+    g = random_game(cache, 10)
+    picks, none = np.zeros((1, 3), np.uint16), np.zeros(1, np.uint8)
+    plain, *_ = encode_decisions(g.states[:1], picks, none, 16, targets=False)
+    planes, *_ = encode_decisions(g.states[:1], picks, none, 16, targets=False, movement=True)
+    assert planes.shape == (1, NUM_POLICY_PLANES + _core.NUM_MOVEMENT_PLANES, 16, 16)
+    np.testing.assert_array_equal(planes[:, :NUM_POLICY_PLANES], plain)
+    move = {name: planes[0, NUM_POLICY_PLANES + i] for i, (name, _, _) in enumerate(MOVEMENT_PLANES)}
+    # My Infantry at (1, 1): a turn from my base at (1, 0), three from theirs at (5, 5).
+    assert move["home"][1, 1] == 1 + 1 and move["away"][1, 1] == 1 + 3
+    assert move["home"][0, 1] == 0  # no unit there
+    assert move["reach.me.vehicle"][2, 2] == 1 and move["reach.me.vehicle"][2, 5] == 2  # my Tank
+    assert move["reach.opp.foot"][4, 5] == 1  # their Infantry
+    base = next(i for i, p in enumerate(cache.props()) if p[:2] == (1, 0))
+    turns = cache.factory_turns(base, U["Infantry"])
+    assert turns.shape == (H, W) and turns[0, 1] == 0 and turns[1, 1] == 1 and turns[5, 5] == 3
+    with pytest.raises(ValueError, match="build"):
+        cache.factory_turns(base, U["Fighter"])
+
+
+def test_aux_targets_follow_the_game(cache, tmp_path):
+    g = random_game(cache, 150)
+    a = labels(g)
+    ds = write_dataset(tmp_path / "ds", [g])
+    sh = ds.load(0)
+    rows = np.arange(len(g.states))
+    reg, binary, mask = aux_targets(sh, rows)
+    assert reg.shape == (len(rows), len(AUX_REGRESSION)) and binary.shape == mask.shape == (len(rows), len(AUX_BINARY))
+
+    def state(r):
+        return _core.GameState.from_bytes(g.states[r].tobytes())
+
+    def units(s, p):
+        return sum(s.unit(i).owner == p for i in s.unit_slots())
+
+    starts = {int(a.turn[r]): int(r) for r in rows if a.action[r] == 0}
+    last = len(rows) - 1
+    col = {name: i for i, name in enumerate(AUX_REGRESSION)}
+    for r in rows[:: max(1, len(rows) // 25)]:
+        now, me = state(r), int(g.to_play[r])
+        for h, scale_v, scale_u in ((1, 10_000, 2), (2, 12_000, 2), (6, 20_000, 5), (None, 45_000, 9)):
+            later = state(starts.get(int(a.turn[r]) + h, last) if h else last)
+            for who, p in (("me", me), ("opp", 1 - me)):
+                want = (army_values(later)[p] - army_values(now)[p]) / scale_v
+                assert reg[r, col[f"{who}.value@{h or 'end'}"]] == pytest.approx(want, abs=1e-6)
+                want = (units(later, p) - units(now, p)) / scale_u
+                assert reg[r, col[f"{who}.units@{h or 'end'}"]] == pytest.approx(want, abs=1e-6)
+        if int(a.turn[r]) + 2 in starts:
+            nxt = state(starts[int(a.turn[r]) + 2]).players[me]
+            assert mask[r, 0] and binary[r, 0] == (nxt.power >= nxt.cop_cost)
+        else:
+            assert not mask[r, 0] and not mask[r, 5]
+    # Batches carry the same targets for their decisions.
+    for b in decision_batches(ds, 64, split="all", shuffle=False, aux=True):
+        assert b.aux_reg is not None and b.aux_bin is not None and b.aux_mask is not None
+        r = b.row & 0xFFFFFFFF
+        np.testing.assert_array_equal(b.aux_reg, reg[r])
+        np.testing.assert_array_equal(b.aux_mask, mask[r])
+    assert next(iter(decision_batches(ds, 64, split="all"))).aux_reg is None
+
+
 def _random_net() -> PolicyValueNet:
     torch.manual_seed(0)
     net = PolicyValueNet(TINY)
@@ -296,10 +361,47 @@ def test_train_resumes_and_scores_decisions(cache, tmp_path):
     ]
 
 
+def test_movement_and_aux_train_and_score(cache, tmp_path):
+    ids = np.arange(1, 200)
+    val = in_validation(ids, 0.5)
+    games = [random_game(cache, 60, seed=int(i), game_id=int(i)) for i in [*ids[val][:1], *ids[~val][:2]]]
+    write_dataset(tmp_path / "ds", games)
+    out = tmp_path / "run"
+    cfg = PolicyTrainConfig(
+        epochs=1, fraction=1.0, batch_size=16, warmup_steps=1, val_fraction=0.5, val_rows=1.0, log_every=1
+    )
+    model = dataclasses.replace(TINY, movement=True, aux=True)
+    lines: list[str] = []
+    last = train(tmp_path / "ds", out, cfg, model, log=lines.append)
+    assert set(last["policy"]["aux"]["regression"]) == set(AUX_REGRESSION)
+    assert any(line.startswith("  val aux mse") for line in lines)
+    assert any(" aux " in line for line in lines if line.startswith("epoch "))
+    net, _ = load_policy(out / "best.pt")
+    assert net.cfg == model and net.aux is not None
+    g = games[0]
+    scored = Policy(net).score(g.states[:2])
+    assert all(sc.prior.sum() == pytest.approx(1, rel=1e-5) for sc in scored)
+    with pytest.raises(ValueError, match="auxiliary"):
+        PolicyValueNet(TINY)(
+            torch.zeros(1, NUM_POLICY_PLANES, 16, 16, dtype=torch.uint8), torch.zeros(1, NUM_POLICY_GLOBALS), aux=True
+        )
+
+
 def test_load_policy_refuses_another_encoder(tmp_path):
     net = PolicyValueNet(TINY)
     save_policy(tmp_path / "p.pt", net)
     assert load_policy(tmp_path / "p.pt")[0].cfg == TINY
+    # Checkpoints from before the movement planes and auxiliary head still load.
+    ck = torch.load(tmp_path / "p.pt", weights_only=True)
+    del ck["config"]["movement"], ck["config"]["aux"]
+    torch.save(ck, tmp_path / "old.pt")
+    assert load_policy(tmp_path / "old.pt")[0].cfg == TINY
+    save_policy(tmp_path / "m.pt", PolicyValueNet(dataclasses.replace(TINY, movement=True)))
+    ck = torch.load(tmp_path / "m.pt", weights_only=True)
+    ck["encoder"]["movement_version"] = -1
+    torch.save(ck, tmp_path / "m.pt")
+    with pytest.raises(ValueError, match="other input features"):
+        load_policy(tmp_path / "m.pt")
     ck = torch.load(tmp_path / "p.pt", weights_only=True)
     ck["encoder"]["selection_version"] = -1
     torch.save(ck, tmp_path / "p.pt")

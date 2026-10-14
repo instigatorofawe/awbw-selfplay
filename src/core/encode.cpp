@@ -7,6 +7,7 @@
 #include "core/belief.h"
 #include "core/combat.h"
 #include "core/movegen.h"
+#include "core/movement.h"
 
 namespace awbw {
 
@@ -204,6 +205,119 @@ void encode_selection(const MapData& m, const GameState& s, const Selection& sel
       nonspatial[id - kIdEndTurn] = 1;
     } else {
       cell(kSelLegal + id / kMaxTiles, id % kMaxTiles) = 1;
+    }
+  }
+}
+
+int move_group(int move_type) {
+  switch (move_type) {
+    case kMoveFoot:
+    case kMoveBoot:
+      return kGroupFoot;
+    case kMoveAir:
+      return kGroupAir;
+    case kMoveSea:
+    case kMoveLander:
+      return kGroupNaval;
+    default:
+      return kGroupVehicle;
+  }
+}
+
+void encode_movement(const MapData& m, const GameState& s, uint8_t* planes, int h, int w) {
+  std::memset(planes, 0, sizeof(uint8_t) * kNumMovementPlanes * h * w);
+  const int me = s.active;
+  const int opp = 1 - me;
+  auto cell = [&](int plane, int tile) -> uint8_t& {
+    return planes[(static_cast<size_t>(plane) * h + m.y_of(tile)) * w + m.x_of(tile)];
+  };
+
+  // Each player's factories, and the nearest one's turns for a mover class.
+  uint8_t factories[kMaxPlayers][kMaxProps];
+  int n_factories[kMaxPlayers] = {};
+  for (int p = 0; p < m.n_props; ++p) {
+    const int owner = s.prop_owner[p];
+    if (owner < kMaxPlayers &&
+        (m.prop_kind[p] == kBase || m.prop_kind[p] == kAirport || m.prop_kind[p] == kPort))
+      factories[owner][n_factories[owner]++] = static_cast<uint8_t>(p);
+  }
+  auto nearest = [&](int owner, int cls, int tile) {
+    int best = kUnreachable;
+    for (int j = 0; j < n_factories[owner]; ++j) {
+      const int row = m.factory_row[factories[owner][j]][cls];
+      if (row != kNoRow) best = std::min<int>(best, m.turns_row(row)[tile]);
+    }
+    return best;
+  };
+
+  // How each side moves at its next chance: mine as now, the opponent's once
+  // their power and power weather are over.
+  int weather[2];
+  bool cost_one[2];
+  for (int side = 0; side < 2; ++side) {
+    const Player& p = s.players[side == 0 ? me : opp];
+    const CoStateSpec& co = kCos[p.co].state[side == 0 ? p.power_on : 0];
+    const int now = side == 1 && s.weather_owner == opp ? int{kClear} : s.weather;
+    weather[side] = co.weather_as[now];
+    cost_one[side] = co.move_cost_one && weather[side] != kSnow;
+  }
+
+  // Factory planes, and the units grouped by (side, movement type, points).
+  struct Source {
+    uint16_t key, tile;
+    uint8_t delay;
+  };
+  Source src[kMaxUnits];
+  int n = 0;
+  for (int i = 0; i < kMaxUnits; ++i) {
+    const Unit& u = s.units[i];
+    if (!u.alive() || u.has(kCarried)) continue;
+    const int side = u.owner == me ? 0 : 1;
+    if (side == 1 && !visible_to(m, s, i, me)) continue;
+    const int cls = kMovers.of_type[u.type];
+    const int home = nearest(u.owner, cls, u.tile), away = nearest(1 - u.owner, cls, u.tile);
+    if (home != kUnreachable) cell(kMovHome, u.tile) = clamp_u8(1 + home, 1 + kFactoryTurnsCap);
+    if (away != kUnreachable) cell(kMovAway, u.tile) = clamp_u8(1 + away, 1 + kFactoryTurnsCap);
+    const Player& p = s.players[u.owner];
+    const int mp =
+        side == 0 ? move_points(s, u) : kUnits[u.type].move + kCos[p.co].state[0].move[u.type];
+    const bool stunned = u.has(kStunned);
+    const int delay = side == 0 ? (u.has(kMoved) || stunned) + stunned : stunned;
+    src[n++] = {
+        static_cast<uint16_t>(side << 8 | kUnits[u.type].move_type << 4 | std::clamp(mp, 1, 15)),
+        u.tile, static_cast<uint8_t>(delay)};
+  }
+  std::sort(src, src + n, [](const Source& a, const Source& b) { return a.key < b.key; });
+
+  // Reach planes: one search per group.
+  uint8_t cost[kMaxTiles], turns[kMaxTiles];
+  uint16_t tiles[kMaxUnits];
+  uint8_t delays[kMaxUnits];
+  int cost_key = -1;
+  for (int a = 0, b = 0; a < n; a = b) {
+    const int key = src[a].key;
+    for (b = a; b < n && src[b].key == key; ++b) {
+      tiles[b - a] = src[b].tile;
+      delays[b - a] = src[b].delay;
+    }
+    const int side = key >> 8, move_type = key >> 4 & 15, mp = key & 15;
+    if ((key >> 4) != cost_key) {  // move_cost's, from the map's row and the broken seams
+      cost_key = key >> 4;
+      std::memcpy(cost, m.move_cost[weather[side]][move_type], m.n_tiles);
+      for (int p = 0; p < m.n_props; ++p) {
+        if (m.prop_kind[p] == kSeam && s.prop_points[p] == 0)
+          cost[m.prop_tile[p]] = kMoveCost[weather[side]][kRubble][move_type];
+      }
+      if (cost_one[side]) {
+        for (int t = 0; t < m.n_tiles; ++t) cost[t] = cost[t] != 0;
+      }
+    }
+    turns_from(m, cost, mp, tiles, delays, b - a, kReachTurns, turns);
+    const int plane = kMovReach + side * kNumMoveGroups + move_group(move_type);
+    for (int t = 0; t < m.n_tiles; ++t) {
+      if (turns[t] == kUnreachable) continue;
+      uint8_t& v = cell(plane, t);
+      if (v == 0 || turns[t] + 1 < v) v = static_cast<uint8_t>(turns[t] + 1);
     }
   }
 }

@@ -6,7 +6,7 @@ transposes used for augmentation.
 
 ``batches`` gives states (the critic's input); ``decision_batches`` gives the
 micro-step decisions of a v1 dataset's actions (the policy's), each with the
-step taken.
+step taken and optionally with what happens next in the game (``aux_targets``).
 """
 
 from __future__ import annotations
@@ -146,14 +146,21 @@ _BUILD = _core.ACTIONS["Build"]
 
 
 def encode_decisions(
-    states: np.ndarray, picks: np.ndarray, n_picks: np.ndarray, size: int, targets: bool = True
+    states: np.ndarray,
+    picks: np.ndarray,
+    n_picks: np.ndarray,
+    size: int,
+    targets: bool = True,
+    movement: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
     """Planes [N, NUM_POLICY_PLANES, size, size], globals [N, NUM_POLICY_GLOBALS],
     non-spatial legality [N, NUM_NONSPATIAL_IDS] and, with ``targets``, the
     policy index of the step taken (-1 if it isn't legal), for the decisions
-    reached in each state by its first ``n_picks`` of ``picks`` [N, 3]."""
+    reached in each state by its first ``n_picks`` of ``picks`` [N, 3]. With
+    ``movement`` the MOVEMENT_PLANES follow the others."""
     n = len(states)
-    planes = np.empty((n, _core.NUM_PLANES + _core.NUM_SELECTION_PLANES, size, size), dtype=np.uint8)
+    n_planes = _core.NUM_PLANES + _core.NUM_SELECTION_PLANES + (_core.NUM_MOVEMENT_PLANES if movement else 0)
+    planes = np.empty((n, n_planes, size, size), dtype=np.uint8)
     globals_ = np.empty((n, _core.NUM_GLOBALS + _core.NUM_SELECTION_GLOBALS), dtype=np.float32)
     nonspatial = np.empty((n, _core.NUM_NONSPATIAL_IDS), dtype=np.uint8)
     target = np.empty(n, dtype=np.int64) if targets else None
@@ -165,6 +172,7 @@ def encode_decisions(
         globals_,
         nonspatial,
         target,
+        movement,
     )
     return planes, globals_, nonspatial, target
 
@@ -186,6 +194,93 @@ class DecisionBatch:
     map_id: np.ndarray
     day: np.ndarray
     rating: np.ndarray  # int16 [B, 2], as in Batch
+    # With ``aux`` (aux_targets):
+    aux_reg: np.ndarray | None = None  # float32 [B, len(AUX_REGRESSION)]
+    aux_bin: np.ndarray | None = None  # float32 [B, len(AUX_BINARY)]: 0 / 1
+    aux_mask: np.ndarray | None = None  # bool [B, len(AUX_BINARY)]: where aux_bin counts
+
+
+# --- Auxiliary targets ---------------------------------------------------------
+#
+# What happens next in the game, for heads that train the network alongside the
+# policy and value (as KataGo's do) rather than as rewards. For the player to
+# move, "me", and "opp":
+#
+# * the change in army value and in unit count from the decision to the start
+#   of the turn 1, 2 and 6 player-turns on (the end of my turn, after their
+#   reply, three days on) and to the game's last state; a game that ends sooner
+#   gives its last state. Scaled by about their spread over the v1 dataset.
+# * the CO power bars: whether my COP / SCOP is charged at the start of my next
+#   turn and theirs at the start of theirs, and whether I use a power before
+#   my turn ends and they do in their next turn. Left out (aux_mask) where the
+#   game has no powers, the CO has no such power, or the game ends first.
+AUX_HORIZONS = (1, 2, 6, None)  # player-turns on; None: the game's last state
+_VALUE_SCALE = (10_000, 12_000, 20_000, 45_000)
+_UNITS_SCALE = (2, 2, 5, 9)
+AUX_REGRESSION = tuple(
+    f"{who}.{what}@{h or 'end'}" for h in AUX_HORIZONS for what in ("value", "units") for who in ("me", "opp")
+)
+AUX_BINARY = (
+    "me.cop_ready@2",
+    "me.scop_ready@2",
+    "opp.cop_ready@1",
+    "opp.scop_ready@1",
+    "me.power_used@1",
+    "opp.power_used@2",
+)
+_STAT = {name: i for i, name in enumerate(_core.PLAYER_STATS)}
+
+
+def aux_targets(sh: Shard, rows: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(AUX_REGRESSION float32 [N, 16], AUX_BINARY as 0 / 1 float32 [N, 6], and where
+    each binary target counts, bool [N, 6]) for the shard's samples ``rows``."""
+    assert sh.action is not None
+    stats = _core.player_stats_batch(np.ascontiguousarray(sh.state))  # [S, 2, PLAYER_STATS]: all rows, no copy
+    starts = np.flatnonzero(sh.action == 0)  # turn starts, in game and turn order
+    key = sh.game[starts].astype(np.int64) << 16 | sh.turn[starts]
+    assert (np.diff(sh.g_start) > 0).all()
+    last = np.r_[sh.g_start[1:], len(sh)] - 1  # each game's last sample
+    n = len(rows)
+    game, turn = sh.game[rows].astype(np.int64), sh.turn[rows].astype(np.int64)
+    me = sh.to_play[rows].astype(np.intp)
+    opp = 1 - me
+    end = last[game]
+    at: dict[int | None, tuple[np.ndarray, np.ndarray]] = {None: (end, np.zeros(n, bool))}
+    for h in AUX_HORIZONS[:-1]:
+        assert h is not None
+        want = game << 16 | (turn + h)
+        j = np.minimum(np.searchsorted(key, want), len(key) - 1)
+        found = key[j] == want
+        at[h] = (np.where(found, starts[j], end), ~found)
+
+    def stat(r: np.ndarray, who: np.ndarray, name: str) -> np.ndarray:
+        return stats[r, who, _STAT[name]].astype(np.int64)
+
+    reg = np.empty((n, len(AUX_REGRESSION)), np.float32)
+    k = 0
+    for hi, h in enumerate(AUX_HORIZONS):
+        later, _ = at[h]
+        for name, scale in (("army_value", _VALUE_SCALE[hi]), ("units", _UNITS_SCALE[hi])):
+            for who in (me, opp):
+                reg[:, k] = (stat(later, who, name) - stat(rows, who, name)) / scale
+                k += 1
+
+    powers = stat(rows, me, "use_powers") != 0
+    s1, past1 = at[1]
+    s2, past2 = at[2]
+    out = np.zeros((n, len(AUX_BINARY)), np.float32)
+    mask = np.zeros((n, len(AUX_BINARY)), bool)
+    for c, (r, who, past, level) in enumerate(
+        ((s2, me, past2, "cop"), (s2, me, past2, "scop"), (s1, opp, past1, "cop"), (s1, opp, past1, "scop"))
+    ):
+        cost = stat(r, who, f"{level}_cost")
+        out[:, c] = stat(r, who, "power") >= cost
+        mask[:, c] = powers & (cost > 0) & ~past
+    out[:, 4] = stat(s1, me, "power_uses") > stat(rows, me, "power_uses")
+    mask[:, 4] = powers & (stat(rows, me, "scop_cost") > 0) & ~past1
+    out[:, 5] = stat(s2, opp, "power_uses") > stat(s1, opp, "power_uses")
+    mask[:, 5] = powers & (stat(rows, opp, "scop_cost") > 0) & ~past2
+    return reg, out, mask
 
 
 def row_hash(sh: Shard, rows: np.ndarray) -> np.ndarray:
@@ -211,6 +306,8 @@ def decision_batches(
     row_fraction: float = 1.0,
     forced: bool = False,
     steps: tuple[int, ...] = (0, 1, 2),
+    movement: bool = False,
+    aux: bool = False,
 ) -> Iterator[DecisionBatch]:
     """One pass over the decisions of a v1 dataset's labelled actions.
 
@@ -222,6 +319,7 @@ def decision_batches(
     are as in ``batches``. Shuffling mixes ``shards_at_once`` shards at a
     time; only the states their chosen decisions need are kept. The next
     group of shards loads in a thread while this one's batches are used.
+    ``movement`` adds the movement planes, ``aux`` the auxiliary targets.
     """
     if not ds.has_actions:
         raise ValueError(f"{ds.root}: not a v1 dataset (no action labels)")
@@ -237,7 +335,7 @@ def decision_batches(
         parts = []
         for i in shards:
             sh = ds.load(int(i))
-            args = (split, val_fraction, keep, fraction, row_fraction, forced, steps, group_rng)
+            args = (split, val_fraction, keep, fraction, row_fraction, forced, steps, aux, group_rng)
             if (part := _decisions(sh, int(i), *args)) is not None:
                 parts.append(part)
         if not parts:
@@ -263,7 +361,7 @@ def decision_batches(
         for j in group_rng.permutation(len(todo)) if shuffle else range(len(todo)):
             size, sel = todo[j]
             planes, globals_, nonspatial, target = encode_decisions(
-                states[cols["state"][sel]], cols["steps"][sel], cols["step"][sel], size
+                states[cols["state"][sel]], cols["steps"][sel], cols["step"][sel], size, movement=movement
             )
             assert target is not None
             ok = target >= 0  # a step the engine no longer takes is left out
@@ -272,11 +370,12 @@ def decision_batches(
                 globals=globals_[ok],
                 nonspatial=nonspatial[ok],
                 target=target[ok],
-                **{k: cols[k][sel][ok] for k in _DECISION_FIELDS},
+                **{k: cols[k][sel][ok] for k in _DECISION_FIELDS + (_AUX_FIELDS if aux else ())},
             )
 
 
 _DECISION_FIELDS = ("step", "phase", "n_legal", "kind", "turn_start", "row", "z", "game_id", "map_id", "day", "rating")
+_AUX_FIELDS = ("aux_reg", "aux_bin", "aux_mask")
 
 
 def _read_ahead[T, R](fn: Callable[[T], R], items: list[T]) -> Iterator[R]:
@@ -301,6 +400,7 @@ def _decisions(
     row_fraction: float,
     forced: bool,
     steps: tuple[int, ...],
+    aux: bool,
     rng: np.random.Generator,
 ) -> dict[str, np.ndarray] | None:
     """A shard's chosen decisions, each with its state and labels."""
@@ -341,4 +441,6 @@ def _decisions(
     }
     for name, fn in _SAMPLE_FIELDS.items():
         out[name] = fn(sh)[row]
+    if aux:
+        out["aux_reg"], out["aux_bin"], out["aux_mask"] = aux_targets(sh, row)
     return out

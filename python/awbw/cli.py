@@ -136,6 +136,10 @@ def main(argv: list[str] | None = None) -> int:
     tp.add_argument("--weight-decay", type=float)
     tp.add_argument("--value-weight", type=float, help="weight of the value loss (default 1)")
     tp.add_argument("--value-fraction", type=float, help="share of decisions whose result trains the value (0.05)")
+    tp.add_argument("--movement", action="store_true", default=None, help="read the movement planes")
+    tp.add_argument("--aux", action="store_true", default=None, help="learn the auxiliary targets too")
+    tp.add_argument("--aux-weight", type=float, help="weight of the auxiliary losses (default 1)")
+    tp.add_argument("--aux-fraction", type=float, help="share of decisions that train the auxiliary head (0.25)")
     tp.add_argument("--min-rating", type=int, help="keep games whose players are both rated at least this")
     tp.add_argument("--rating-dropout", type=float, help="chance of hiding a sample's ratings (default 0.25)")
     tp.add_argument("--val-rows", type=float, help="share of validation actions scored (default 0.1)")
@@ -612,6 +616,11 @@ def _eval_policy(args, http: Http) -> int:
             f"    {name:>8s}  {m['n']:9,d}  loss {m['loss']:.4f} (uniform {m['uniform']:.4f})  "
             f"accuracy {m['accuracy']:.3f}"
         )
+    if "aux" in pol:
+        from .nn.train_policy import aux_summary
+
+        for line in aux_summary(pol["aux"]):
+            print(f"  aux {line}")
     for given in (True, False) if net.cfg.ratings else (True,):
         v = evaluate_value(net, ds, device, keep=keep, val_fraction=val_fraction, split=args.split, ratings=given)
         what = "with ratings" if given else "without ratings"

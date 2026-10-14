@@ -9,6 +9,12 @@ and they all share its result, so valuing every one would show each result
 some 40 times as often as the critic sees it in v0 (one sample per turn),
 and the critic already overfits v0 in its third epoch.
 
+A network with ``PolicyConfig.aux`` also learns what happens next in the
+game (``loader.aux_targets``) on a random ``aux_fraction`` of the decisions:
+a Huber loss over the scaled changes in army value and unit count, plus the
+cross-entropy of the power-bar targets where they count, weighted by
+``aux_weight``. These shape the network's features; nothing reads the head.
+
 An epoch is a random ``fraction`` of the training decisions. Each batch gets
 one of the 8 flips and transposes of its square bucket; the spatial policy
 logits are mapped back before the loss. Ratings are hidden at random as for
@@ -39,9 +45,9 @@ import torch
 import torch.nn.functional as F
 
 from .. import _core
-from ..data.loader import DecisionBatch, decision_batches, in_validation
+from ..data.loader import AUX_BINARY, AUX_HORIZONS, AUX_REGRESSION, DecisionBatch, decision_batches, in_validation
 from ..data.shards import Dataset, Shard
-from .model import PolicyConfig, PolicyValueNet, flat_policy, legal_mask, masked_log_softmax
+from .model import NUM_AUX_REGRESSION, PolicyConfig, PolicyValueNet, flat_policy, legal_mask, masked_log_softmax
 from .policy import load_policy, save_policy
 from .train_critic import _lr, _optimizer, dihedral, metrics, prefetch, rating_filter
 
@@ -58,6 +64,8 @@ class PolicyTrainConfig:
     warmup_steps: int = 500
     value_weight: float = 1.0
     value_fraction: float = 0.05  # share of decisions whose result trains the value head
+    aux_weight: float = 1.0  # weight of the auxiliary losses (networks with PolicyConfig.aux)
+    aux_fraction: float = 0.25  # share of decisions that train the auxiliary head
     min_rating: int = 0  # keep games whose players are both rated at least this
     rating_dropout: float = 0.25
     augment: bool = True
@@ -100,7 +108,7 @@ def count_decisions(ds: Dataset, split: str, keep: Callable[[Shard], np.ndarray]
 
 
 def _to_device(b: DecisionBatch, device: torch.device) -> dict[str, torch.Tensor]:
-    return {
+    t = {
         "planes": torch.from_numpy(b.planes).to(device),
         "globals": torch.from_numpy(b.globals).to(device),
         "nonspatial": torch.from_numpy(b.nonspatial).to(device),
@@ -108,15 +116,65 @@ def _to_device(b: DecisionBatch, device: torch.device) -> dict[str, torch.Tensor
         "z": torch.from_numpy(b.z.astype(np.int64) + 1).to(device),  # -1/0/+1 -> LOSS/DRAW/WIN
         "rating": torch.from_numpy(b.rating.astype(np.int32)).to(device),
     }
+    if b.aux_reg is not None:
+        assert b.aux_bin is not None and b.aux_mask is not None
+        t |= {
+            "aux_reg": torch.from_numpy(b.aux_reg).to(device),
+            "aux_bin": torch.from_numpy(b.aux_bin).to(device),
+            "aux_mask": torch.from_numpy(b.aux_mask).to(device),
+        }
+    return t
 
 
-def _forward(net: Any, t: dict[str, torch.Tensor], rating: torch.Tensor | None, k: int = 0):
-    """Log-probabilities over the policy indices and value logits, through flip ``k``."""
-    spatial, nonspatial, value = net(dihedral(t["planes"], k) if k else t["planes"], t["globals"], rating)
+def _forward(net: Any, t: dict[str, torch.Tensor], rating: torch.Tensor | None, k: int = 0, aux: bool = False):
+    """Log-probabilities over the policy indices, value logits and (with ``aux``)
+    the auxiliary predictions, else None, through flip ``k``."""
+    out = net(dihedral(t["planes"], k) if k else t["planes"], t["globals"], rating, aux=aux)
+    spatial, nonspatial, value = out[:3]
     if k:
         spatial = undihedral(spatial, k)
     legal = legal_mask(t["planes"], t["nonspatial"])
-    return masked_log_softmax(flat_policy(spatial, nonspatial), legal), value
+    return masked_log_softmax(flat_policy(spatial, nonspatial), legal), value, out[3] if aux else None
+
+
+def aux_losses(pred: torch.Tensor, t: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per decision and target: the Huber loss of each AUX_REGRESSION change [B, R] and
+    the cross-entropy of each AUX_BINARY target [B, K] (count it only under aux_mask)."""
+    pred = pred.float()
+    reg = F.smooth_l1_loss(pred[:, :NUM_AUX_REGRESSION], t["aux_reg"], reduction="none")
+    bce = F.binary_cross_entropy_with_logits(pred[:, NUM_AUX_REGRESSION:], t["aux_bin"], reduction="none")
+    return reg, bce
+
+
+def aux_metrics(pred: np.ndarray, reg: np.ndarray, binary: np.ndarray, mask: np.ndarray) -> dict[str, Any]:
+    """Validation metrics of the auxiliary head: per AUX_REGRESSION target, the mean
+    squared error against predicting no change; per AUX_BINARY target, the
+    cross-entropy and accuracy where it counts against its base rate's entropy."""
+    err = pred[:, :NUM_AUX_REGRESSION] - reg
+    out: dict[str, Any] = {
+        "regression": {
+            name: {"mse": float((err[:, i] ** 2).mean()), "no_change": float((reg[:, i] ** 2).mean())}
+            for i, name in enumerate(AUX_REGRESSION)
+        },
+        "binary": {},
+    }
+    logits = pred[:, NUM_AUX_REGRESSION:]
+    for i, name in enumerate(AUX_BINARY):
+        m = mask[:, i]
+        if not m.any():
+            continue
+        y, z = binary[m, i], logits[m, i]
+        bce = np.logaddexp(0, z) - y * z
+        rate = float(y.mean())
+        base = -(rate * math.log(rate) + (1 - rate) * math.log(1 - rate)) if 0 < rate < 1 else 0.0
+        out["binary"][name] = {
+            "n": int(m.sum()),
+            "loss": float(bce.mean()),
+            "accuracy": float(((z > 0) == (y > 0.5)).mean()),
+            "rate": rate,
+            "base": base,
+        }
+    return out
 
 
 def policy_metrics(
@@ -157,25 +215,59 @@ def evaluate_policy(
     ratings: bool = True,
     batch_size: int = 512,
 ) -> dict[str, Any]:
-    """``policy_metrics`` on a fixed share of ``split``'s actions."""
+    """``policy_metrics`` on a fixed share of ``split``'s actions, and with an
+    auxiliary head ``aux_metrics`` under "aux"."""
     was_training = net.training
     net.eval()
-    cols: dict[str, list[np.ndarray]] = {k: [] for k in ("nll", "correct", "n_legal", "phase", "row")}
+    aux = net.cfg.aux
+    cols: dict[str, list[np.ndarray]] = {
+        k: [] for k in ("nll", "correct", "n_legal", "phase", "row", "aux", "aux_reg", "aux_bin", "aux_mask")
+    }
     stream = decision_batches(
-        ds, batch_size, split=split, val_fraction=val_fraction, keep=keep, shuffle=False, row_fraction=row_fraction
+        ds,
+        batch_size,
+        split=split,
+        val_fraction=val_fraction,
+        keep=keep,
+        shuffle=False,
+        row_fraction=row_fraction,
+        movement=net.cfg.movement,
+        aux=aux,
     )
     for b in prefetch(stream):
         t = _to_device(b, device)
-        logp, _ = _forward(net, t, t["rating"] if ratings else None)
+        logp, _, pred = _forward(net, t, t["rating"] if ratings else None, aux=aux)
         cols["nll"].append(-logp.gather(1, t["target"][:, None])[:, 0].cpu().numpy())
         cols["correct"].append((logp.argmax(1) == t["target"]).cpu().numpy())
         cols["n_legal"].append(b.n_legal)
         cols["phase"].append(b.phase)
         cols["row"].append(b.row)
+        if pred is not None:
+            assert b.aux_reg is not None and b.aux_bin is not None and b.aux_mask is not None
+            cols["aux"].append(pred.float().cpu().numpy())
+            cols["aux_reg"].append(b.aux_reg)
+            cols["aux_bin"].append(b.aux_bin)
+            cols["aux_mask"].append(b.aux_mask)
     net.train(was_training)
     if not cols["nll"]:
         return {"n": 0, "by_phase": {}}
-    return policy_metrics(*(np.concatenate(cols[k]) for k in ("nll", "correct", "n_legal", "phase", "row")))
+    out = policy_metrics(*(np.concatenate(cols[k]) for k in ("nll", "correct", "n_legal", "phase", "row")))
+    if aux:
+        out["aux"] = aux_metrics(*(np.concatenate(cols[k]) for k in ("aux", "aux_reg", "aux_bin", "aux_mask")))
+    return out
+
+
+def aux_summary(m: dict[str, Any]) -> list[str]:
+    """``aux_metrics`` in two lines: regression error by horizon (against no change),
+    then each power target's cross-entropy (against its base rate's)."""
+    by_h = []
+    for h in AUX_HORIZONS:
+        names = [n for n in AUX_REGRESSION if n.endswith(f"@{h or 'end'}")]
+        mse = np.mean([m["regression"][n]["mse"] for n in names])
+        zero = np.mean([m["regression"][n]["no_change"] for n in names])
+        by_h.append(f"@{h or 'end'} {mse:.3f} ({zero:.3f})")
+    powers = [f"{n} {v['loss']:.3f} ({v['base']:.3f})" for n, v in m["binary"].items()]
+    return ["mse by horizon (no change): " + "  ".join(by_h), "powers (base rate): " + "  ".join(powers)]
 
 
 @torch.no_grad()
@@ -201,7 +293,15 @@ def evaluate_value(
 
     probs, zs, days = [], [], []
     stream = decision_batches(
-        ds, batch_size, split=split, val_fraction=val_fraction, keep=starts, shuffle=False, forced=True, steps=(0,)
+        ds,
+        batch_size,
+        split=split,
+        val_fraction=val_fraction,
+        keep=starts,
+        shuffle=False,
+        forced=True,
+        steps=(0,),
+        movement=net.cfg.movement,
     )
     for b in prefetch(stream):
         t = _to_device(b, device)
@@ -277,6 +377,9 @@ def train(
                 "    by phase: "
                 + "  ".join(f"{name}: {m['loss']:.3f} / {m['accuracy']:.3f}" for name, m in pol["by_phase"].items())
             )
+            if "aux" in pol:
+                for line in aux_summary(pol["aux"]):
+                    log(f"  val aux {line}")
         for given in (True, False) if net.cfg.ratings else (True,):
             r = evaluate_value(net, ds, device, keep=keep, val_fraction=cfg.val_fraction, ratings=given)
             what = "" if not net.cfg.ratings else " with ratings" if given else " without"
@@ -289,9 +392,10 @@ def train(
             f.write(json.dumps(m) + "\n")
         return m
 
+    use_aux = net.cfg.aux
     while epoch < cfg.epochs:
         t0, t_log, n_log = time.perf_counter(), time.perf_counter(), 0
-        sums = torch.zeros(3, device=device)  # policy loss, value loss, value samples
+        sums = torch.zeros(5, device=device)  # policy loss, value loss, value samples, aux loss, steps
         stream = decision_batches(
             ds,
             cfg.batch_size,
@@ -302,6 +406,8 @@ def train(
             shards_at_once=cfg.shards_at_once,
             fraction=cfg.fraction,
             drop_last=True,
+            movement=net.cfg.movement,
+            aux=use_aux,
         )
         for b in prefetch(stream):
             if len(b.target) != cfg.batch_size:
@@ -312,28 +418,44 @@ def train(
             hide = torch.from_numpy(rng.random(len(b.target)) < cfg.rating_dropout).to(device)
             rating = t["rating"].masked_fill(hide[:, None], -1)
             with torch.autocast(device.type, torch.bfloat16, enabled=cfg.bf16 and device.type == "cuda"):
-                logp, value = _forward(forward, t, rating, int(rng.integers(8)) if cfg.augment else 0)
+                logp, value, pred = _forward(forward, t, rating, int(rng.integers(8)) if cfg.augment else 0, use_aux)
             policy_loss = -logp.gather(1, t["target"][:, None]).mean()
             valued = torch.from_numpy(rng.random(len(b.target)) < cfg.value_fraction).to(device)
             ce = F.cross_entropy(value.float(), t["z"], reduction="none")
             value_loss = (ce * valued).sum() / valued.sum().clamp_min(1)
             loss = policy_loss + cfg.value_weight * value_loss
+            aux_loss = torch.zeros((), device=device)
+            if pred is not None:
+                chosen = torch.from_numpy(rng.random(len(b.target)) < cfg.aux_fraction).to(device)
+                reg, bce = aux_losses(pred, t)
+                counted = t["aux_mask"] & chosen[:, None]
+                aux_loss = (reg.mean(1) * chosen).sum() / chosen.sum().clamp_min(1) + (
+                    bce * counted
+                ).sum() / counted.sum().clamp_min(1)
+                loss = loss + cfg.aux_weight * aux_loss
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
             opt.step()
             sums += torch.stack(
-                [policy_loss.detach() * len(b.target), (ce * valued).sum().detach(), valued.sum().float()]
+                [
+                    policy_loss.detach() * len(b.target),
+                    (ce * valued).sum().detach(),
+                    valued.sum().float(),
+                    aux_loss.detach(),
+                    torch.ones((), device=device),
+                ]
             )
             step += 1
             seen += len(b.target)
             n_log += len(b.target)
             if step % cfg.log_every == 0:
                 dt = time.perf_counter() - t_log
-                p, v, nv = sums.tolist()
+                p, v, nv, a, ns = sums.tolist()
+                aux_part = f" aux {a / max(ns, 1):.4f}" if use_aux else ""
                 log(
-                    f"epoch {seen / per_epoch:.2f} step {step}: policy {p / n_log:.4f} value {v / max(nv, 1):.4f} "
-                    f"lr {opt.param_groups[0]['lr']:.2e} {n_log / dt:.0f} decisions/s"
+                    f"epoch {seen / per_epoch:.2f} step {step}: policy {p / n_log:.4f} value {v / max(nv, 1):.4f}"
+                    f"{aux_part} lr {opt.param_groups[0]['lr']:.2e} {n_log / dt:.0f} decisions/s"
                 )
                 sums.zero_()
                 t_log, n_log = time.perf_counter(), 0

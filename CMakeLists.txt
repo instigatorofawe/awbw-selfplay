@@ -40,6 +40,7 @@ add_library(awbw_core STATIC
   src/core/legal.cpp
   src/core/map.cpp
   src/core/movegen.cpp
+  src/core/movement.cpp
   src/core/snapshot.cpp
   src/core/state.cpp)
 target_include_directories(awbw_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -99,6 +100,7 @@ if(AWBW_BUILD_TESTS)
     tests/cpp/test_legal.cpp
     tests/cpp/test_map.cpp
     tests/cpp/test_movegen.cpp
+    tests/cpp/test_movement.cpp
     tests/cpp/test_powers.cpp
     tests/cpp/test_snapshot.cpp
     tests/cpp/test_state.cpp)

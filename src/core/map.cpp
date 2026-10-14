@@ -7,6 +7,8 @@
 #include <shared_mutex>
 #include <unordered_map>
 
+#include "core/movement.h"
+
 namespace awbw {
 
 int MapData::distance(int a, int b) const {
@@ -30,6 +32,19 @@ bool is_capturable(int kind) {
 
 bool pays_income(int kind) {
   return kind == kCity || kind == kBase || kind == kAirport || kind == kPort || kind == kHq;
+}
+
+bool factory_builds(int kind, int move_type) {
+  switch (kind) {
+    case kBase:
+      return move_type != kMoveAir && move_type != kMoveSea && move_type != kMoveLander;
+    case kAirport:
+      return move_type == kMoveAir;
+    case kPort:
+      return move_type == kMoveSea || move_type == kMoveLander;
+    default:
+      return false;
+  }
 }
 
 bool build_map(uint32_t id, int width, int height, const int16_t* terrain_ids, MapData& out,
@@ -84,6 +99,7 @@ bool build_map(uint32_t id, int width, int height, const int16_t* terrain_ids, M
       if (p != kNoProp) out.prop_by_column[k++] = static_cast<uint8_t>(p);
     }
   }
+  compute_factory_turns(out);
   return true;
 }
 
