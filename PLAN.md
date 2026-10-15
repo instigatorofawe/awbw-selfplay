@@ -1083,8 +1083,64 @@ its width and layers; `--heads` (4) and `--mlp-ratio` (4) are its own.
     speed. 128×6 at batch 256 trains in 3.4 GiB at 780/s with it, and runs
     out of memory without it. Eight heads of 16 channels are no faster than
     four of 32 (735/s).
-- Not yet trained on v1-70k; it goes into the scaling grid beside the
-  ResNet.
+- Training on v1-70k in the scaling grid (below) as `tf-s1` (64×6) and
+  `tf128-s1` (128×6, `--recompute`).
+
+### Scaling grid on v1-70k (experiment)
+
+What to scale before the full archive is in: games, net size, training
+length, trunk, and which games. v1-70k has 57,050 games, about 66M
+training decisions. Every run trains on 20.5M decisions, the v1
+baseline's 4 epochs × 5.13M, so the runs on a share of the games repeat
+them. The runs share one validation set: 356,221 decisions and 86,515
+turn starts. One seed each, on the RTX 5070 (`grid1.sh`, `grid2.sh` and
+`grid3.sh` on the box, results in `cache/grid/NAME/metrics.jsonl`).
+
+- **Results after epoch 4** (policy columns are log loss; value is log
+  loss, with ECE in brackets):
+
+  | run | games | net | params | policy | top-1 | idle | selected | moved | factory | whole action | value, ratings | without |
+  |---|---|---|---|---|---|---|---|---|---|---|---|---|
+  | s8 | 1/8 | 64×6 | 0.57M | 1.1411 | 0.602 | 1.615 | 1.120 | 0.097 | 0.723 | 2.656 / 0.303 | 0.5167 (0.014) | 0.5479 (0.024) |
+  | s4 | 1/4 | 64×6 | 0.57M | 1.1412 | 0.602 | 1.613 | 1.122 | 0.097 | 0.726 | 2.657 / 0.303 | 0.5118 (0.007) | 0.5445 (0.014) |
+  | s1 | all | 64×6 | 0.57M | 1.1389 | 0.603 | 1.613 | 1.117 | 0.097 | 0.720 | 2.651 / 0.303 | 0.5096 (0.010) | 0.5433 (0.012) |
+  | c96-s4 | 1/4 | 96×8 | 1.49M | 1.1224 | 0.608 | 1.595 | 1.095 | 0.094 | 0.705 | 2.613 / 0.310 | 0.5101 (0.010) | 0.5428 (0.019) |
+  | c96-s1 | all | 96×8 | 1.49M | 1.1210 | **0.609** | 1.597 | 1.090 | 0.094 | **0.697** | 2.610 / 0.310 | 0.5091 (0.009) | 0.5425 (0.009) |
+  | c128-s1 | all | 128×10 | 3.15M | **1.1182** | **0.609** | **1.591** | **1.082** | **0.093** | 0.743 | **2.603 / 0.312** | **0.5081** (0.009) | **0.5414** (0.009) |
+
+  - **Games barely matter at this length.** Eight times the games (s8 to
+    s1) gives 0.002 in policy loss and 0.007 in value loss. A game's
+    positions share one result, so the value gains more from new games
+    than the policy does.
+  - **Width and depth matter more.** 64×6 to 96×8 gives 0.018 in policy
+    loss, against 0.001 for 4× the games at 96×8. 128×10 gives only
+    0.003 more, though all of it in idle, selected and moved. Its factory
+    phase is worse (0.743 against 0.697), which may be seed noise: factory
+    is 6% of the decisions.
+  - **Confound:** every run sees the same 20.5M decisions, so the bigger
+    nets are likely undertrained. `s1-long` (64×6, 8 epochs) measures what
+    length alone buys. Runs to come: `tf-s1`, `s1-long`, `tf128-s1`,
+    `rated` (both players rated 850+), `hold` (4 maps held out) and `q4`
+    (the newest quarter of the games).
+- **Speed and memory by size** (`bench_sizes.py`, bf16, compiled, real
+  v1-70k batches, alone on the GPU; training at batch 256, search-style
+  inference at batch 1,024; the 24 and 32 buckets mixed as the data is):
+
+  | net | params | train | inference | train memory | hours per 100M decisions |
+  |---|---|---|---|---|---|
+  | 64×6 | 0.57M | 9,081/s | 53,849/s | 1.5 GB | 3.1 |
+  | 96×8 | 1.49M | 6,049/s | 20,734/s | 2.7 GB | 4.6 |
+  | 128×10 | 3.15M | 3,790/s | 12,841/s | 4.1 GB | 7.3 |
+  | 160×12 | 5.78M | 1,755/s | 6,120/s | 6.0 GB | 15.8 |
+  | 192×12 | 8.25M | 1,574/s | 5,130/s | 7.1 GB | 17.6 |
+  | 256×15 | 18.08M | 692/s | 2,537/s | 6.2 GB (`--recompute`) | 40 |
+
+  - 256×15 runs out of memory at batch 256 without `--recompute`.
+  - The 32 bucket runs at 52–60% of the 24 bucket's speed at every size.
+  - Search pays for size more than training does: 128×10 trains at 0.42×
+    the speed of 64×6 but scores leaves at 0.24×.
+- **Lean for the full-archive run:** 96×8 or 128×10, pending `s1-long`.
+  192×12 only if length turns out to be what the bigger nets lack.
 
 ### Later
 
@@ -1285,6 +1341,17 @@ the search always uses the network being trained, the same module.
     the share of those players who went on to win is the rule's error,
     which AlphaGo Zero kept under 5% (`resign_wrong` / `resign_checked` in
     the metrics). Arena and ladder games don't resign.
+    - **Measured** with the `v1-64x6` prior and no training (64 / 16
+      simulations, 25% full; 450 games, all played to the end on the M4
+      Pro). Mean length was 23.9 days, and the cap decided 21% of games.
+    - The rule fires in 89% of games, a mean 8.2 days before the end.
+      That saves 30% of the days and about 31% of the decisions.
+    - The would-be resigner went on to win 13 of 399 (3.3%). Eight of
+      those games were decided by the cap, not on the board; in games
+      that ended on the board it was 5 of 311 (1.6%).
+    - Both are under 5%, so −0.9 over 2 turns stays.
+    - With 10% of the games playing on, about 28% of the decisions are
+      saved, so about 1.4× the games an hour.
 - **Samples:** when a game ends, each of its full searches is labelled with
   the result for its mover and goes into the window. That is the state,
   the picks so far, and the improved policy as up to 192 (policy index,
@@ -1418,6 +1485,6 @@ the search always uses the network being trained, the same module.
 | M0 | Replay ingestion (Python): download + cache, parser, rules JSON | Thousands of replays parsed; settings/filter stats known |
 | M1 | C++ core + bindings: state, `from_snapshot`, movegen, all actions except CO powers, `outcomes`, turn start, `encode_batch` | Every logged attack in `outcomes()` (**done**); state, snapshots, movegen (**done**); apply and turn start, every checkable turn replayed exactly (**done**); `encode_batch`, v0 dataset, **critic v0** (**done**) |
 | M2 | Exact match: full replay stepping, all COs/powers, edge cases | CO powers' effects, missile aim, rain and snow (**done**); ≥ 99% of filtered replays fully verified; benchmarks in CI |
-| M3 | v1 datasets: all idle-phase states + action labels | Micro-step action space and legal mask (**done**); policy prior (behavior cloning) with a value head that matches critic v0 (**done**); baselines: random (**done**), greedy, critic-greedy 1-ply |
+| M3 | v1 datasets: all idle-phase states + action labels | Micro-step action space and legal mask (**done**); policy prior (behavior cloning) with a value head that matches critic v0 (**done**); scaling grid on v1-70k (in progress, §7); baselines: random (**done**), greedy, critic-greedy 1-ply |
 | M4 | Batched Gumbel MCTS with chance nodes, `collect`/`submit` | Search with chance nodes, self-play mode, sims/sec measured (**done**); search beats its own prior in the arena (**done**: 46–18 at 64 simulations); vs critic-greedy |
-| M5 | Self-play loop: actors / learner / evaluator, mixed with human data | Elo rises across checkpoints vs. fixed baselines |
+| M5 | Self-play loop: actors / learner / evaluator, mixed with human data | Loop, ladder and resignation (**done**: 3.3% wrong, 28% of decisions saved); Elo rises across checkpoints vs. fixed baselines |
