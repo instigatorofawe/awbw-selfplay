@@ -1134,8 +1134,8 @@ turn starts. One seed each, on the RTX 5070 (`grid1.sh`, `grid2.sh` and
       miscalibrated (ECE 0.045 after epoch 1), settling to 0.009 as the
       learning rate decayed, as the aux runs did.
     - Twice the width (`tf128-s1`, 1.32M parameters, `--recompute`) gives
-      0.010 more in policy loss but only 0.001 in value. It took 4 hours
-      against 1 h 55 min.
+      0.010 more in policy loss but only 0.001 in value. It trained for
+      3 h 33 min against 1 h 36 min.
     - Attention reads the whole board at every layer. The 64×6 ResNet's
       convolutions reach 12 tiles out by its last block, and the rest
       reaches it only through a pooled summary. Long-range threats may be
@@ -1145,7 +1145,8 @@ turn starts. One seed each, on the RTX 5070 (`grid1.sh`, `grid2.sh` and
     - Policy loss 1.1185: 0.020 better than s1, and level with 128×10 at
       20.5M.
     - Value loss 0.5039: better than 128×10's 0.5081.
-    - It took 81 minutes against 128×10's 109.
+    - It trained for 81 minutes against 128×10's 94 (not counting
+      validation).
     - So at 20.5M decisions every size is undertrained: training steps
       limit these nets more than games or parameters do. The
       full-archive run should train on far more than 20.5M decisions.
