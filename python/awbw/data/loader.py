@@ -317,6 +317,7 @@ def decision_batches(
     steps: tuple[int, ...] = (0, 1, 2),
     movement: bool = False,
     aux: bool = False,
+    memo: list[tuple[np.ndarray, dict[str, np.ndarray]]] | None = None,
 ) -> Iterator[DecisionBatch]:
     """One pass over the decisions of a v1 dataset's labelled actions.
 
@@ -329,11 +330,18 @@ def decision_batches(
     time; only the states their chosen decisions need are kept. The next
     group of shards loads in a thread while this one's batches are used.
     ``movement`` adds the movement planes, ``aux`` the auxiliary targets.
+
+    ``memo`` holds a fixed choice of decisions (no ``shuffle``, ``fraction``
+    1) in memory, for passes that repeat: a whole pass given an empty list
+    fills it, and a pass given a filled one reads no shards. Every pass
+    given the same memo must choose the same way.
     """
     if not ds.has_actions:
         raise ValueError(f"{ds.root}: not a v1 dataset (no action labels)")
     if split not in ("train", "val", "all"):
         raise ValueError(f"unknown split {split!r}")
+    if memo is not None and (shuffle or fraction < 1):
+        raise ValueError("a memo holds a fixed choice of decisions: no shuffle, fraction 1")
     rng = np.random.default_rng(seed)
     order = rng.permutation(len(ds.shards)) if shuffle else np.arange(len(ds.shards))
     groups = [order[start : start + shards_at_once] for start in range(0, len(order), shards_at_once)]
@@ -355,9 +363,17 @@ def decision_batches(
             p["state"] = p["state"] + off
         return states, {k: np.concatenate([p[k] for p in parts]) for k in parts[0]}
 
-    for (_, group_rng), loaded in zip(jobs, _read_ahead(load, jobs), strict=True):
+    filling = memo is not None and not memo
+    if memo:
+        stream = ((rng, loaded) for loaded in memo)
+    else:
+        stream = ((group_rng, loaded) for (_, group_rng), loaded in zip(jobs, _read_ahead(load, jobs), strict=True))
+    held = []
+    for group_rng, loaded in stream:
         if loaded is None:
             continue
+        if filling:
+            held.append(loaded)
         states, cols = loaded
         sizes = np.array([bucket_for(*ds.map_size[int(m)]) for m in cols["map_id"]])
         idx = group_rng.permutation(len(sizes)) if shuffle else np.arange(len(sizes))
@@ -381,6 +397,8 @@ def decision_batches(
                 target=target[ok],
                 **{k: cols[k][sel][ok] for k in _DECISION_FIELDS + (_AUX_FIELDS if aux else ())},
             )
+    if filling and memo is not None:
+        memo.extend(held)  # only once the pass is whole
 
 
 _DECISION_FIELDS = ("step", "phase", "n_legal", "kind", "turn_start", "row", "z", "game_id", "map_id", "day", "rating")

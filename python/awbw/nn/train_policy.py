@@ -25,9 +25,10 @@ validation stay in float32.
 Validation scores the decisions of a fixed ``val_rows`` share of the
 validation games' actions (by phase, against a uniform choice among the
 legal steps, and whole actions), and values every validation turn start, as
-``eval-critic`` does. An output directory holds ``metrics.jsonl``,
-``policy-epNN.pt``, ``best.pt`` (lowest validation policy loss) and
-``last.pt`` + ``optimizer.pt`` for ``resume``.
+``eval-critic`` does. Those decisions are read from the shards once and kept
+in memory (about 1.5 GiB for v1-70k). An output directory holds
+``metrics.jsonl``, ``policy-epNN.pt``, ``best.pt`` (lowest validation policy
+loss) and ``last.pt`` + ``optimizer.pt`` for ``resume``.
 """
 
 from __future__ import annotations
@@ -275,9 +276,11 @@ def evaluate_policy(
     split: str = "val",
     ratings: bool = True,
     batch_size: int = 512,
+    memo: list | None = None,
 ) -> dict[str, Any]:
     """``policy_metrics`` on a fixed share of ``split``'s actions, and with an
-    auxiliary head ``aux_metrics`` under "aux"."""
+    auxiliary head ``aux_metrics`` under "aux". ``memo`` keeps those decisions
+    for the next evaluation (``decision_batches``)."""
     was_training = net.training
     net.eval()
     aux = net.cfg.aux
@@ -294,6 +297,7 @@ def evaluate_policy(
         row_fraction=row_fraction,
         movement=net.cfg.movement,
         aux=aux,
+        memo=memo,
     )
     for b in prefetch(stream):
         t = _to_device(b, device)
@@ -342,8 +346,10 @@ def evaluate_value(
     split: str = "val",
     ratings: bool = True,
     batch_size: int = 512,
+    memo: list | None = None,
 ) -> dict[str, Any]:
-    """The critic's metrics (``train_critic.metrics``) over ``split``'s turn starts."""
+    """The critic's metrics (``train_critic.metrics``) over ``split``'s turn
+    starts; ``memo`` as in ``evaluate_policy``."""
     was_training = net.training
     net.eval()
 
@@ -363,6 +369,7 @@ def evaluate_value(
         forced=True,
         steps=(0,),
         movement=net.cfg.movement,
+        memo=memo,
     )
     for b in prefetch(stream):
         t = _to_device(b, device)
@@ -429,10 +436,19 @@ def train(
     }
     rng = np.random.default_rng(cfg.seed)
     last: dict[str, Any] = {}
+    held: dict[str, list] = {"policy": [], "value": []}  # validation's decisions, read once
 
     def evaluate() -> dict[str, Any]:
         t0 = time.perf_counter()
-        pol = evaluate_policy(net, ds, device, keep=keep, val_fraction=cfg.val_fraction, row_fraction=cfg.val_rows)
+        pol = evaluate_policy(
+            net,
+            ds,
+            device,
+            keep=keep,
+            val_fraction=cfg.val_fraction,
+            row_fraction=cfg.val_rows,
+            memo=held["policy"],
+        )
         m: dict[str, Any] = {"policy": pol}
         if not pol["n"]:
             log("  no validation decisions")
@@ -450,7 +466,9 @@ def train(
                 for line in aux_summary(pol["aux"]):
                     log(f"  val aux {line}")
         for given in (True, False) if net.cfg.ratings else (True,):
-            r = evaluate_value(net, ds, device, keep=keep, val_fraction=cfg.val_fraction, ratings=given)
+            r = evaluate_value(
+                net, ds, device, keep=keep, val_fraction=cfg.val_fraction, ratings=given, memo=held["value"]
+            )
             what = "" if not net.cfg.ratings else " with ratings" if given else " without"
             if r["n"]:
                 log(f"  val value{what}: loss {r['loss']:.4f} accuracy {r['accuracy'] or 0:.3f} ece {r['ece']:.4f}")

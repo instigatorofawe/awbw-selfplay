@@ -178,7 +178,7 @@ def test_random_games_cover_every_phase(cache):
     assert (a.n_steps > 0).all() and NO_ACTION not in a.kind
 
 
-def test_decisions_are_each_steps_state_and_label(cache, tmp_path):
+def test_decisions_are_each_steps_state_and_label(cache, tmp_path, monkeypatch):
     g = random_game(cache, 120)
     a = labels(g)
     ds = write_dataset(tmp_path / "ds", [g, dataclasses.replace(g, game_id=2)])
@@ -219,6 +219,15 @@ def test_decisions_are_each_steps_state_and_label(cache, tmp_path):
     val = in_validation(np.array([1, 2]), 0.5)
     expected = sum(taken.sum() for v in val if v)
     assert count_decisions(ds, "val", None, 0.5) == expected
+
+    memo: list = []
+    first = [b.row for b in decision_batches(ds, 32, split="all", row_fraction=0.5, shuffle=False, memo=memo)]
+    assert memo and len(first) == len(fewer) and all(map(np.array_equal, first, fewer))
+    monkeypatch.setattr(ds, "load", None)  # a pass from the memo reads no shards
+    held = [b.row for b in decision_batches(ds, 32, split="all", row_fraction=0.5, shuffle=False, memo=memo)]
+    assert len(held) == len(fewer) and all(map(np.array_equal, held, fewer))
+    with pytest.raises(ValueError, match="memo"):
+        next(decision_batches(ds, 32, split="all", memo=[]))
 
 
 def test_encode_decisions_flags_steps_that_are_not_legal(cache):
