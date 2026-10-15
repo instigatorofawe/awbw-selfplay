@@ -1096,14 +1096,16 @@ them. The runs share one validation set: 356,221 decisions and 86,515
 turn starts. One seed each, on the RTX 5070 (`grid1.sh`, `grid2.sh` and
 `grid3.sh` on the box, results in `cache/grid/NAME/metrics.jsonl`).
 
-- **Results after epoch 4** (policy columns are log loss; value is log
-  loss, with ECE in brackets):
+- **Results at the end of each run** (4 epochs unless the net column says
+  otherwise; policy columns are log loss; value is log loss, with ECE in
+  brackets):
 
   | run | games | net | params | policy | top-1 | idle | selected | moved | factory | whole action | value, ratings | without |
   |---|---|---|---|---|---|---|---|---|---|---|---|---|
   | s8 | 1/8 | 64×6 | 0.57M | 1.1411 | 0.602 | 1.615 | 1.120 | 0.097 | 0.723 | 2.656 / 0.303 | 0.5167 (0.014) | 0.5479 (0.024) |
   | s4 | 1/4 | 64×6 | 0.57M | 1.1412 | 0.602 | 1.613 | 1.122 | 0.097 | 0.726 | 2.657 / 0.303 | 0.5118 (0.007) | 0.5445 (0.014) |
   | s1 | all | 64×6 | 0.57M | 1.1389 | 0.603 | 1.613 | 1.117 | 0.097 | 0.720 | 2.651 / 0.303 | 0.5096 (0.010) | 0.5433 (0.012) |
+  | s1-long | all | 64×6, 8 epochs | 0.57M | 1.1185 | 0.609 | 1.596 | 1.086 | 0.093 | 0.689 | 2.604 / 0.310 | 0.5039 (0.013) | 0.5371 (0.013) |
   | c96-s4 | 1/4 | 96×8 | 1.49M | 1.1224 | 0.608 | 1.595 | 1.095 | 0.094 | 0.705 | 2.613 / 0.310 | 0.5101 (0.010) | 0.5428 (0.019) |
   | c96-s1 | all | 96×8 | 1.49M | 1.1210 | 0.609 | 1.597 | 1.090 | 0.094 | 0.697 | 2.610 / 0.310 | 0.5091 (0.009) | 0.5425 (0.009) |
   | c128-s1 | all | 128×10 | 3.15M | 1.1182 | 0.609 | 1.591 | 1.082 | 0.093 | 0.743 | 2.603 / 0.312 | 0.5081 (0.009) | 0.5414 (0.009) |
@@ -1134,11 +1136,20 @@ turn starts. One seed each, on the RTX 5070 (`grid1.sh`, `grid2.sh` and
       convolutions reach 12 tiles out by its last block, and the rest
       reaches it only through a pooled summary. Long-range threats may be
       what the ResNet was missing.
-  - **Confound:** every run sees the same 20.5M decisions, so the bigger
-    nets are likely undertrained. `s1-long` (64×6, 8 epochs) measures what
-    length alone buys. Runs to come: `s1-long`, `tf128-s1`,
-    `rated` (both players rated 850+), `hold` (4 maps held out) and `q4`
-    (the newest quarter of the games).
+  - **Length matters as much as size.** `s1-long` trains 64×6 on twice
+    the decisions (41M, 8 epochs on the same schedule).
+    - Policy loss 1.1185: 0.020 better than s1, and level with 128×10 at
+      20.5M.
+    - Value loss 0.5039: better than 128×10's 0.5081.
+    - It took 81 minutes against 128×10's 109.
+    - So at 20.5M decisions every size is undertrained: training steps
+      limit these nets more than games or parameters do. The
+      full-archive run should train on far more than 20.5M decisions.
+    - Its value was miscalibrated mid-run, as the transformer's was. ECE
+      was 0.074 after epoch 1, 0.038 after epoch 4 and 0.041 after epoch
+      6, settling to 0.013.
+  - Runs to come: `tf128-s1`, `rated` (both players rated 850+), `hold`
+    (4 maps held out) and `q4` (the newest quarter of the games).
 - **Speed and memory by size** (`bench_sizes.py`, bf16, compiled, real
   v1-70k batches, alone on the GPU; training at batch 256, search-style
   inference at batch 1,024; the 24 and 32 buckets mixed as the data is):
@@ -1158,9 +1169,11 @@ turn starts. One seed each, on the RTX 5070 (`grid1.sh`, `grid2.sh` and
     the speed of 64×6 but scores leaves at 0.24×.
 - **Lean for the full-archive run:** the transformer, sized by `tf128-s1`.
   That run is 128×6, 1.32M parameters, at 780 decisions/s with
-  `--recompute` beside sp1, so more than a day per 100M decisions. If the
-  bigger transformer is too slow for search, the ResNet lean was 96×8 or
-  128×10, pending `s1-long`.
+  `--recompute` beside sp1, so more than a day per 100M decisions. Alone
+  on the GPU it trains at about 1,650/s, so 17 h per 100M decisions. If
+  the bigger transformer is too slow for search, the fallback is a ResNet
+  of 96×8 or 128×10. Since `s1-long`, the run should spend its time on
+  length before size.
 
 ### Later
 
