@@ -1227,6 +1227,13 @@ length. `bigrun.sh` on the box, started 2026-10-15 after grid4; the log
 is `cache/logs/bigrun.log`, the runs `cache/runs/tf128-full` and
 `cache/runs/tf128-full-mid`.
 
+- **Restart:** training began at 15:10 and stopped three times, at step
+  13,400 each time, on a stored state that fails the engine's check: a
+  Lander carrying a loaded APC, which unloaded and left its infantry on
+  the Lander's tile. The scan of v1-full found 22 such states, in 12
+  games: the grid's v1-70k has none. The engine now moves cargo's cargo
+  with it, and training leaves out a stored state that fails the check
+  (1552b22). Training restarted from scratch at 16:36.
 - **Schedule:** flat-then-decay (`--schedule wsd`): the peak rate until
   the last 1.2 epochs, then linear to 0. A run on a flat rate can branch
   at any point into a finished net with a short decay.
