@@ -1232,11 +1232,12 @@ is `cache/logs/bigrun.log`, the runs `cache/runs/tf128-full` and
   at any point into a finished net with a short decay.
 - **Checkpoints** every 60 minutes between shard groups, so a crash or a
   reboot loses at most an hour; `--resume` picks up within the epoch.
-- **Memory:** a short run first checks whether 128×6 fits at batch 256
-  without `--recompute`, which costs about a third more time. If it
-  fits, the run takes about 8 days, else about 11 (about 1,600
-  decisions/s, 33 h per epoch). A later out-of-memory error switches to
-  `--recompute` and resumes.
+- **Memory:** 128×6 fits at batch 256 without `--recompute`, but only
+  just (11.1 of 12 GB, and the allocator sometimes frees its cache to
+  make room). It trains at about 1,765 decisions/s on v1-full against
+  about 1,600 with `--recompute`: 31 h per epoch with validation, about
+  10.5 days for the 8 epochs and the midway check, ending around Oct 26.
+  A later out-of-memory error switches to `--recompute` and resumes.
 - **Midway check:** the run pauses after epoch 4. A copy decays over 0.2
   epochs (about 7 h) and is
   - scored on v1-full's validation games, as `tf128-s1` is;
