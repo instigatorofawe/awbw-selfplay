@@ -102,8 +102,8 @@ def encode_policy_batch(states: Annotated[NDArray[numpy.uint8], dict(shape=(None
     legality of the non-spatial ids [N, NUM_NONSPATIAL_IDS] (uint8). With `targets`
     [N] (int64), the step taken next, picks[i][n_picks[i]], goes there as its
     policy_index, or -1 if it (or a pick before it) isn't legal or the state fails
-    GameState.check; without, either raises. With `movement`, MOVEMENT_PLANES follow in planes (turns
-    from factories and to reach tiles; core/encode.h).
+    GameState.check; without, either raises. With `movement`, MOVEMENT_PLANES follow
+    in planes (turns from factories and to reach tiles; core/encode.h).
     """
 
 PLAYER_STATS: tuple = ...
