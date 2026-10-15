@@ -1153,8 +1153,9 @@ turn starts. One seed each, on the RTX 5070 (`grid1.sh`, `grid2.sh` and
     - Its value was miscalibrated mid-run, as the transformer's was. ECE
       was 0.074 after epoch 1, 0.038 after epoch 4 and 0.041 after epoch
       6, settling to 0.013.
-  - Runs to come: `rated` (both players rated 850+), `hold`
-    (4 maps held out) and `q4` (the newest quarter of the games).
+  - Runs to come, on the 64×6 transformer with `tf-s1` as their baseline:
+    `tf-rated` (both players rated 850+), `tf-hold` (4 maps held out) and
+    `tf-q4` (the newest quarter of the games).
 - **Speed and memory by size** (`bench_sizes.py`, bf16, compiled, real
   v1-70k batches, alone on the GPU; training at batch 256, search-style
   inference at batch 1,024; the 24 and 32 buckets mixed as the data is):
@@ -1173,6 +1174,10 @@ turn starts. One seed each, on the RTX 5070 (`grid1.sh`, `grid2.sh` and
   - Search pays for size more than training does: 128×10 trains at 0.42×
     the speed of 64×6 but scores leaves at 0.24×.
 - **Lean for the full-archive run:** the transformer.
+  - Follow-up runs use the transformer trunk too. It trains at 0.4× the
+    speed of the 64×6 ResNet but wins at equal training time: `tf-s1`
+    (96 min) against `s1-long` (81 min) is 0.016 better in policy loss and
+    0.008 in value.
   - 128×6 trains at about 1,650 decisions/s alone on the GPU, 17 h per
     100M decisions; 64×6 at about 3,600/s, 8 h.
   - Since `s1-long`, time is better spent on length than on size for the
