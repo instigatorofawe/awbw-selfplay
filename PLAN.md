@@ -1153,9 +1153,42 @@ turn starts. One seed each, on the RTX 5070 (`grid1.sh`, `grid2.sh` and
     - Its value was miscalibrated mid-run, as the transformer's was. ECE
       was 0.074 after epoch 1, 0.038 after epoch 4 and 0.041 after epoch
       6, settling to 0.013.
-  - Runs to come, on the 64×6 transformer with `tf-s1` as their baseline:
-    `tf-rated` (both players rated 850+), `tf-hold` (4 maps held out) and
-    `tf-q4` (the newest quarter of the games).
+- **Which games** (`grid4.sh`): the 64×6 transformer on 20.5M decisions,
+  as `tf-s1`, but on a subset of the games. Each is scored on the
+  validation games of its subset, against `tf-s1` on the same games
+  (`cache/grid/NAME/eval-TAG.txt`):
+
+  | run | trained on | scored on | policy | idle | selected | moved | factory | value, ratings | without |
+  |---|---|---|---|---|---|---|---|---|---|
+  | tf-s1 | all 54,127 games | rated 850+ | 1.1118 | 1.596 | 1.064 | 0.088 | 0.633 | 0.5101 (0.009) | 0.5503 (0.012) |
+  | tf-rated | 24,142 rated 850+ | rated 850+ | 1.1116 | 1.601 | 1.060 | 0.086 | 0.622 | 0.5132 (0.004) | 0.5542 (0.017) |
+  | tf-s1 | all | all | 1.1022 | 1.577 | 1.070 | 0.090 | 0.657 | 0.4962 (0.009) | 0.5277 (0.008) |
+  | tf-rated | rated 850+ | all | 1.1086 | 1.586 | 1.077 | 0.090 | 0.656 | 0.5025 (0.011) | 0.5343 (0.012) |
+  | tf-s1 | all | 4 held-out maps | 1.0968 | 1.587 | 1.071 | 0.090 | 0.684 | 0.4930 (0.014) | 0.5216 (0.009) |
+  | tf-hold | 48,764 on other maps | 4 held-out maps | 1.1125 | 1.593 | 1.090 | 0.091 | 0.786 | 0.4966 (0.010) | 0.5266 (0.012) |
+  | tf-s1 | all | newest quarter | 1.1136 | 1.587 | 1.080 | 0.093 | 0.674 | 0.4744 (0.015) | 0.5127 (0.010) |
+  | tf-q4 | 13,532 newest | newest quarter | 1.1095 | 1.580 | 1.078 | 0.093 | 0.671 | 0.4714 (0.009) | 0.5130 (0.015) |
+
+  - **Rated games alone don't help, even on rated games.** `tf-rated`
+    is level with `tf-s1` in policy loss on rated games (1.1116 against
+    1.1118) and 0.003 worse in value; on all games it is 0.006 worse in
+    both. The rating input may already let the net tell strong play
+    from weak, so weaker players' games cost it little.
+  - **The net carries over to maps it has never seen, except for
+    builds.** On the 4 held-out maps (Cold Flame, Misery, Walls Are
+    Closing In, Beads on a String), `tf-hold` is 0.016 worse in policy
+    loss. Per decision the gap is largest in factory, 0.10 (0.786
+    against 0.684), against 0.001–0.018 in the other phases. Value
+    loses only 0.004 (0.005 without ratings). Build orders are what
+    depends on the map most; a new map's self-play will have to learn
+    them.
+  - **The meta drifts only a little.** On the newest quarter of the
+    games, `tf-q4`, trained on that quarter alone (1.23 passes over it),
+    beats `tf-s1` by 0.004 in policy loss and 0.003 in value with
+    ratings, level without. Old games cost almost nothing.
+  - So the full-archive run trains on every game. Weighting the newest
+    games more during the final decay is a possible refinement, worth
+    at most a few thousandths.
 - **Speed and memory by size** (`bench_sizes.py`, bf16, compiled, real
   v1-70k batches, alone on the GPU; training at batch 256, search-style
   inference at batch 1,024; the 24 and 32 buckets mixed as the data is):
