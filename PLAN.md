@@ -1109,7 +1109,8 @@ turn starts. One seed each, on the RTX 5070 (`grid1.sh`, `grid2.sh` and
   | c96-s4 | 1/4 | 96×8 | 1.49M | 1.1224 | 0.608 | 1.595 | 1.095 | 0.094 | 0.705 | 2.613 / 0.310 | 0.5101 (0.010) | 0.5428 (0.019) |
   | c96-s1 | all | 96×8 | 1.49M | 1.1210 | 0.609 | 1.597 | 1.090 | 0.094 | 0.697 | 2.610 / 0.310 | 0.5091 (0.009) | 0.5425 (0.009) |
   | c128-s1 | all | 128×10 | 3.15M | 1.1182 | 0.609 | 1.591 | 1.082 | 0.093 | 0.743 | 2.603 / 0.312 | 0.5081 (0.009) | 0.5414 (0.009) |
-  | tf-s1 | all | transformer 64×6 | 0.41M | **1.1022** | **0.615** | **1.577** | **1.070** | **0.090** | **0.657** | **2.566 / 0.319** | **0.4962** (0.009) | **0.5277** (0.008) |
+  | tf-s1 | all | transformer 64×6 | 0.41M | 1.1022 | 0.615 | 1.577 | 1.070 | **0.090** | 0.657 | 2.566 / 0.319 | 0.4962 (0.009) | 0.5277 (0.008) |
+  | tf128-s1 | all | transformer 128×6 | 1.32M | **1.0923** | **0.618** | **1.561** | **1.063** | **0.090** | **0.647** | **2.543 / 0.322** | **0.4953** (0.011) | **0.5262** (0.005) |
 
   - **Games barely matter at this length.** Eight times the games (s8 to
     s1) gives 0.002 in policy loss and 0.007 in value loss. A game's
@@ -1132,6 +1133,9 @@ turn starts. One seed each, on the RTX 5070 (`grid1.sh`, `grid2.sh` and
       0.5402, 0.5173, 0.5063, 0.4962. Mid-schedule its value was
       miscalibrated (ECE 0.045 after epoch 1), settling to 0.009 as the
       learning rate decayed, as the aux runs did.
+    - Twice the width (`tf128-s1`, 1.32M parameters, `--recompute`) gives
+      0.010 more in policy loss but only 0.001 in value. It took 4 hours
+      against 1 h 55 min.
     - Attention reads the whole board at every layer. The 64×6 ResNet's
       convolutions reach 12 tiles out by its last block, and the rest
       reaches it only through a pooled summary. Long-range threats may be
@@ -1148,7 +1152,7 @@ turn starts. One seed each, on the RTX 5070 (`grid1.sh`, `grid2.sh` and
     - Its value was miscalibrated mid-run, as the transformer's was. ECE
       was 0.074 after epoch 1, 0.038 after epoch 4 and 0.041 after epoch
       6, settling to 0.013.
-  - Runs to come: `tf128-s1`, `rated` (both players rated 850+), `hold`
+  - Runs to come: `rated` (both players rated 850+), `hold`
     (4 maps held out) and `q4` (the newest quarter of the games).
 - **Speed and memory by size** (`bench_sizes.py`, bf16, compiled, real
   v1-70k batches, alone on the GPU; training at batch 256, search-style
@@ -1167,13 +1171,14 @@ turn starts. One seed each, on the RTX 5070 (`grid1.sh`, `grid2.sh` and
   - The 32 bucket runs at 52–60% of the 24 bucket's speed at every size.
   - Search pays for size more than training does: 128×10 trains at 0.42×
     the speed of 64×6 but scores leaves at 0.24×.
-- **Lean for the full-archive run:** the transformer, sized by `tf128-s1`.
-  That run is 128×6, 1.32M parameters, at 780 decisions/s with
-  `--recompute` beside sp1, so more than a day per 100M decisions. Alone
-  on the GPU it trains at about 1,650/s, so 17 h per 100M decisions. If
-  the bigger transformer is too slow for search, the fallback is a ResNet
-  of 96×8 or 128×10. Since `s1-long`, the run should spend its time on
-  length before size.
+- **Lean for the full-archive run:** the transformer.
+  - 128×6 trains at about 1,650 decisions/s alone on the GPU, 17 h per
+    100M decisions; 64×6 at about 3,600/s, 8 h.
+  - Since `s1-long`, time is better spent on length than on size for the
+    ResNet. Whether that holds for the transformer is untested; a 64×6
+    transformer on 8 epochs would show it.
+  - If the transformer is too slow for search, the fallback is a ResNet
+    of 96×8 or 128×10.
 
 ### Later
 
