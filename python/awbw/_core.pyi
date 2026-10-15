@@ -610,7 +610,7 @@ def fight_outcomes(state: GameState, slot: int, from_: tuple[int, int], target: 
 class SearchConfig:
     """Settings of a BatchedSearch (core/search.h)."""
 
-    def __init__(self, *, sims: int = 64, fast_sims: int = 0, full_fraction: float = 1.0, considered: int = 16, gumbel_scale: float = 1.0, visit_scale: float = 50.0, value_scale: float = 0.10000000149011612, rescale: bool = False, pick_values: bool = True, max_days: int = 0, max_actions: int = 0, movement: bool = False, seed: int = 0) -> None: ...
+    def __init__(self, *, sims: int = 64, fast_sims: int = 0, full_fraction: float = 1.0, considered: int = 16, gumbel_scale: float = 1.0, visit_scale: float = 50.0, value_scale: float = 0.10000000149011612, rescale: bool = False, pick_values: bool = True, max_days: int = 0, max_actions: int = 0, resign_value: float = -0.8999999761581421, resign_turns: int = 0, resign_off: float = 0.10000000149011612, movement: bool = False, seed: int = 0) -> None: ...
 
     @property
     def sims(self) -> int:
@@ -700,6 +700,33 @@ class SearchConfig:
     def max_actions(self, arg: int, /) -> None: ...
 
     @property
+    def resign_value(self) -> float:
+        """
+        self-play: a turn whose first searched decision has at most this value counts toward resigning
+        """
+
+    @resign_value.setter
+    def resign_value(self, arg: float, /) -> None: ...
+
+    @property
+    def resign_turns(self) -> int:
+        """
+        self-play: a player resigns after this many such turns in a row; 0: never
+        """
+
+    @resign_turns.setter
+    def resign_turns(self, arg: int, /) -> None: ...
+
+    @property
+    def resign_off(self) -> float:
+        """
+        self-play: share of the games that play on to the end, to check the rule
+        """
+
+    @resign_off.setter
+    def resign_off(self, arg: float, /) -> None: ...
+
+    @property
     def movement(self) -> bool:
         """the network reads the movement planes"""
 
@@ -776,6 +803,20 @@ class GameRecord:
     @property
     def capped(self) -> bool:
         """stopped by max_days or max_actions and decided as a day limit decides"""
+
+    @property
+    def resigned(self) -> bool:
+        """the loser resigned"""
+
+    @property
+    def would_resign(self) -> int:
+        """
+        a game that played on (resign_off): the player the rule would first have had resign, else -1
+        """
+
+    @property
+    def would_resign_day(self) -> int:
+        """and the day, else -1"""
 
     @property
     def final_state(self) -> GameState: ...

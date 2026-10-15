@@ -69,7 +69,16 @@ struct SearchConfig {
   // A game still going after this day ends as a day limit decides it
   // (day_limit_winner), in the tree and in self-play; 0 = no cap.
   int max_days = 0;
-  int max_actions = 0;    // self-play: a game ends after this many actions, decided the same way
+  int max_actions = 0;  // self-play: a game ends after this many actions, decided the same way
+  // Self-play resignation (AlphaGo Zero's): a player resigns at its first
+  // searched decision of a turn when the searched value there has been at most
+  // `resign_value` at the start of each of its last `resign_turns` turns, this
+  // one included; 0 turns: never. A share `resign_off` of the games play on
+  // to the end and record when the rule would first have resigned, to check
+  // how often that player went on to win.
+  float resign_value = -0.9f;
+  int resign_turns = 0;
+  float resign_off = 0.1f;
   bool movement = false;  // the network reads the movement planes
   uint64_t seed = 0;
 };
@@ -108,8 +117,13 @@ struct GameRecord {
   int winner = kDraw;  // player index, or kDraw
   int days = 0;
   int actions = 0;
-  int decisions = 0;    // searched (full and fast)
-  bool capped = false;  // stopped by max_days or max_actions and decided by day_limit_winner
+  int decisions = 0;      // searched (full and fast)
+  bool capped = false;    // stopped by max_days or max_actions and decided by day_limit_winner
+  bool resigned = false;  // the loser resigned (SearchConfig::resign_turns)
+  // A game that played on (resign_off): the player the rule would first have
+  // had resign, and the day, else -1.
+  int would_resign = -1;
+  int would_resign_day = -1;
   GameState final_state;
 };
 
@@ -200,6 +214,14 @@ class BatchedSearch {
     Selection sel;
     uint64_t game_no = 0;
     int actions = 0, decisions = 0;
+    // Resignation: whether the game may resign, the turn (day * 2 + mover)
+    // whose start was last checked, each player's turns in a row that started
+    // at or below resign_value, and the rule's first verdict in a game that
+    // plays on.
+    bool can_resign = false;
+    int turn = -1;
+    int low[2] = {};
+    int would_resign = -1, would_resign_day = -1;
     bool full = true;
     int target = 0;             // simulations of this search
     int sims = 0;               // simulations done
@@ -220,7 +242,8 @@ class BatchedSearch {
   void start_root(Slot& sl);
   void begin_decision(Slot& sl);
   void finish_search(Slot& sl);
-  void finish_game(Slot& sl, bool capped);
+  void finish_game(Slot& sl, bool capped, int resigner = -1);
+  bool resigns(Slot& sl);
   bool simulate(Slot& sl);  // true: a leaf awaits the network
   int select_root(const Slot& sl) const;
   int select_decision(const Slot& sl, uint32_t node) const;

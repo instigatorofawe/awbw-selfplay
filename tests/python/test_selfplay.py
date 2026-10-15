@@ -115,6 +115,26 @@ def test_games_give_sound_samples(cache, tmp_path):  # noqa: F811
     assert games.evals > 0 and len(games.pending) <= 3
 
 
+def test_games_resign_when_lost(cache, tmp_path):  # noqa: F811
+    s = start(cache)
+    cfg = _core.SearchConfig(sims=4, considered=4, max_days=6, resign_turns=2, resign_off=0, seed=1)
+    starts = cycle(np.frombuffer(s.to_bytes(), np.uint8)[None], np.random.default_rng(0))
+
+    def lost(planes, globals_, legal, movers):  # player 0 sees every position as lost
+        return np.zeros(legal.shape, np.float32), np.where(movers == 0, -1.0, 1.0).astype(np.float32)
+
+    games = Games(lost, starts, cfg, 2)  # type: ignore[arg-type]
+    done = []
+    while len(done) < 2:
+        done += games.round()
+    for g in done:
+        rec = g.record
+        assert rec.resigned and not rec.capped and rec.winner == 1 and rec.would_resign == -1
+        assert rec.days == 2 and rec.final_state.winner == _core.NO_OWNER
+        movers = [_core.GameState.from_bytes(st.tobytes()).active for st in g.samples["states"]]
+        assert g.samples["z"].tolist() == [1 if m == 1 else -1 for m in movers]
+
+
 def test_selfplay_trains_and_resumes(cache, tmp_path):  # noqa: F811
     ids = np.arange(1, 200)
     train_ids = ids[~in_validation(ids)][:2]
@@ -145,6 +165,7 @@ def test_selfplay_trains_and_resumes(cache, tmp_path):  # noqa: F811
     assert {"last.pt", "optimizer.pt", "metrics.jsonl", "net-000003.pt", "net-000006.pt"} <= names
     metrics = [json.loads(line) for line in (out / "metrics.jsonl").read_text().splitlines()]
     assert metrics[-1]["step"] == 6 and metrics[-1]["games"] > 0 and metrics[-1]["window"] >= 20
+    assert 0 <= metrics[-1]["resign_wrong"] <= metrics[-1]["resign_checked"]
     assert sum(m["train"]["steps"] + m["human"]["steps"] for m in metrics) == 6
     assert sum(m["human"]["steps"] for m in metrics) > 0
     for p in [out / "last.pt", *out.glob("net-*.pt")]:  # they load: no numpy scalars in their info

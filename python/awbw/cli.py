@@ -181,6 +181,11 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--considered", type=int, help="steps the root considers (default 16)")
     sp.add_argument("--gumbel-scale", type=float, help="the root's Gumbel noise (default 1)")
     sp.add_argument("--max-days", type=int, help="then a day limit decides the game (default 30)")
+    sp.add_argument(
+        "--resign-value", type=float, help="a turn starting at or below this value counts toward resigning (-0.9)"
+    )
+    sp.add_argument("--resign-turns", type=int, help="such turns in a row before a player resigns; 0: never (2)")
+    sp.add_argument("--resign-off", type=float, help="share of games that play on, to check the rule (0.1)")
     sp.add_argument("--parallel", type=int, help="games at once (default 512)")
     sp.add_argument("--window", type=int, help="self-play samples kept (default 300,000)")
     sp.add_argument("--min-window", type=int, help="samples before training starts (default 20,000)")

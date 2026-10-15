@@ -61,6 +61,12 @@ class SelfPlayConfig:
     gumbel_scale: float = 1.0
     value_scale: float = 0.1
     max_days: int = 30  # then a day limit decides the game
+    # Resignation (SearchConfig): a player resigns when its searched value was at most
+    # resign_value at the start of each of its last resign_turns turns; a share
+    # resign_off of the games play on, to count how often the rule was wrong.
+    resign_value: float = -0.9
+    resign_turns: int = 2  # 0: never
+    resign_off: float = 0.1
     parallel: int = 512  # games at once
     # Window and training
     window: int = 300_000  # self-play samples kept
@@ -272,6 +278,9 @@ _SEARCH_FIELDS = (
     "pick_values",
     "max_days",
     "max_actions",
+    "resign_value",
+    "resign_turns",
+    "resign_off",
     "movement",
     "seed",
 )
@@ -413,7 +422,13 @@ def train(
         value_scale=cfg.value_scale,
     )
     search_cfg = settings.config(
-        movement, cfg.seed * 1_000_003 + step, fast_sims=cfg.fast_sims, full_fraction=cfg.full_fraction
+        movement,
+        cfg.seed * 1_000_003 + step,
+        fast_sims=cfg.fast_sims,
+        full_fraction=cfg.full_fraction,
+        resign_value=cfg.resign_value,
+        resign_turns=cfg.resign_turns,
+        resign_off=cfg.resign_off,
     )
     rng = np.random.default_rng([cfg.seed, step])
     starts = human_starts(ds)
@@ -491,7 +506,7 @@ def train(
         now = time.monotonic()
         dt = now - t_log
         v = stats.v
-        m = {
+        m: dict[str, Any] = {
             "step": step,
             "time": time.time(),
             "hours": (now - t0) / 3600,
@@ -503,6 +518,11 @@ def train(
             "samples_per_h": v["samples"] * 3600 / dt,
             "days": stats.mean("days", "games"),
             "capped": stats.mean("capped", "games"),
+            "resigned": stats.mean("resigned", "games"),
+            # Games that played on where the rule would have resigned, and those the
+            # would-be resigner won, since the run (or its resume) started.
+            "resign_checked": int(totals.v["resign_checked"]),
+            "resign_wrong": int(totals.v["resign_wrong"]),
             "first_player_won": stats.mean("p1_won", "games"),
             "drawn": stats.mean("drawn", "games"),
             "decisions": stats.mean("decisions", "games"),
@@ -527,7 +547,8 @@ def train(
         tr, hu, fr = m["train"], m["human"], m["fresh"]
         log(
             f"step {step} | {m['games']:,} games, +{m['games_per_h']:,.0f}/h, {m['days']:.1f} days, "
-            f"capped {m['capped']:.0%}, P1 won {m['first_player_won']:.0%} | window {window.count:,} "
+            f"capped {m['capped']:.0%}, resigned {m['resigned']:.0%} (wrong {m['resign_wrong']}/"
+            f"{m['resign_checked']}), P1 won {m['first_player_won']:.0%} | window {window.count:,} "
             f"(+{m['samples_per_h']:,.0f}/h) | {m['evals_per_s']:,.0f} evals/s | "
             f"train ce {tr['policy_ce']:.3f} kl {tr['policy_kl']:.3f} v {tr['value_ce']:.3f} | "
             f"fresh ce {fr['policy_ce']:.3f} kl {fr['policy_kl']:.3f} v {fr['value_ce']:.3f} | "
@@ -545,12 +566,17 @@ def train(
             n = len(g.samples["z"])
             ce, kl, vce = fresh_losses(net, g, movement, device)
             rec = g.record
-            totals.add(games=1)
+            totals.add(
+                games=1,
+                resign_checked=rec.would_resign >= 0,
+                resign_wrong=rec.would_resign >= 0 and rec.winner == rec.would_resign,
+            )
             stats.add(
                 games=1,
                 samples=n,
                 days=rec.days,
                 capped=rec.capped,
+                resigned=rec.resigned,
                 p1_won=rec.winner == g.first,
                 drawn=rec.winner == _core.DRAW,
                 decisions=rec.decisions,

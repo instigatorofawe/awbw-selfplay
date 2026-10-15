@@ -1189,7 +1189,8 @@ NB_MODULE(_core, m) {
           "__init__",
           [](awbw::SearchConfig* c, int sims, int fast_sims, float full_fraction, int considered,
              float gumbel_scale, float visit_scale, float value_scale, bool rescale,
-             bool pick_values, int max_days, int max_actions, bool movement, uint64_t seed) {
+             bool pick_values, int max_days, int max_actions, float resign_value, int resign_turns,
+             float resign_off, bool movement, uint64_t seed) {
             new (c) awbw::SearchConfig{.sims = sims,
                                        .fast_sims = fast_sims,
                                        .full_fraction = full_fraction,
@@ -1201,13 +1202,17 @@ NB_MODULE(_core, m) {
                                        .pick_values = pick_values,
                                        .max_days = max_days,
                                        .max_actions = max_actions,
+                                       .resign_value = resign_value,
+                                       .resign_turns = resign_turns,
+                                       .resign_off = resign_off,
                                        .movement = movement,
                                        .seed = seed};
           },
           nb::kw_only(), "sims"_a = 64, "fast_sims"_a = 0, "full_fraction"_a = 1.0f,
           "considered"_a = 16, "gumbel_scale"_a = 1.0f, "visit_scale"_a = 50.0f,
           "value_scale"_a = 0.1f, "rescale"_a = false, "pick_values"_a = true, "max_days"_a = 0,
-          "max_actions"_a = 0, "movement"_a = false, "seed"_a = 0)
+          "max_actions"_a = 0, "resign_value"_a = -0.9f, "resign_turns"_a = 0,
+          "resign_off"_a = 0.1f, "movement"_a = false, "seed"_a = 0)
       .def_rw("sims", &awbw::SearchConfig::sims,
               "simulations of a full search, after the root's own evaluation")
       .def_rw("fast_sims", &awbw::SearchConfig::fast_sims,
@@ -1230,6 +1235,13 @@ NB_MODULE(_core, m) {
               "a game still going after this day is decided as a day limit decides it; 0: no cap")
       .def_rw("max_actions", &awbw::SearchConfig::max_actions,
               "self-play: a game ends after this many actions, decided the same way; 0: no cap")
+      .def_rw("resign_value", &awbw::SearchConfig::resign_value,
+              "self-play: a turn whose first searched decision has at most this value counts "
+              "toward resigning")
+      .def_rw("resign_turns", &awbw::SearchConfig::resign_turns,
+              "self-play: a player resigns after this many such turns in a row; 0: never")
+      .def_rw("resign_off", &awbw::SearchConfig::resign_off,
+              "self-play: share of the games that play on to the end, to check the rule")
       .def_rw("movement", &awbw::SearchConfig::movement, "the network reads the movement planes")
       .def_rw("seed", &awbw::SearchConfig::seed);
 
@@ -1264,6 +1276,11 @@ NB_MODULE(_core, m) {
       .def_ro("decisions", &awbw::GameRecord::decisions, "searched, full and fast")
       .def_ro("capped", &awbw::GameRecord::capped,
               "stopped by max_days or max_actions and decided as a day limit decides")
+      .def_ro("resigned", &awbw::GameRecord::resigned, "the loser resigned")
+      .def_ro("would_resign", &awbw::GameRecord::would_resign,
+              "a game that played on (resign_off): the player the rule would first have had "
+              "resign, else -1")
+      .def_ro("would_resign_day", &awbw::GameRecord::would_resign_day, "and the day, else -1")
       .def_ro("final_state", &awbw::GameRecord::final_state);
 
   nb::class_<awbw::BatchedSearch>(

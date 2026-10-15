@@ -18,6 +18,7 @@ nanobind, for:
 | Weather | Clear, plus the rain and snow CO powers bring (Drake, Olaf); random weather comes later |
 | Search | Gumbel AlphaZero-style MCTS, exact simulator, explicit chance nodes |
 | First model | Critic trained on positions parsed from human replays |
+| Compute | One GPU (an RTX 5070, 12 GB) for pre-training, search and self-play; no rented compute |
 
 ## 1. Repository layout
 
@@ -1276,6 +1277,14 @@ the search always uses the network being trained, the same module.
     samples; the rest use 16 and only choose the step.
   - Gumbel noise at the root (scale 1) explores.
   - A 30-day cap ends the game, decided as a day limit would.
+  - **Resignation** (AlphaGo Zero's rule, by turns): a player resigns at
+    its first searched decision of a turn when the search's value there
+    was at most −0.9 (P(win) − P(loss), about a 5% chance to win) at the
+    start of each of its last 2 turns, this one included. 10% of the games
+    play on to the end and record when the rule would first have resigned;
+    the share of those players who went on to win is the rule's error,
+    which AlphaGo Zero kept under 5% (`resign_wrong` / `resign_checked` in
+    the metrics). Arena and ladder games don't resign.
 - **Samples:** when a game ends, each of its full searches is labelled with
   the result for its mover and goes into the window. That is the state,
   the picks so far, and the improved policy as up to 192 (policy index,
@@ -1299,7 +1308,8 @@ the search always uses the network being trained, the same module.
   - **Ratings:** self-play tells the network none, at the leaves and in
     training; human batches keep theirs, hidden at random.
 - **Output:** `metrics.jsonl` every minute, with games/h, game length, the
-  share capped, the first player's wins, and train, fresh and human losses.
+  shares capped and resigned, the first player's wins, and train, fresh and
+  human losses.
   `net-NNNNNN.pt` every 2,000 steps; `last.pt` + `optimizer.pt` for
   `--resume`, after which the window starts empty.
 - **Ladder** (`awbw ladder RUN --baseline PATH`): each checkpoint plays the

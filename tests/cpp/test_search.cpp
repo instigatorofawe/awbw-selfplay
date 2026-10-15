@@ -28,6 +28,7 @@ using testing::put;
 struct FakeNet {
   bool material = false;
   float picked = 0;  // added to the value of a decision with an action in progress
+  float lean = 0;    // taken from player 0's value and added to player 1's
   int evals = 0;
 
   // One collect / submit round; false once there was nothing to search.
@@ -46,6 +47,7 @@ struct FakeNet {
       const float* g = globals.data() + static_cast<size_t>(j) * kNumPolicyGlobals;
       if (material) values[j] = std::tanh(5.0f * (g[kGArmyValue] - g[kSideGlobals + kGArmyValue]));
       if (g[kNumGlobals + kSelGPhase + kPhaseIdle] == 0) values[j] += picked;
+      values[j] += movers[j] == 0 ? -lean : lean;
     }
     bs.submit(logits.data(), width, values.data());
     evals += n;
@@ -393,12 +395,14 @@ struct Played {
   int evals = 0;
 };
 
-Played self_play(const MapData& m, const SearchConfig& cfg, int games, bool check_trees) {
+Played self_play(const MapData& m, const SearchConfig& cfg, int games, bool check_trees,
+                 float lean = 0) {
   std::mt19937 rng(11);
   BatchedSearch bs(cfg, 16);
   for (int g = 0; g < games; ++g) bs.add_game(m, arena_start(m, rng));
   FakeNet net;
-  net.material = true;
+  net.material = lean == 0;
+  net.lean = lean;
   Played out;
   while (net.round(bs)) {
     if (check_trees) {
@@ -481,6 +485,58 @@ TEST(Search, FastSearchesArePlayedButNotKept) {
   EXPECT_GT(kept, 0.15);
   EXPECT_LT(kept, 0.35);
   for (const SearchSample& smp : p.samples) EXPECT_EQ(smp.result.sims, 8);
+}
+
+TEST(Search, ALosingPlayerResignsAtItsTurnStart) {
+  const MapData m = make_map(kArena);
+  SearchConfig cfg;
+  cfg.sims = 4;
+  cfg.considered = 4;
+  cfg.max_days = 6;
+  cfg.resign_turns = 2;
+  cfg.resign_off = 0;
+  // Player 0's every value is -1: it resigns at the start of its second turn.
+  Played p = self_play(m, cfg, 4, false, 1.0f);
+  ASSERT_EQ(p.records.size(), 4u);
+  for (const GameRecord& r : p.records) {
+    EXPECT_TRUE(r.resigned);
+    EXPECT_FALSE(r.capped);
+    EXPECT_EQ(r.winner, 1);
+    EXPECT_EQ(r.days, 2);
+    EXPECT_EQ(r.final_state.winner, kNoOwner);
+    EXPECT_EQ(r.would_resign, -1);
+  }
+  // The resigning decision is still a sample.
+  ASSERT_FALSE(p.samples.empty());
+  const SearchSample& last = p.samples.back();
+  EXPECT_EQ(last.result.mover, 0);
+  EXPECT_EQ(last.state.day, 2);
+  EXPECT_LE(last.result.value, cfg.resign_value);
+
+  // Games that play on note when the rule would have resigned.
+  cfg.resign_off = 1;
+  p = self_play(m, cfg, 4, false, 1.0f);
+  for (const GameRecord& r : p.records) {
+    EXPECT_FALSE(r.resigned);
+    EXPECT_GT(r.days, 2);
+    EXPECT_EQ(r.would_resign, 0);
+    EXPECT_EQ(r.would_resign_day, 2);
+  }
+
+  // A line below every value never resigns, and neither does the default.
+  cfg.resign_off = 0;
+  cfg.resign_value = -1.5f;
+  p = self_play(m, cfg, 2, false, 1.0f);
+  for (const GameRecord& r : p.records) EXPECT_FALSE(r.resigned);
+  cfg = SearchConfig{};
+  cfg.sims = 4;
+  cfg.considered = 4;
+  cfg.max_days = 3;
+  p = self_play(m, cfg, 2, false, 1.0f);
+  for (const GameRecord& r : p.records) {
+    EXPECT_FALSE(r.resigned);
+    EXPECT_EQ(r.would_resign, -1);
+  }
 }
 
 TEST(Search, ADayCapDecidesByPropertiesThenArmy) {

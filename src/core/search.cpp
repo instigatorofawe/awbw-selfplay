@@ -142,6 +142,10 @@ uint64_t BatchedSearch::add_game(const MapData& m, const GameState& s) {
   sl.actions = sl.decisions = 0;
   rng_seed(sl.rng, cfg_.seed ^ (0xD1B54A32D192ED03ull * (sl.game_no + 1)));
   rng_seed(sl.game.rng, rng_next(sl.rng));  // games from one start draw their own luck
+  sl.can_resign = cfg_.resign_turns > 0 && !(uniform(sl.rng) < cfg_.resign_off);
+  sl.turn = -1;
+  sl.low[0] = sl.low[1] = 0;
+  sl.would_resign = sl.would_resign_day = -1;
   begin_decision(sl);
   return sl.game_no;
 }
@@ -486,14 +490,38 @@ void BatchedSearch::finish_search(Slot& sl) {
   softmax(z, r.policy);
 }
 
-void BatchedSearch::finish_game(Slot& sl, bool capped) {
+// At a game's first searched decision of a turn, whether the mover resigns
+// (SearchConfig::resign_turns); a game that plays on notes the first time the
+// rule would have.
+bool BatchedSearch::resigns(Slot& sl) {
+  const int mover = sl.result.mover;
+  const int turn = sl.game.day * 2 + mover;
+  if (cfg_.resign_turns <= 0 || turn == sl.turn) return false;
+  sl.turn = turn;
+  int& low = sl.low[mover];
+  low = sl.result.value <= cfg_.resign_value ? low + 1 : 0;
+  if (low < cfg_.resign_turns) return false;
+  if (sl.can_resign) return true;
+  if (sl.would_resign < 0) {
+    sl.would_resign = mover;
+    sl.would_resign_day = sl.game.day;
+  }
+  return false;
+}
+
+void BatchedSearch::finish_game(Slot& sl, bool capped, int resigner) {
   GameRecord rec;
   rec.game = sl.game_no;
-  rec.winner = capped ? day_limit_winner(*sl.map, sl.game) : sl.game.winner;
+  rec.winner = resigner >= 0 ? 1 - resigner
+               : capped      ? day_limit_winner(*sl.map, sl.game)
+                             : sl.game.winner;
   rec.days = sl.game.day;
   rec.actions = sl.actions;
   rec.decisions = sl.decisions;
   rec.capped = capped;
+  rec.resigned = resigner >= 0;
+  rec.would_resign = sl.would_resign;
+  rec.would_resign_day = sl.would_resign_day;
   rec.final_state = sl.game;
   records_.push_back(rec);
   sl.mode = kFree;
@@ -522,6 +550,10 @@ int BatchedSearch::collect() {
           samples_.push_back(std::move(smp));
         }
         ++sl.decisions;
+        if (resigns(sl)) {
+          finish_game(sl, false, sl.result.mover);
+          break;
+        }
         Action a;
         const MapData& m = *sl.map;
         const bool completes = step_action(m, sl.game, sl.sel, sl.result.id, a);
