@@ -243,6 +243,18 @@ def test_encode_decisions_flags_steps_that_are_not_legal(cache):
     planes, globals_, nonspatial, target = encode_decisions(g.states[:1], a.steps[:1], np.zeros(1, np.uint8), 16)
     assert planes.shape == (1, NUM_POLICY_PLANES, 16, 16) and globals_.shape == (1, NUM_POLICY_GLOBALS)
     assert nonspatial[0, 0] == 1 and target is not None and target[0] >= 0  # End Turn is legal
+    # A stored state the engine can't take is left out too, and raises without targets.
+    s1, s2 = (_core.GameState.from_bytes(g.states[0].tobytes()) for _ in range(2))
+    s1.set_supplies(s1.find_unit(1), 98, 0)
+    s2.set_supplies(s2.find_unit(1), 97, 0)
+    bad, other = np.frombuffer(s1.to_bytes(), np.uint8).copy(), np.frombuffer(s2.to_bytes(), np.uint8)
+    (fuel,) = np.flatnonzero(bad != other)
+    bad[fuel] = 250  # above an Infantry's 99, which the setters refuse
+    states = np.stack([bad, g.states[0]])
+    _, _, _, target = encode_decisions(states, a.steps[[0, 0]], np.zeros(2, np.uint8), 16)
+    assert target is not None and target[0] == -1 and target[1] >= 0
+    with pytest.raises(ValueError, match="fuel above max"):
+        encode_decisions(states[:1], a.steps[:1], np.zeros(1, np.uint8), 16, targets=False)
 
 
 def test_movement_planes_follow_the_others(cache):

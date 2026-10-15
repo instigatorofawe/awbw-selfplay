@@ -70,15 +70,23 @@ void remove_unit(GameState& s, int slot) {
   std::memset(s.hp_hidden[slot], 0, kHpBins);
 }
 
+// A transport's cargo stands on its tile, and the cargo's cargo too (AWBW
+// lets a loaded APC board a Lander).
+static void move_cargo(GameState& s, const Unit& t, int tile) {
+  for (uint8_t c : t.cargo) {
+    if (c == kNoUnit) continue;
+    s.units[c].tile = static_cast<uint16_t>(tile);
+    move_cargo(s, s.units[c], tile);
+  }
+}
+
 void relocate_unit(GameState& s, int slot, int tile) {
   Unit& u = s.units[slot];
   if (u.tile == tile) return;
   s.unit_at[u.tile] = kNoUnit;
   s.unit_at[tile] = static_cast<uint8_t>(slot);
   u.tile = static_cast<uint16_t>(tile);
-  for (uint8_t c : u.cargo) {
-    if (c != kNoUnit) s.units[c].tile = static_cast<uint16_t>(tile);
-  }
+  move_cargo(s, u, tile);
 }
 
 void load_unit(GameState& s, int slot, int transport) {
@@ -86,6 +94,7 @@ void load_unit(GameState& s, int slot, int transport) {
   Unit& t = s.units[transport];
   if (s.unit_at[u.tile] == slot) s.unit_at[u.tile] = kNoUnit;
   u.tile = t.tile;
+  move_cargo(s, u, t.tile);
   u.flags |= kCarried;
   u.carrier = static_cast<uint8_t>(transport);
   t.cargo[t.cargo[0] == kNoUnit ? 0 : 1] = static_cast<uint8_t>(slot);
@@ -100,6 +109,7 @@ void unload_unit(GameState& s, int slot, int tile) {
   u.flags &= static_cast<uint8_t>(~kCarried);
   u.carrier = kNoUnit;
   u.tile = static_cast<uint16_t>(tile);
+  move_cargo(s, u, tile);
   s.unit_at[tile] = static_cast<uint8_t>(slot);
 }
 

@@ -292,8 +292,12 @@ void encode_policy_batch(StateRows states, PickRows picks, CountIn n_picks, Plan
       } else if (md->height > h || md->width > w) {
         error = "map " + std::to_string(s.map_id) + " is " + std::to_string(md->width) + "x" +
                 std::to_string(md->height) + ", larger than the planes";
-      } else if (std::string bad = check_state(*md, s); !bad.empty()) {
+      } else if (std::string bad = check_state(*md, s); !bad.empty() && !targets) {
         error = bad;
+      } else if (!bad.empty()) {
+        targets->data()[i] =
+            -1;  // a stored state the engine can't take, left out like an illegal step
+        continue;
       } else if (k > (targets ? 2 : 3)) {
         error = "too many picks";
       } else {
@@ -585,8 +589,9 @@ NB_MODULE(_core, m) {
         "SELECTION_PLANES), globals [N, NUM_GLOBALS + NUM_SELECTION_GLOBALS] and the\n"
         "legality of the non-spatial ids [N, NUM_NONSPATIAL_IDS] (uint8). With `targets`\n"
         "[N] (int64), the step taken next, picks[i][n_picks[i]], goes there as its\n"
-        "policy_index, or -1 if it (or a pick before it) isn't legal; without, a pick\n"
-        "that isn't legal raises. With `movement`, MOVEMENT_PLANES follow in planes (turns\n"
+        "policy_index, or -1 if it (or a pick before it) isn't legal or the state fails\n"
+        "GameState.check; without, either raises. With `movement`, MOVEMENT_PLANES follow in "
+        "planes (turns\n"
         "from factories and to reach tiles; core/encode.h).");
   m.attr("PLAYER_STATS") = nb::make_tuple("army_value", "units", "power", "cop_cost", "scop_cost",
                                           "power_uses", "power_on", "use_powers");

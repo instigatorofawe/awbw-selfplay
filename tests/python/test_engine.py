@@ -158,6 +158,24 @@ def test_cargo_slots(md):
     assert not s.unit(lander).flags & _core.UNIT_MOVED  # unloading in place keeps its action
 
 
+def test_cargo_of_cargo_moves_with_it(md):
+    # AWBW lets a loaded APC board a Lander (12 games of the archive); the
+    # APC's infantry goes wherever the APC does.
+    shore = _core.register_map(910003, np.array([[28, 29, 1], [28, 28, 1]], dtype=np.int16))
+    rows = [
+        (50, U["Lander"], 0, 0, 1, 100, 99, 0, 0, 51, 0),
+        (51, U["APC"], 0, 0, 1, 100, 70, 0, 0, 52, 0),
+        (52, U["Infantry"], 0, 0, 1, 100, 99, 0, 0, 0, 0),
+    ]
+    s = _core.load_snapshot(shore, _core.Settings(), 4, 0, players(), np.zeros((0, 4), dtype=np.int64), units(*rows))
+    lander, apc, inf = (s.find_unit(i) for i in (50, 51, 52))
+    assert s.check() == "" and s.unit(inf).carrier == apc
+    assert _core.apply(s, A["Unload"], lander, to=(1, 0), target=(2, 0)) == _core.OK
+    assert s.check() == ""
+    assert s.unit(apc).tile == s.unit(inf).tile == shore.tile(2, 0)
+    assert s.unit(inf).carrier == apc and s.unit(lander).tile == shore.tile(1, 0)
+
+
 def test_snapshot_weather_and_its_owner(md):
     s = _core.load_snapshot(
         md, _core.Settings(), 4, 0, players(), np.zeros((0, 4), dtype=np.int64), units(), weather=2, weather_owner=0
