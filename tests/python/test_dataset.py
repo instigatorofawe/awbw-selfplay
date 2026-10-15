@@ -1,14 +1,15 @@
 import dataclasses
+import json
 
 import numpy as np
 import pytest
 
 from _factory import GAME_ID, MAP_ID
-from awbw import _core
+from awbw import _core, engine
 from awbw.data.loader import batches, in_validation
 from awbw.data.shards import Dataset, ShardWriter
-from awbw.replay import stats
-from awbw.replay.extract import extract_v0
+from awbw.replay import load_replay, stats
+from awbw.replay.extract import extract_v0, extract_v1
 
 
 def test_extract_labels_each_turn_for_the_mover(replay_cache):
@@ -24,6 +25,22 @@ def test_extract_labels_each_turn_for_the_mover(replay_cache):
 def test_extract_applies_the_filter(replay_cache, monkeypatch):
     monkeypatch.setattr(stats, "MIN_DAYS", 6)
     assert extract_v0(replay_cache) == "under 6 days"
+
+
+@pytest.mark.parametrize(
+    "cities, why",
+    [
+        ([(3, 3)], "city at (1, 2), where the map has plain"),  # the city moved
+        ([(1, 2), (3, 3)], "the map's city at (3, 3) isn't in the game"),  # a city added
+    ],
+)
+def test_extract_leaves_out_games_on_since_edited_maps(replay_cache, cities, why):
+    # The factory game has one neutral city, at (1, 2); edit the cached map.
+    terrain = [[34 if (x, y) in cities else 1 for y in range(5)] for x in range(5)]  # [x][y]
+    path = replay_cache.parent.parent / "maps" / f"{MAP_ID}.json"
+    path.write_text(json.dumps({"Name": "t", "Size X": 5, "Size Y": 5, "Terrain Map": terrain}))
+    assert engine.map_edit(load_replay(replay_cache)) == why
+    assert extract_v0(replay_cache) == extract_v1(replay_cache) == "map edited since the game"
 
 
 def test_shards_round_trip_into_batches(replay_cache, tmp_path):

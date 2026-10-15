@@ -75,6 +75,8 @@ def extract_v0(path: str | Path) -> GameSamples | str:
         return f"parse error ({type(e).__name__})"
     if reason := v1_rejection(summarize_replay(r, path)):
         return reason
+    if engine.map_edit(r):
+        return "map edited since the game"
     over = r.game_over()
     assert over is not None  # v1_rejection requires one
     order = engine.turn_order(r)
@@ -164,6 +166,8 @@ def extract_v1(path: str | Path) -> GameSamples | str:
         return f"parse error ({type(e).__name__})"
     if reason := v1_rejection(summarize_replay(r, path)):
         return reason
+    if engine.map_edit(r):
+        return "map edited since the game"
     over = r.game_over()
     assert over is not None  # v1_rejection requires one
     order = engine.turn_order(r)

@@ -11,6 +11,8 @@ from .replay.model import GameInfo, Replay, Turn
 _POWER_ON = {"N": 0, "Y": 1, "S": 2}
 _WEATHER = {"C": 0, "R": 1, "S": 2}  # AWBW weather_code -> _core.WEATHERS index
 _HIDDEN = ("Y", "D")  # awbwUnit.sub_dive for a dived Sub / hidden Stealth
+_CAPTURABLE = frozenset({"airport", "base", "city", "comtower", "hq", "lab", "port"})
+_SAME_TILE = {"rubble": "seam", "silo_empty": "silo"}  # a pipe seam broken, a silo fired
 
 
 def register(game_map: MapInfo) -> _core.MapData:
@@ -22,6 +24,41 @@ def map_data(map_id: int) -> _core.MapData:
     """The engine's copy of a cached AWBW map, registering it on first use."""
     found = _core.find_map(map_id)
     return found if found is not None else register(load_map(map_id))
+
+
+def map_edit(replay: Replay) -> str | None:
+    """How the replay's first snapshot disagrees with the cached map, or None.
+
+    AWBW lets an author edit a map after games were played on it and keeps
+    only the latest version; even the site's own game pages show older games
+    on the new terrain. A snapshot lists the game's buildings (properties,
+    pipes, seams and silos) but no other terrain, so the version a game was
+    played on can't be rebuilt: such games are left out. Each listed building
+    must match the map's tile, and each property on the map must be listed.
+    """
+    if not replay.turns:
+        return None
+    rules_terrain = rules.load().terrain
+
+    def kind(terrain_id: int) -> str | None:
+        t = rules_terrain.get(int(terrain_id))
+        return None if t is None else _SAME_TILE.get(t.kind, t.kind)
+
+    terrain = load_map(replay.game.map_id).terrain
+    height, width = terrain.shape
+    listed = set()
+    for b in replay.turns[0].buildings:
+        if not (0 <= b.x < width and 0 <= b.y < height):
+            return f"a building off the map at ({b.x}, {b.y})"
+        listed.add((b.x, b.y))
+        game, now = kind(b.terrain_id), kind(terrain[b.y, b.x])
+        if game != now:
+            return f"{game} at ({b.x}, {b.y}), where the map has {now}"
+    for y in range(height):
+        for x in range(width):
+            if (x, y) not in listed and (now := kind(terrain[y, x])) in _CAPTURABLE:
+                return f"the map's {now} at ({x}, {y}) isn't in the game"
+    return None
 
 
 def settings_for(game: GameInfo) -> _core.Settings:

@@ -503,7 +503,7 @@ tile by tile:
      crawling the rest of the archive (all ~215,000 games, about 24 GB,
      with a 30 GB safety cap; about 2.5 days at one replay per second). Of the 20,000, 2,642 have no `GameOver` (timeouts and
      cancelled games) and 810 end before day 6; the median game is 14 days.
-3. **Parse** into a `Replay` object3. **Parse** into a `Replay` object: settings, players, map id, per-turn
+3. **Parse** into a `Replay` object: settings, players, map id, per-turn
    snapshots, per-turn actions, result. Uses our own bytes-based PHP
    unserializer, since PHP string lengths count bytes.
 4. **Filter** (`awbw.replay.stats.v1_rejection`):
@@ -513,6 +513,16 @@ tile by tile:
      games), and every turn logged
    - keep: games that reach day 6 (`MIN_DAYS`). Earlier resignations say
      little about who was winning. Provisional; a later cutoff may suit better.
+   - leave out: games on maps edited since (`engine.map_edit`, reason
+     "map edited since the game"). AWBW keeps only a map's latest version;
+     even its own game pages show older games on the new terrain. Snapshots
+     list a game's buildings but no other terrain, so the version a game was
+     played on can't be rebuilt. The first snapshot's buildings must match
+     the map's tiles, and every property on the map must be listed. In the
+     70,170 replays behind v1-70k, the one edited map is "A Sailor's Moon"
+     (164657): its 963 games from before the edit have 34 of 50 buildings
+     elsewhere. (Before this check, 766 of them failed later as "snapshot
+     rejected"; the rest failed the filter above.)
 5. **Convert** each snapshot to a `GameState` (C++ `from_snapshot`) and run
    invariant checks.
 6. **Validate** (`awbw check-turns`, `awbw.replay.step_check`): every turn
