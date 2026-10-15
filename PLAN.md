@@ -1186,6 +1186,37 @@ turn starts. One seed each, on the RTX 5070 (`grid1.sh`, `grid2.sh` and
   - If the transformer is too slow for search, the fallback is a ResNet
     of 96×8 or 128×10.
 
+### The full-archive run (running)
+
+The 128×6 transformer on v1-full (171,791 games, about 192M training
+decisions per epoch) for 8 epochs, 1.54B decisions: 75 times the grid's
+length. `bigrun.sh` on the box, started 2026-10-15 after grid4; the log
+is `cache/logs/bigrun.log`, the runs `cache/runs/tf128-full` and
+`cache/runs/tf128-full-mid`.
+
+- **Schedule:** flat-then-decay (`--schedule wsd`): the peak rate until
+  the last 1.2 epochs, then linear to 0. A run on a flat rate can branch
+  at any point into a finished net with a short decay.
+- **Checkpoints** every 60 minutes between shard groups, so a crash or a
+  reboot loses at most an hour; `--resume` picks up within the epoch.
+- **Memory:** a short run first checks whether 128×6 fits at batch 256
+  without `--recompute`, which costs about a third more time. If it
+  fits, the run takes about 8 days, else about 11 (about 1,600
+  decisions/s, 33 h per epoch). A later out-of-memory error switches to
+  `--recompute` and resumes.
+- **Midway check:** the run pauses after epoch 4. A copy decays over 0.2
+  epochs (about 7 h) and is
+  - scored on v1-full's validation games, as `tf128-s1` is;
+  - played greedy (no search) against `tf128-s1` and the self-play prior
+    `v1-64x6-5070`, 200 games each from validation starts;
+  - played against `tf128-s1` with 64 simulations each side, 100 games.
+
+  The main run then goes on through epochs 5–8, and the final net plays
+  the midway copy and `tf128-s1` the same way. Results land in
+  `cache/runs/eval-*.txt` and `arena-*.txt`.
+- If the midway copy doesn't beat `tf128-s1` clearly, the rest of the
+  run is in question: stop it and rethink, rather than spend 5 more days.
+
 ### Later
 
 - **Trunk:** a larger ResNet once the full archive is in. Possible
