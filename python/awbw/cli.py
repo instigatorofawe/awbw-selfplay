@@ -139,10 +139,16 @@ def main(argv: list[str] | None = None) -> int:
     tp = sub.add_parser("train-policy", help="pre-train the policy-value network on a v1 dataset")
     tp.add_argument("--data", type=Path, help="dataset directory (default: cache/datasets/v1)")
     tp.add_argument("--out", type=Path, required=True, help="run directory for checkpoints and metrics.jsonl")
-    tp.add_argument("--epochs", type=int)
+    tp.add_argument("--epochs", type=float, help="the run's length; a fraction ends the last epoch early (2)")
     tp.add_argument("--fraction", type=float, help="share of the training decisions per epoch (default 0.25)")
     tp.add_argument("--batch-size", type=int)
     tp.add_argument("--lr", type=float)
+    tp.add_argument(
+        "--schedule", choices=["cosine", "wsd"], help="cosine decay over the run (default), or flat then a linear fall"
+    )
+    tp.add_argument("--decay-epochs", type=float, help="wsd: the epochs at the end over which the rate falls (1)")
+    tp.add_argument("--pause-at", type=int, help="stop after this many epochs, --epochs still planned; resume goes on")
+    tp.add_argument("--checkpoint-minutes", type=float, help="minutes between saves of last.pt in an epoch (60)")
     tp.add_argument("--weight-decay", type=float)
     tp.add_argument("--value-weight", type=float, help="weight of the value loss (default 1)")
     tp.add_argument("--value-fraction", type=float, help="share of decisions whose result trains the value (0.05)")

@@ -207,6 +207,7 @@ class DecisionBatch:
     aux_reg: np.ndarray | None = None  # float32 [B, len(AUX_REGRESSION)]
     aux_bin: np.ndarray | None = None  # float32 [B, len(AUX_BINARY)]: 0 / 1
     aux_mask: np.ndarray | None = None  # bool [B, len(AUX_BINARY)]: where aux_bin counts
+    group: int = 0  # the pass's group of shards it came from (decision_batches)
 
 
 # --- Auxiliary targets ---------------------------------------------------------
@@ -318,6 +319,7 @@ def decision_batches(
     movement: bool = False,
     aux: bool = False,
     memo: list[tuple[np.ndarray, dict[str, np.ndarray]]] | None = None,
+    skip_groups: int = 0,
 ) -> Iterator[DecisionBatch]:
     """One pass over the decisions of a v1 dataset's labelled actions.
 
@@ -330,6 +332,8 @@ def decision_batches(
     time; only the states their chosen decisions need are kept. The next
     group of shards loads in a thread while this one's batches are used.
     ``movement`` adds the movement planes, ``aux`` the auxiliary targets.
+    Each batch knows its ``group``; ``skip_groups`` leaves out the first ones,
+    as a resumed pass does, and the rest come as they would have.
 
     ``memo`` holds a fixed choice of decisions (no ``shuffle``, ``fraction``
     1) in memory, for passes that repeat: a whole pass given an empty list
@@ -340,15 +344,16 @@ def decision_batches(
         raise ValueError(f"{ds.root}: not a v1 dataset (no action labels)")
     if split not in ("train", "val", "all"):
         raise ValueError(f"unknown split {split!r}")
-    if memo is not None and (shuffle or fraction < 1):
-        raise ValueError("a memo holds a fixed choice of decisions: no shuffle, fraction 1")
+    if memo is not None and (shuffle or fraction < 1 or skip_groups):
+        raise ValueError("a memo holds a fixed choice of decisions: no shuffle, fraction 1, no groups skipped")
     rng = np.random.default_rng(seed)
     order = rng.permutation(len(ds.shards)) if shuffle else np.arange(len(ds.shards))
     groups = [order[start : start + shards_at_once] for start in range(0, len(order), shards_at_once)]
-    jobs = list(zip(groups, rng.spawn(len(groups)), strict=True))  # a generator per group: loads run ahead
+    # A generator per group, so loads can run ahead and skipped groups change nothing after them.
+    jobs = list(zip(range(len(groups)), groups, rng.spawn(len(groups)), strict=True))[skip_groups:]
 
-    def load(job: tuple[np.ndarray, np.random.Generator]) -> tuple[np.ndarray, dict[str, np.ndarray]] | None:
-        shards, group_rng = job
+    def load(job: tuple[int, np.ndarray, np.random.Generator]) -> tuple[np.ndarray, dict[str, np.ndarray]] | None:
+        _, shards, group_rng = job
         parts = []
         for i in shards:
             sh = ds.load(int(i))
@@ -365,11 +370,13 @@ def decision_batches(
 
     filling = memo is not None and not memo
     if memo:
-        stream = ((rng, loaded) for loaded in memo)
+        stream = ((g, rng, loaded) for g, loaded in enumerate(memo))
     else:
-        stream = ((group_rng, loaded) for (_, group_rng), loaded in zip(jobs, _read_ahead(load, jobs), strict=True))
+        stream = (
+            (g, group_rng, loaded) for (g, _, group_rng), loaded in zip(jobs, _read_ahead(load, jobs), strict=True)
+        )
     held = []
-    for group_rng, loaded in stream:
+    for group, group_rng, loaded in stream:
         if loaded is None:
             continue
         if filling:
@@ -395,6 +402,7 @@ def decision_batches(
                 globals=globals_[ok],
                 nonspatial=nonspatial[ok],
                 target=target[ok],
+                group=group,
                 **{k: cols[k][sel][ok] for k in _DECISION_FIELDS + (_AUX_FIELDS if aux else ())},
             )
     if filling and memo is not None:

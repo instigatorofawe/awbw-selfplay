@@ -28,7 +28,18 @@ legal steps, and whole actions), and values every validation turn start, as
 ``eval-critic`` does. Those decisions are read from the shards once and kept
 in memory (about 1.5 GiB for v1-70k). An output directory holds
 ``metrics.jsonl``, ``policy-epNN.pt``, ``best.pt`` (lowest validation policy
-loss) and ``last.pt`` + ``optimizer.pt`` for ``resume``.
+loss) and ``last.pt`` + ``optimizer.pt`` for ``resume``. ``last.pt`` is also
+saved between groups of shards every ``checkpoint_minutes``, so a resumed run
+redoes at most that much.
+
+The learning rate warms up over ``warmup_steps``, then falls to zero along a
+cosine over the planned decisions, or (``schedule`` "wsd") stays flat until
+the last ``decay_epochs`` and falls linearly over them. While a "wsd" rate is
+flat, a run can be resumed with other ``epochs``, which may end partway
+through an epoch (``policy-ep04.20.pt``). ``pause_at`` stops a run after that
+many epochs. A copy of its ``last.pt`` and ``optimizer.pt`` resumed with
+``epochs`` a little past the pause, decaying over that little, then gives a
+finished network to evaluate, and the run itself resumes where it paused.
 """
 
 from __future__ import annotations
@@ -61,14 +72,17 @@ from .policy import load_policy, save_policy
 from .train_critic import _lr, _optimizer, dihedral, metrics, prefetch, rating_filter
 
 PHASE_NAMES = tuple(_core.PHASES)
+SCHEDULES = ("cosine", "wsd")
 
 
 @dataclass
 class PolicyTrainConfig:
-    epochs: int = 2
+    epochs: float = 2  # the run's length; a fraction of an epoch ends the last one early
     fraction: float = 0.25  # share of the training decisions in each epoch
     batch_size: int = 256
     lr: float = 1e-3
+    schedule: str = "cosine"  # or "wsd": flat after the warmup, then a linear fall over decay_epochs
+    decay_epochs: float = 1.0  # "wsd": the epochs at the end over which the rate falls to zero
     weight_decay: float = 0.01
     warmup_steps: int = 500
     value_weight: float = 1.0
@@ -88,8 +102,18 @@ class PolicyTrainConfig:
     val_rows: float = 0.1  # share of the validation games' actions whose decisions are scored
     shards_at_once: int = 8
     eval_every: int = 0  # steps between evaluations; 0 = once per epoch
+    checkpoint_minutes: float = 60.0  # between saves of last.pt within an epoch, at groups' ends; 0: each group
+    pause_at: int = 0  # stop after this many epochs, the schedule still planning ``epochs``; 0: don't
     log_every: int = 200
     seed: int = 0
+
+
+def lr_at(cfg: PolicyTrainConfig, step: int, seen: float, planned: float, per_epoch: float) -> float:
+    """The learning rate at ``step``, with ``seen`` of the ``planned`` decisions trained on."""
+    if cfg.schedule == "cosine":
+        return _lr(cfg, step, seen / planned)  # type: ignore[arg-type]
+    warm = min(1.0, (step + 1) / max(cfg.warmup_steps, 1))
+    return cfg.lr * warm * min(1.0, max(planned - seen, 0.0) / (cfg.decay_epochs * per_epoch))
 
 
 def undihedral(x: torch.Tensor, k: int) -> torch.Tensor:
@@ -399,6 +423,10 @@ def train(
     ds = Dataset(data)
     if not ds.has_actions:
         raise ValueError(f"{data}: not a v1 dataset (build one with `awbw dataset --v1`)")
+    if cfg.schedule not in SCHEDULES:
+        raise ValueError(f"schedule {cfg.schedule!r}: not one of {SCHEDULES}")
+    if cfg.schedule == "wsd" and not 0 < cfg.decay_epochs <= cfg.epochs:
+        raise ValueError(f"a decay over {cfg.decay_epochs} epochs: some, and at most the run's {cfg.epochs}")
     keep = rating_filter(cfg.min_rating)
     train_keep = training_games(cfg)
     train_games, n_train = split_size(ds, "train", train_keep, cfg.val_fraction)
@@ -407,15 +435,17 @@ def train(
     per_epoch = n_train * cfg.fraction
     planned = cfg.epochs * per_epoch
 
-    epoch = step = seen = 0
+    epoch = group = step = seen = 0  # group: the current epoch's groups of shards done
     best = math.inf
     if resume and (out / "last.pt").exists():
         net, info = load_policy(out / "last.pt", device)
         progress = info["progress"]
         epoch, step, seen, best = progress["epoch"], progress["step"], progress["seen"], progress["best"]
+        group = progress.get("group", 0)
         opt = _optimizer(net, cfg)  # type: ignore[arg-type]
         opt.load_state_dict(torch.load(out / "optimizer.pt", map_location=device, weights_only=True))
-        log(f"resumed from {out / 'last.pt'} after epoch {epoch} (step {step})")
+        groups = f" and {group} groups of shards" if group else ""
+        log(f"resumed from {out / 'last.pt'} after epoch {epoch}{groups} (step {step})")
     else:
         net = PolicyValueNet(model_cfg or PolicyConfig()).to(device)
         opt = _optimizer(net, cfg)  # type: ignore[arg-type]
@@ -479,8 +509,21 @@ def train(
             f.write(json.dumps(m) + "\n")
         return m
 
+    saved = time.monotonic()
+
+    def checkpoint() -> None:
+        nonlocal saved
+        progress = {"epoch": epoch, "group": group, "step": step, "seen": seen, "best": best}
+        torch.save(opt.state_dict(), out / "optimizer.tmp")
+        (out / "optimizer.tmp").replace(out / "optimizer.pt")
+        save_policy(out / "last.pt", net, metrics=last, progress=progress, **setup)
+        saved = time.monotonic()
+
     use_aux = net.cfg.aux
-    while epoch < cfg.epochs:
+    while epoch < cfg.epochs and seen < planned:
+        if cfg.pause_at and epoch >= cfg.pause_at:
+            log(f"paused after epoch {epoch} of {cfg.epochs:g}")
+            break
         t0, t_log, n_log = time.perf_counter(), time.perf_counter(), 0
         sums = torch.zeros(5, device=device)  # policy loss, value loss, value samples, aux loss, steps
         stream = decision_batches(
@@ -495,12 +538,20 @@ def train(
             drop_last=True,
             movement=net.cfg.movement,
             aux=use_aux,
+            skip_groups=group,
         )
+        part = epoch + 1 > cfg.epochs  # the run ends partway through this epoch
         for b in prefetch(stream):
+            if b.group != group:  # the groups before b's are done
+                group = b.group
+                if time.monotonic() - saved >= cfg.checkpoint_minutes * 60:
+                    checkpoint()
+            if part and seen >= planned:
+                break
             if len(b.target) != cfg.batch_size:
                 continue  # a step the engine no longer takes was dropped; keep one shape per bucket
-            for group in opt.param_groups:
-                group["lr"] = _lr(cfg, step, seen / planned)  # type: ignore[arg-type]
+            for g in opt.param_groups:
+                g["lr"] = lr_at(cfg, step, seen, planned, per_epoch)
             t = _to_device(b, device)
             hide = torch.from_numpy(rng.random(len(b.target)) < cfg.rating_dropout).to(device)
             rating = t["rating"].masked_fill(hide[:, None], -1)
@@ -548,14 +599,15 @@ def train(
                 t_log, n_log = time.perf_counter(), 0
             if cfg.eval_every and step % cfg.eval_every == 0:
                 last = evaluate()
-        epoch += 1
-        log(f"epoch {epoch} done in {time.perf_counter() - t0:.0f}s")
+        ended = part and seen >= planned  # else the epoch is whole
+        if not ended:
+            epoch, group = epoch + 1, 0
+        name = f"{cfg.epochs:05.2f}" if ended else f"{epoch:02d}"
+        log(f"epoch {name} done in {time.perf_counter() - t0:.0f}s")
         last = evaluate()
         if last["policy"]["loss"] < best or not (out / "best.pt").exists():
             best = last["policy"]["loss"]
             save_policy(out / "best.pt", net, metrics=last, **setup)
-        save_policy(out / f"policy-ep{epoch:02d}.pt", net, metrics=last, **setup)
-        progress = {"epoch": epoch, "step": step, "seen": seen, "best": best}
-        torch.save(opt.state_dict(), out / "optimizer.pt")
-        save_policy(out / "last.pt", net, metrics=last, progress=progress, **setup)
+        save_policy(out / f"policy-ep{name}.pt", net, metrics=last, **setup)
+        checkpoint()
     return last

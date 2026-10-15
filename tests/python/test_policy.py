@@ -1,5 +1,6 @@
 import dataclasses
 import json
+import shutil
 
 import numpy as np
 import pytest
@@ -42,6 +43,7 @@ from awbw.nn.train_policy import (
     PolicyTrainConfig,
     count_decisions,
     games_keep,
+    lr_at,
     policy_metrics,
     split_size,
     train,
@@ -407,6 +409,117 @@ def test_train_resumes_and_scores_decisions(cache, tmp_path):
     ]
 
 
+def test_wsd_rate_is_flat_then_falls_linearly():
+    cosine = PolicyTrainConfig(lr=1.0, warmup_steps=10)
+    assert lr_at(cosine, 4, 0, 100, 10) == pytest.approx(0.5)  # warming up
+    assert lr_at(cosine, 50, 50, 100, 10) == pytest.approx(0.5)
+    wsd = dataclasses.replace(cosine, schedule="wsd", decay_epochs=2)  # the last 20 of 100 decisions
+    assert [lr_at(wsd, 50, s, 100, 10) for s in (0, 80, 90, 100, 120)] == pytest.approx([1, 1, 0.5, 0, 0])
+    assert lr_at(wsd, 4, 0, 100, 10) == pytest.approx(0.5)
+
+
+def five_shards(cache, tmp_path) -> Dataset:
+    """One validation game and four training games, a shard each."""
+    ids = np.arange(1, 400)
+    val = in_validation(ids, 0.5)
+    games = [random_game(cache, 40, seed=int(i), game_id=int(i)) for i in [*ids[val][:1], *ids[~val][:4]]]
+    return write_dataset(tmp_path / "ds", games, per_shard=1)
+
+
+def test_a_pass_can_skip_its_first_groups(cache, tmp_path):
+    ds = five_shards(cache, tmp_path)
+    kw = dict(split="all", seed=3, shards_at_once=2, fraction=0.7)
+    whole = list(decision_batches(ds, 16, **kw))
+    assert sorted({b.group for b in whole}) == [0, 1, 2]
+    later = [b for b in whole if b.group >= 1]
+    rest = list(decision_batches(ds, 16, skip_groups=1, **kw))
+    assert [b.group for b in rest] == [b.group for b in later]
+    assert all((a.row == b.row).all() and (a.target == b.target).all() for a, b in zip(rest, later, strict=True))
+    with pytest.raises(ValueError, match="no groups skipped"):
+        next(decision_batches(ds, 16, shuffle=False, memo=[], skip_groups=1))
+
+
+def test_a_run_resumes_between_groups_of_shards(cache, tmp_path):
+    five_shards(cache, tmp_path)
+    cfg = PolicyTrainConfig(
+        epochs=1,
+        fraction=1.0,
+        batch_size=8,
+        warmup_steps=1,
+        val_fraction=0.5,
+        val_rows=1.0,
+        shards_at_once=1,
+        checkpoint_minutes=0,
+        log_every=1,
+    )
+    train(tmp_path / "ds", tmp_path / "whole", cfg, TINY, log=lambda line: None)
+    whole = load_policy(tmp_path / "whole" / "last.pt")[1]["progress"]
+    crash_at = whole["step"] * 3 // 4
+
+    def crash(line: str) -> None:
+        if line.startswith("epoch ") and f" step {crash_at}:" in line:
+            raise RuntimeError("the power went out")
+
+    out = tmp_path / "crashed"
+    with pytest.raises(RuntimeError, match="power"):
+        train(tmp_path / "ds", out, cfg, TINY, log=crash)
+    mid = load_policy(out / "last.pt")[1]["progress"]
+    assert mid["epoch"] == 0 and mid["group"] > 0 and 0 < mid["step"] < crash_at
+    lines: list[str] = []
+    train(tmp_path / "ds", out, cfg, log=lines.append, resume=True)
+    assert any(line.startswith("resumed") and f"and {mid['group']} groups" in line for line in lines)
+    end = load_policy(out / "last.pt")[1]["progress"]
+    assert (end["epoch"], end["group"], end["step"], end["seen"]) == (1, 0, whole["step"], whole["seen"])
+
+
+def test_a_paused_run_branches_a_decayed_copy(cache, tmp_path):
+    five_shards(cache, tmp_path)
+    cfg = PolicyTrainConfig(
+        epochs=2,
+        fraction=1.0,
+        batch_size=8,
+        warmup_steps=1,
+        val_fraction=0.5,
+        val_rows=1.0,
+        schedule="wsd",
+        decay_epochs=0.5,
+        pause_at=1,
+        log_every=1,
+    )
+    for bad in (
+        dataclasses.replace(cfg, schedule="linear"),
+        dataclasses.replace(cfg, decay_epochs=3),
+        dataclasses.replace(cfg, decay_epochs=0),
+    ):
+        with pytest.raises(ValueError, match=r"schedule|decay"):
+            train(tmp_path / "ds", tmp_path / "bad", bad, TINY)
+
+    def rates(lines: list[str]) -> list[float]:
+        return [float(line.split(" lr ")[1].split()[0]) for line in lines if " step " in line]
+
+    main_run, lines = tmp_path / "main", []
+    train(tmp_path / "ds", main_run, cfg, TINY, log=lines.append)
+    assert lines[-1] == "paused after epoch 1 of 2" and set(rates(lines)) == {1e-3}
+    assert not (main_run / "policy-ep02.pt").exists()
+
+    branch, lines = tmp_path / "branch", []
+    branch.mkdir()
+    for name in ("last.pt", "optimizer.pt"):
+        shutil.copy(main_run / name, branch / name)
+    train(tmp_path / "ds", branch, dataclasses.replace(cfg, epochs=1.5, pause_at=0), log=lines.append, resume=True)
+    falling = rates(lines)
+    assert falling[0] == 1e-3 and falling[-1] < 3e-4 and falling == sorted(falling, reverse=True)
+    info = load_policy(branch / "last.pt")[1]
+    progress, n = info["progress"], info["train_decisions"]
+    assert (branch / "policy-ep01.50.pt").exists() and progress["epoch"] == 1
+    assert 1.5 * n <= progress["seen"] < 1.5 * n + 8
+
+    lines = []
+    train(tmp_path / "ds", main_run, dataclasses.replace(cfg, pause_at=0), log=lines.append, resume=True)
+    resumed = rates(lines)  # drop_last leaves a few decisions of the plan untrained, so not quite to 0
+    assert (main_run / "policy-ep02.pt").exists() and resumed[0] == 1e-3 and resumed[-1] < 5e-4
+
+
 def test_movement_and_aux_train_and_score(cache, tmp_path):
     ids = np.arange(1, 200)
     val = in_validation(ids, 0.5)
@@ -499,9 +612,11 @@ def test_cli_trains_and_evaluates_a_policy(cache, tmp_path, capsys):
     assert main(["eval-policy", str(out / "best.pt"), *args, *some]) == 0
     assert "value at" in capsys.readouterr().out
     fewer = ["--games-fraction", "0.9", "--hold-out-maps", "1", "2", "--game-ids", "0", "100"]
-    assert main(["train-policy", *args, "--out", str(tmp_path / "fewer"), *small, *fewer]) == 0
+    wsd = ["--schedule", "wsd", "--decay-epochs", "0.5", "--checkpoint-minutes", "0"]
+    assert main(["train-policy", *args, "--out", str(tmp_path / "fewer"), *small, *fewer, *wsd]) == 0
     info = load_policy(tmp_path / "fewer" / "best.pt")[1]
     assert info["train"]["hold_out_maps"] == [1, 2] and 0 < info["train_games"] <= 4
+    assert (info["train"]["schedule"], info["train"]["decay_epochs"]) == ("wsd", 0.5)
     attention = ["--trunk", "transformer", "--heads", "4", "--mlp-ratio", "2", "--recompute"]
     assert main(["train-policy", *args, "--out", str(tmp_path / "tf"), *small, *attention]) == 0
     net = load_policy(tmp_path / "tf" / "best.pt")[0]
