@@ -52,6 +52,12 @@ struct SearchConfig {
   // simulations and only choose the step.
   int fast_sims = 0;
   float full_fraction = 1.0f;
+  // A search whose root the network gives one step at least this probability
+  // ends at the root's evaluation and plays as a search of 0 simulations: the
+  // step Gumbel-max sampling picks from the prior (its likeliest without
+  // noise). Self-play's full searches, which become samples, never do; 0:
+  // none do.
+  float skip_prior = 0.0f;
   int considered = 16;        // steps the root samples to consider (Gumbel top-k)
   float gumbel_scale = 1.0f;  // 0: no noise; the root considers the likeliest steps
   // sigma(q) = (visit_scale + the most visits of a step) * value_scale * q, with q
@@ -118,6 +124,7 @@ struct GameRecord {
   int days = 0;
   int actions = 0;
   int decisions = 0;      // searched (full and fast)
+  int skipped = 0;        // of those, fast searches that ended at the root (skip_prior)
   bool capped = false;    // stopped by max_days or max_actions and decided by day_limit_winner
   bool resigned = false;  // the loser resigned (SearchConfig::resign_turns)
   // A game that played on (resign_off): the player the rule would first have
@@ -185,6 +192,9 @@ class BatchedSearch {
   // with -1. `movers` [n] (may be null): the player deciding at each leaf.
   void write_batch(uint8_t* planes, float* globals, int64_t* legal, int legal_stride,
                    uint8_t* movers) const;
+  // fast [n]: whether each leaf is a self-play fast search's (not kept as a
+  // sample), so that a cheaper network can score it.
+  void fast_leaves(uint8_t* fast) const;
   // The network's view of each leaf: logits over its legal steps, in the
   // order write_batch gave them, in rows of `stride`, and the value [n] for
   // the player deciding there (P(win) - P(loss)).
@@ -213,7 +223,7 @@ class BatchedSearch {
     GameState game;  // the root's state, or the game being played
     Selection sel;
     uint64_t game_no = 0;
-    int actions = 0, decisions = 0;
+    int actions = 0, decisions = 0, skipped = 0;
     // Resignation: whether the game may resign, the turn (day * 2 + mover)
     // whose start was last checked, each player's turns in a row that started
     // at or below resign_value, and the rule's first verdict in a game that

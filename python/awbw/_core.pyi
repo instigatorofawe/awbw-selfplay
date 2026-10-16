@@ -610,7 +610,7 @@ def fight_outcomes(state: GameState, slot: int, from_: tuple[int, int], target: 
 class SearchConfig:
     """Settings of a BatchedSearch (core/search.h)."""
 
-    def __init__(self, *, sims: int = 64, fast_sims: int = 0, full_fraction: float = 1.0, considered: int = 16, gumbel_scale: float = 1.0, visit_scale: float = 50.0, value_scale: float = 0.10000000149011612, rescale: bool = False, pick_values: bool = True, max_days: int = 0, max_actions: int = 0, resign_value: float = -0.8999999761581421, resign_turns: int = 0, resign_off: float = 0.10000000149011612, movement: bool = False, seed: int = 0) -> None: ...
+    def __init__(self, *, sims: int = 64, fast_sims: int = 0, full_fraction: float = 1.0, skip_prior: float = 0.0, considered: int = 16, gumbel_scale: float = 1.0, visit_scale: float = 50.0, value_scale: float = 0.10000000149011612, rescale: bool = False, pick_values: bool = True, max_days: int = 0, max_actions: int = 0, resign_value: float = -0.8999999761581421, resign_turns: int = 0, resign_off: float = 0.10000000149011612, movement: bool = False, seed: int = 0) -> None: ...
 
     @property
     def sims(self) -> int:
@@ -634,6 +634,16 @@ class SearchConfig:
 
     @full_fraction.setter
     def full_fraction(self, arg: float, /) -> None: ...
+
+    @property
+    def skip_prior(self) -> float:
+        """
+        a search whose root gives one step at least this probability ends at the root's
+        evaluation, as a search of 0 simulations; never self-play's full searches; 0: none
+        """
+
+    @skip_prior.setter
+    def skip_prior(self, arg: float, /) -> None: ...
 
     @property
     def considered(self) -> int:
@@ -801,6 +811,12 @@ class GameRecord:
         """searched, full and fast"""
 
     @property
+    def skipped(self) -> int:
+        """
+        of those, fast searches that ended at the root (SearchConfig.skip_prior)
+        """
+
+    @property
     def capped(self) -> bool:
         """stopped by max_days or max_actions and decided as a day limit decides"""
 
@@ -869,6 +885,12 @@ class BatchedSearch:
         globals [n, NUM_GLOBALS + NUM_SELECTION_GLOBALS] float32 (as encode_policy_batch),
         each leaf's legal steps as policy indices [n, max_legal()] int64 padded with -1,
         and the player deciding at each [n] uint8.
+        """
+
+    def fast_leaves(self) -> NDArray[numpy.uint8]:
+        """
+        Whether each leaf of the batch [n] uint8 is a self-play fast search's (not kept as
+        a sample), so that a cheaper network can score it.
         """
 
     def submit(self, logits: Annotated[NDArray[numpy.float32], dict(shape=(None, None), order='C', device='cpu', writable=False)], values: Annotated[NDArray[numpy.float32], dict(shape=(None,), order='C', device='cpu', writable=False)]) -> None:

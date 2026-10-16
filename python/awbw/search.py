@@ -124,10 +124,12 @@ class SearchSettings:
     rescale: bool = False  # SearchConfig.rescale
     value_scale: float = 0.1  # SearchConfig.value_scale
     pick_values: bool = True  # SearchConfig.pick_values
+    skip_prior: float = 0.0  # SearchConfig.skip_prior: a root this sure of a step isn't searched
 
     def config(self, movement: bool, seed: int, **more) -> _core.SearchConfig:
         return _core.SearchConfig(
             sims=self.sims,
+            skip_prior=self.skip_prior,
             considered=self.considered,
             gumbel_scale=self.gumbel_scale,
             rescale=self.rescale,
@@ -150,10 +152,12 @@ class SearchAgent:
         self.settings = settings or SearchSettings()
         self.seed = seed
         self.calls = 0
+        self.decisions = 0  # asked for, over every call
         self.last: list[_core.SearchResult] = []
 
     def choose(self, decisions: list[Decision]) -> list[int]:
         self.calls += 1
+        self.decisions += len(decisions)
         results: list[_core.SearchResult | None] = [None] * len(decisions)
         by_size: dict[int, list[int]] = {}
         for i, d in enumerate(decisions):

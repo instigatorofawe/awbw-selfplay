@@ -22,6 +22,13 @@ Self-play tells the network no ratings, at the leaves and in training; human
 batches keep theirs, hidden at random. The run directory holds
 ``metrics.jsonl``, ``net-NNNNNN.pt`` every ``checkpoint_every`` steps and
 ``last.pt`` + ``optimizer.pt`` for ``resume`` (the window starts empty again).
+
+Cheaper search: a fast search whose root the network is sure of (``skip_prior``)
+plays without simulating, and with a fast network (``train``'s ``fast``) the
+fast searches' leaves are scored by it instead. The full searches, which become
+samples, always use the main network. The fast network trains on the same
+batches as the main one, so it follows the main one's search targets
+(``fast_train``); it is kept as ``fast-last.pt`` + ``fast-optimizer.pt``.
 """
 
 from __future__ import annotations
@@ -57,6 +64,7 @@ class SelfPlayConfig:
     sims: int = 64  # simulations of a full search, which becomes a sample
     fast_sims: int = 16  # the rest only choose the step
     full_fraction: float = 0.25
+    skip_prior: float = 0.0  # a fast search whose root gives one step this much plays it unsearched; 0: never
     considered: int = 16
     gumbel_scale: float = 1.0
     value_scale: float = 0.1
@@ -68,6 +76,7 @@ class SelfPlayConfig:
     resign_turns: int = 2  # 0: never
     resign_off: float = 0.1
     parallel: int = 512  # games at once
+    fast_train: bool = True  # train the fast network (train's `fast`) on the main one's batches
     # Window and training
     window: int = 300_000  # self-play samples kept
     min_window: int = 20_000  # samples before training starts
@@ -218,8 +227,10 @@ class Games:
         starts: Iterator[_core.GameState],
         config: _core.SearchConfig,
         parallel: int,
+        fast_evaluator: NetEvaluator | None = None,
     ):
         self.evaluator = evaluator
+        self.fast_evaluator = fast_evaluator  # scores the fast searches' leaves, if given
         self.starts = starts
         self.config = config
         self.parallel = parallel
@@ -227,6 +238,7 @@ class Games:
         self.pending: dict[tuple[int, int], list[dict[str, np.ndarray]]] = defaultdict(list)
         self.first: dict[tuple[int, int], int] = {}
         self.evals = 0
+        self.fast_evals = 0  # of those, by fast_evaluator
 
     @property
     def active(self) -> int:
@@ -239,6 +251,19 @@ class Games:
             self.searches[size] = _core.BatchedSearch(cfg, size)
         return self.searches[size]
 
+    def _evaluate(self, bs: _core.BatchedSearch) -> tuple[np.ndarray, np.ndarray]:
+        planes, globals_, legal, movers = bs.batch()
+        if self.fast_evaluator is None:
+            return self.evaluator(planes, globals_, legal, movers)
+        fast = bs.fast_leaves().astype(bool)
+        logits = np.empty(legal.shape, np.float32)
+        values = np.empty(len(planes), np.float32)
+        for evaluator, rows in ((self.evaluator, ~fast), (self.fast_evaluator, fast)):
+            if rows.any():
+                logits[rows], values[rows] = evaluator(planes[rows], globals_[rows], legal[rows], movers[rows])
+        self.fast_evals += int(fast.sum())
+        return logits, values
+
     def round(self) -> list[FinishedGame]:
         while self.active < self.parallel:
             start = next(self.starts)
@@ -250,8 +275,7 @@ class Games:
         for size, bs in self.searches.items():
             n = bs.collect()
             if n:
-                planes, globals_, legal, movers = bs.batch()
-                logits, values = self.evaluator(planes, globals_, legal, movers)
+                logits, values = self._evaluate(bs)
                 bs.submit(logits, values)
                 self.evals += n
             samples = bs.take_samples()
@@ -270,6 +294,7 @@ _SEARCH_FIELDS = (
     "sims",
     "fast_sims",
     "full_fraction",
+    "skip_prior",
     "considered",
     "gumbel_scale",
     "visit_scale",
@@ -387,12 +412,15 @@ def train(
     cfg: SelfPlayConfig,
     *,
     data: Path,
+    fast: Path | None = None,
     device: torch.device | str = "cpu",
     resume: bool = False,
     log: Callable[[str], None] = print,
 ) -> None:
     """Self-play from ``init`` (a policy checkpoint), or with ``resume`` from
-    ``out/last.pt``, until ``max_steps`` (forever if 0)."""
+    ``out/last.pt``, until ``max_steps`` (forever if 0). ``fast``: a policy
+    checkpoint whose network scores the fast searches' leaves (with ``resume``,
+    ``out/fast-last.pt`` if there is one)."""
     device = torch.device(device)
     out.mkdir(parents=True, exist_ok=True)
     ds = Dataset(data)
@@ -409,17 +437,34 @@ def train(
     assert isinstance(net, PolicyValueNet)
     net.eval()  # no dropout or batch norm: the mode changes nothing, and the compiled search keeps one
     movement = net.cfg.movement
+    fast_net = fast_opt = fast_evaluator = None
+    if fast is not None:
+        resumed = resume and (out / "fast-last.pt").exists()
+        fast_net, _ = load_policy(out / "fast-last.pt" if resumed else fast, device)
+        assert isinstance(fast_net, PolicyValueNet)
+        if fast_net.cfg.movement != movement:
+            raise ValueError("the fast network must read the planes the main one does (movement)")
+        fast_net.eval()
+        if cfg.fast_train:
+            fast_opt = _optimizer(fast_net, cfg)  # type: ignore[arg-type]
+            if resumed:
+                state = torch.load(out / "fast-optimizer.pt", map_location=device, weights_only=True)
+                fast_opt.load_state_dict(state)
+        fast_evaluator = NetEvaluator(fast_net, device, ratings=None, bf16=cfg.bf16, compile=cfg.compile)
     if cfg.compile:
-        # The search's and training's compiled graphs of the one module count together.
-        torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, 64)
+        # The search's and training's compiled graphs of the networks count together.
+        limit = 128 if fast_net is not None else 64
+        torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, limit)
     evaluator = NetEvaluator(net, device, ratings=None, bf16=cfg.bf16, compile=cfg.compile)
     forward = torch.compile(net, dynamic=False) if cfg.compile else net
+    fast_forward = torch.compile(fast_net, dynamic=False) if cfg.compile and fast_opt is not None else fast_net
     settings = SearchSettings(
         sims=cfg.sims,
         considered=cfg.considered,
         gumbel_scale=cfg.gumbel_scale,
         max_days=cfg.max_days,
         value_scale=cfg.value_scale,
+        skip_prior=cfg.skip_prior,
     )
     search_cfg = settings.config(
         movement,
@@ -432,27 +477,60 @@ def train(
     )
     rng = np.random.default_rng([cfg.seed, step])
     starts = human_starts(ds)
-    games = Games(evaluator, cycle(starts, rng), search_cfg, cfg.parallel)
+    games = Games(evaluator, cycle(starts, rng), search_cfg, cfg.parallel, fast_evaluator)
     window = Window(cfg.window)
     human = prefetch(_human_stream(ds, cfg, movement)) if cfg.human_fraction > 0 else None
     setup = {"selfplay": asdict(cfg), "init": str(init), "dataset": str(data)}
+    if fast is not None:
+        setup["fast"] = str(fast)
     params = sum(p.numel() for p in net.parameters())
     log(
         f"{params / 1e6:.2f}M parameters on {device}; {len(starts):,} starts, {cfg.parallel} games at once, "
-        f"{cfg.sims} sims ({cfg.full_fraction:.0%} of searches, else {cfg.fast_sims}); "
+        f"{cfg.sims} sims ({cfg.full_fraction:.0%} of searches, else {cfg.fast_sims}"
+        + (f", unsearched from a prior of {cfg.skip_prior:g}" if cfg.skip_prior > 0 else "")
+        + "); "
         f"window {cfg.window:,}, ratio {cfg.train_ratio:g}, human batches {cfg.human_fraction:.0%}"
     )
+    if fast_net is not None:
+        fast_params = sum(p.numel() for p in fast_net.parameters())
+        trained_too = "trained alongside" if fast_opt is not None else "fixed"
+        log(f"fast searches scored by a {fast_params / 1e6:.2f}M-parameter network, {trained_too}")
     use_bf16 = cfg.bf16 and device.type == "cuda"
     trained = 0.0  # self-play samples trained on, against window.added * train_ratio
     stats, totals = Stats(), Stats()
     t0 = t_log = time.monotonic()
-    evals_log = 0
+    evals_log = fast_evals_log = 0
+
+    def batch_loss(fwd: Any, t: dict[str, torch.Tensor], rating, k: int, human_batch: bool, valued, prefix: str):
+        """The batch's loss for one network, its parts added to the stats under ``prefix``."""
+        with torch.autocast(device.type, torch.bfloat16, enabled=use_bf16):
+            logp, value, _ = _forward(fwd, t, rating, k)
+        if human_batch:
+            vce = F.cross_entropy(value.float(), t["z"], reduction="none")
+            policy_loss = -logp.gather(1, t["target"][:, None]).mean()
+            parts = {"h_steps": 1, "h_nll": policy_loss.item(), "h_valued": valued.sum().item()}
+            parts["h_vce"] = (vce * valued).sum().item()
+        else:
+            ce, ent, vce = selfplay_losses(logp, value, t)
+            policy_loss = ce.mean()
+            parts = {"s_steps": 1, "s_ce": policy_loss.item(), "s_kl": (ce - ent).mean().item()}
+            parts |= {"s_vce": (vce * valued).sum().item(), "s_valued": valued.sum().item()}
+        stats.add(**{prefix + key: x for key, x in parts.items()})
+        value_loss = (vce * valued).sum() / valued.sum().clamp_min(1)
+        return policy_loss + cfg.value_weight * value_loss
+
+    def update(model: torch.nn.Module, optimizer: torch.optim.Optimizer, loss: torch.Tensor) -> None:
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
 
     def train_step(human_batch: bool) -> None:
         nonlocal step
         warm = min(1.0, (step + 1) / max(cfg.warmup_steps, 1))
-        for group in opt.param_groups:
-            group["lr"] = cfg.lr * warm
+        for optimizer in (opt, fast_opt):
+            for group in optimizer.param_groups if optimizer is not None else ():
+                group["lr"] = cfg.lr * warm
         k = int(rng.integers(8)) if cfg.augment else 0
         if human_batch:
             assert human is not None
@@ -460,40 +538,15 @@ def train(
             t = _to_device(b, device)
             hide = torch.from_numpy(rng.random(len(b.target)) < cfg.rating_dropout).to(device)
             rating = t["rating"].masked_fill(hide[:, None], -1)
-            with torch.autocast(device.type, torch.bfloat16, enabled=use_bf16):
-                logp, value, _ = _forward(forward, t, rating, k)
-            nll = -logp.gather(1, t["target"][:, None])[:, 0]
-            vce = F.cross_entropy(value.float(), t["z"], reduction="none")
             valued = torch.from_numpy(rng.random(len(b.target)) < cfg.human_value_fraction).to(device)
-            policy_loss = nll.mean()
-            value_loss = (vce * valued).sum() / valued.sum().clamp_min(1)
-            stats.add(
-                h_steps=1,
-                h_nll=policy_loss.item(),
-                h_vce=(vce * valued).sum().item(),
-                h_valued=valued.sum().item(),
-            )
         else:
             size, rows = window.sample(cfg.batch_size, rng)
             t = _decision_tensors(window, rows, size, movement, device)
-            with torch.autocast(device.type, torch.bfloat16, enabled=use_bf16):
-                logp, value, _ = _forward(forward, t, None, k)
-            ce, ent, vce = selfplay_losses(logp, value, t)
+            rating = None
             valued = torch.from_numpy(rng.random(len(rows)) < cfg.value_fraction).to(device)
-            policy_loss = ce.mean()
-            value_loss = (vce * valued).sum() / valued.sum().clamp_min(1)
-            stats.add(
-                s_steps=1,
-                s_ce=policy_loss.item(),
-                s_kl=(ce - ent).mean().item(),
-                s_vce=(vce * valued).sum().item(),
-                s_valued=valued.sum().item(),
-            )
-        loss = policy_loss + cfg.value_weight * value_loss
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
-        opt.step()
+        update(net, opt, batch_loss(forward, t, rating, k, human_batch, valued, ""))
+        if fast_net is not None and fast_opt is not None:
+            update(fast_net, fast_opt, batch_loss(fast_forward, t, rating, k, human_batch, valued, "fast_"))
         step += 1
 
     def checkpoint(name: str, metrics: dict[str, Any]) -> None:
@@ -501,8 +554,16 @@ def train(
         # Plain floats: torch.load(weights_only=True) refuses numpy scalars.
         save_policy(out / name, net, metrics=json.loads(json.dumps(metrics)), progress=progress, **setup)
 
+    def save_last(metrics: dict[str, Any]) -> None:
+        torch.save(opt.state_dict(), out / "optimizer.pt")
+        checkpoint("last.pt", metrics)
+        if fast_net is not None and fast_opt is not None:
+            torch.save(fast_opt.state_dict(), out / "fast-optimizer.pt")
+            progress = {"step": step, "samples": window.added, "games": int(totals.v["games"])}
+            save_policy(out / "fast-last.pt", fast_net, progress=progress, **setup)
+
     def report() -> dict[str, Any]:
-        nonlocal t_log, evals_log
+        nonlocal t_log, evals_log, fast_evals_log
         now = time.monotonic()
         dt = now - t_log
         v = stats.v
@@ -514,6 +575,8 @@ def train(
             "samples": window.added,
             "window": window.count,
             "evals_per_s": (games.evals - evals_log) / dt,
+            "fast_evals_per_s": (games.fast_evals - fast_evals_log) / dt,  # of those, by the fast network
+            "skipped": stats.mean("skipped", "decisions"),  # share of searches that ended at the root
             "games_per_h": v["games"] * 3600 / dt,
             "samples_per_h": v["samples"] * 3600 / dt,
             "days": stats.mean("days", "games"),
@@ -544,20 +607,40 @@ def train(
             },
             "lr": opt.param_groups[0]["lr"],
         }
+        if fast_opt is not None:
+            m["fast"] = {
+                "train": {
+                    "policy_ce": stats.mean("fast_s_ce", "fast_s_steps"),
+                    "policy_kl": stats.mean("fast_s_kl", "fast_s_steps"),
+                    "value_ce": stats.mean("fast_s_vce", "fast_s_valued"),
+                },
+                "human": {
+                    "nll": stats.mean("fast_h_nll", "fast_h_steps"),
+                    "value_ce": stats.mean("fast_h_vce", "fast_h_valued"),
+                },
+            }
         tr, hu, fr = m["train"], m["human"], m["fresh"]
         log(
             f"step {step} | {m['games']:,} games, +{m['games_per_h']:,.0f}/h, {m['days']:.1f} days, "
             f"capped {m['capped']:.0%}, resigned {m['resigned']:.0%} (wrong {m['resign_wrong']}/"
             f"{m['resign_checked']}), P1 won {m['first_player_won']:.0%} | window {window.count:,} "
-            f"(+{m['samples_per_h']:,.0f}/h) | {m['evals_per_s']:,.0f} evals/s | "
+            f"(+{m['samples_per_h']:,.0f}/h) | {m['evals_per_s']:,.0f} evals/s"
+            + (f" ({m['fast_evals_per_s']:,.0f} fast)" if fast_net is not None else "")
+            + (f", {m['skipped']:.0%} unsearched" if cfg.skip_prior > 0 else "")
+            + " | "
             f"train ce {tr['policy_ce']:.3f} kl {tr['policy_kl']:.3f} v {tr['value_ce']:.3f} | "
             f"fresh ce {fr['policy_ce']:.3f} kl {fr['policy_kl']:.3f} v {fr['value_ce']:.3f} | "
             f"human nll {hu['nll']:.3f} v {hu['value_ce']:.3f}"
+            + (
+                f" | fast: train ce {m['fast']['train']['policy_ce']:.3f} human nll {m['fast']['human']['nll']:.3f}"
+                if "fast" in m
+                else ""
+            )
         )
         with (out / "metrics.jsonl").open("a") as f:
             f.write(json.dumps(m) + "\n")
         stats.clear()
-        t_log, evals_log = now, games.evals
+        t_log, evals_log, fast_evals_log = now, games.evals, games.fast_evals
         return m
 
     last: dict[str, Any] = {}
@@ -580,6 +663,7 @@ def train(
                 p1_won=rec.winner == g.first,
                 drawn=rec.winner == _core.DRAW,
                 decisions=rec.decisions,
+                skipped=rec.skipped,
                 f_ce=ce * n,
                 f_kl=kl * n,
                 f_vce=vce * n,
@@ -600,8 +684,6 @@ def train(
         if time.monotonic() - t_log >= cfg.log_every:
             last = report()
             if step:
-                torch.save(opt.state_dict(), out / "optimizer.pt")
-                checkpoint("last.pt", last)
+                save_last(last)
     last = report()
-    torch.save(opt.state_dict(), out / "optimizer.pt")
-    checkpoint("last.pt", last)
+    save_last(last)

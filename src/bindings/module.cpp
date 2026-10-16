@@ -1191,13 +1191,14 @@ NB_MODULE(_core, m) {
   nb::class_<awbw::SearchConfig>(m, "SearchConfig", "Settings of a BatchedSearch (core/search.h).")
       .def(
           "__init__",
-          [](awbw::SearchConfig* c, int sims, int fast_sims, float full_fraction, int considered,
-             float gumbel_scale, float visit_scale, float value_scale, bool rescale,
+          [](awbw::SearchConfig* c, int sims, int fast_sims, float full_fraction, float skip_prior,
+             int considered, float gumbel_scale, float visit_scale, float value_scale, bool rescale,
              bool pick_values, int max_days, int max_actions, float resign_value, int resign_turns,
              float resign_off, bool movement, uint64_t seed) {
             new (c) awbw::SearchConfig{.sims = sims,
                                        .fast_sims = fast_sims,
                                        .full_fraction = full_fraction,
+                                       .skip_prior = skip_prior,
                                        .considered = considered,
                                        .gumbel_scale = gumbel_scale,
                                        .visit_scale = visit_scale,
@@ -1213,16 +1214,19 @@ NB_MODULE(_core, m) {
                                        .seed = seed};
           },
           nb::kw_only(), "sims"_a = 64, "fast_sims"_a = 0, "full_fraction"_a = 1.0f,
-          "considered"_a = 16, "gumbel_scale"_a = 1.0f, "visit_scale"_a = 50.0f,
-          "value_scale"_a = 0.1f, "rescale"_a = false, "pick_values"_a = true, "max_days"_a = 0,
-          "max_actions"_a = 0, "resign_value"_a = -0.9f, "resign_turns"_a = 0,
-          "resign_off"_a = 0.1f, "movement"_a = false, "seed"_a = 0)
+          "skip_prior"_a = 0.0f, "considered"_a = 16, "gumbel_scale"_a = 1.0f,
+          "visit_scale"_a = 50.0f, "value_scale"_a = 0.1f, "rescale"_a = false,
+          "pick_values"_a = true, "max_days"_a = 0, "max_actions"_a = 0, "resign_value"_a = -0.9f,
+          "resign_turns"_a = 0, "resign_off"_a = 0.1f, "movement"_a = false, "seed"_a = 0)
       .def_rw("sims", &awbw::SearchConfig::sims,
               "simulations of a full search, after the root's own evaluation")
       .def_rw("fast_sims", &awbw::SearchConfig::fast_sims,
               "self-play: simulations of a fast search, played but not kept as a sample")
       .def_rw("full_fraction", &awbw::SearchConfig::full_fraction,
               "self-play: share of the searches that are full")
+      .def_rw("skip_prior", &awbw::SearchConfig::skip_prior,
+              "a search whose root gives one step at least this probability ends at the root's\n"
+              "evaluation, as a search of 0 simulations; never self-play's full searches; 0: none")
       .def_rw("considered", &awbw::SearchConfig::considered,
               "steps the root samples to consider (Gumbel top-k)")
       .def_rw("gumbel_scale", &awbw::SearchConfig::gumbel_scale,
@@ -1278,6 +1282,8 @@ NB_MODULE(_core, m) {
       .def_ro("days", &awbw::GameRecord::days)
       .def_ro("actions", &awbw::GameRecord::actions)
       .def_ro("decisions", &awbw::GameRecord::decisions, "searched, full and fast")
+      .def_ro("skipped", &awbw::GameRecord::skipped,
+              "of those, fast searches that ended at the root (SearchConfig.skip_prior)")
       .def_ro("capped", &awbw::GameRecord::capped,
               "stopped by max_days or max_actions and decided as a day limit decides")
       .def_ro("resigned", &awbw::GameRecord::resigned, "the loser resigned")
@@ -1328,6 +1334,16 @@ NB_MODULE(_core, m) {
            "globals [n, NUM_GLOBALS + NUM_SELECTION_GLOBALS] float32 (as encode_policy_batch),\n"
            "each leaf's legal steps as policy indices [n, max_legal()] int64 padded with -1,\n"
            "and the player deciding at each [n] uint8.")
+      .def(
+          "fast_leaves",
+          [](const awbw::BatchedSearch& bs) {
+            uint8_t* fast;
+            auto a = new_array<uint8_t>({static_cast<size_t>(bs.leaves())}, fast);
+            bs.fast_leaves(fast);
+            return a;
+          },
+          "Whether each leaf of the batch [n] uint8 is a self-play fast search's (not kept as\n"
+          "a sample), so that a cheaper network can score it.")
       .def("submit", &search_submit, "logits"_a, "values"_a,
            "The network's logits over each leaf's legal steps [n, >= max_legal()] float32 (in\n"
            "batch()'s order), and its value [n] float32 for the player deciding there,\n"

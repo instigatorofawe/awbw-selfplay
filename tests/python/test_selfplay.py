@@ -135,6 +135,33 @@ def test_games_resign_when_lost(cache, tmp_path):  # noqa: F811
         assert g.samples["z"].tolist() == [1 if m == 1 else -1 for m in movers]
 
 
+def test_games_score_fast_searches_with_the_fast_network(cache, tmp_path):  # noqa: F811
+    s = start(cache)
+    cfg = _core.SearchConfig(sims=4, considered=4, fast_sims=2, full_fraction=0.5, skip_prior=0.9, max_days=2, seed=1)
+
+    def net(confident: bool):  # sure of each leaf's first legal step, or uniform
+        def evaluate(planes, globals_, legal, movers):
+            logits = np.zeros(legal.shape, np.float32)
+            logits[:, 0] = 10.0 if confident else 0.0
+            return logits, np.zeros(len(planes), np.float32)
+
+        return evaluate
+
+    for fast_is_sure in (True, False):
+        starts = cycle(np.frombuffer(s.to_bytes(), np.uint8)[None], np.random.default_rng(0))
+        games = Games(net(not fast_is_sure), starts, cfg, 3, net(fast_is_sure))  # type: ignore[arg-type]
+        done = []
+        while len(done) < 3:
+            done += games.round()
+        assert 0 < games.fast_evals < games.evals
+        for g in done:
+            rec = g.record
+            # Only the fast searches see the fast network's prior, and only they skip.
+            fast = rec.decisions - len(g.samples["z"])
+            assert fast > 0
+            assert rec.skipped == (fast if fast_is_sure else 0)
+
+
 def test_selfplay_trains_and_resumes(cache, tmp_path):  # noqa: F811
     ids = np.arange(1, 200)
     train_ids = ids[~in_validation(ids)][:2]
@@ -176,6 +203,75 @@ def test_selfplay_trains_and_resumes(cache, tmp_path):  # noqa: F811
     assert json.loads((out / "metrics.jsonl").read_text().splitlines()[-1])["step"] == 8
 
 
+def test_selfplay_trains_a_fast_network_alongside(cache, tmp_path):  # noqa: F811
+    import torch
+
+    ids = np.arange(1, 200)
+    train_ids = ids[~in_validation(ids)][:2]
+    write_dataset(tmp_path / "ds", [random_game(cache, 40, seed=int(i), game_id=int(i)) for i in train_ids])
+    save_policy(tmp_path / "init.pt", _net())
+    torch.manual_seed(1)
+    fast = PolicyValueNet(dataclasses.replace(TINY, channels=4, blocks=1)).eval()
+    save_policy(tmp_path / "fast.pt", fast)
+    cfg = SelfPlayConfig(
+        sims=4,
+        fast_sims=2,
+        considered=4,
+        full_fraction=0.5,
+        skip_prior=0.5,
+        max_days=2,
+        parallel=4,
+        window=500,
+        min_window=20,
+        batch_size=8,
+        warmup_steps=1,
+        human_fraction=0.5,
+        checkpoint_every=3,
+        log_every=0.0,
+        max_steps=6,
+    )
+    out = tmp_path / "run"
+    lines: list[str] = []
+    train(tmp_path / "init.pt", out, cfg, data=tmp_path / "ds", fast=tmp_path / "fast.pt", log=lines.append)
+    assert any("fast searches scored by" in line and "trained alongside" in line for line in lines)
+    assert {"fast-last.pt", "fast-optimizer.pt"} <= {p.name for p in out.iterdir()}
+    metrics = [json.loads(line) for line in (out / "metrics.jsonl").read_text().splitlines()]
+    assert sum(m["fast_evals_per_s"] for m in metrics) > 0
+    skipped = [m["skipped"] for m in metrics if np.isfinite(m["skipped"])]  # NaN: no game ended
+    assert skipped and all(0 <= x <= 1 for x in skipped)
+    fast_steps = [m for m in metrics if m["train"]["steps"]]
+    assert fast_steps and all(np.isfinite(m["fast"]["train"]["policy_ce"]) for m in fast_steps)
+    trained, _ = load_policy(out / "fast-last.pt")
+    before, after = fast.state_dict(), trained.state_dict()
+    assert any(not torch.equal(before[k], after[k]) for k in before)
+
+    # Resuming picks the fast network up where it was.
+    more = dataclasses.replace(cfg, max_steps=8)
+    train(
+        tmp_path / "init.pt", out, more, data=tmp_path / "ds", fast=tmp_path / "fast.pt", log=lines.append, resume=True
+    )
+    assert json.loads((out / "metrics.jsonl").read_text().splitlines()[-1])["step"] == 8
+
+    # Kept fixed, it isn't saved or changed.
+    fixed = tmp_path / "fixed"
+    train(
+        tmp_path / "init.pt",
+        fixed,
+        dataclasses.replace(cfg, fast_train=False),
+        data=tmp_path / "ds",
+        fast=tmp_path / "fast.pt",
+        log=lines.append,
+    )
+    assert any("fixed" in line for line in lines)
+    assert not (fixed / "fast-last.pt").exists()
+    assert "fast" not in json.loads((fixed / "metrics.jsonl").read_text().splitlines()[-1])
+
+    # A fast network must read the planes the main one does.
+    save_policy(tmp_path / "moving.pt", PolicyValueNet(dataclasses.replace(TINY, movement=True)))
+    with pytest.raises(ValueError, match="movement"):
+        train(tmp_path / "init.pt", tmp_path / "bad", cfg, data=tmp_path / "ds", fast=tmp_path / "moving.pt")
+
+
 def test_elo_of_a_score():
     assert elo(0.5, 100)[0] == pytest.approx(0)
     up, se = elo(0.75, 100)
@@ -200,6 +296,10 @@ def test_arena_and_ladder_commands(cache, tmp_path, capsys):  # noqa: F811
         == 0
     )
     assert " of 2 games" in capsys.readouterr().out
+    skipping = ["--sims", "2", "--opponent-sims", "2", "--skip-prior", "0.5", "--opponent-skip-prior", "0.5"]
+    assert main(["arena", str(run / "net-000002.pt"), "--opponent", str(tmp_path / "base.pt"), *skipping, *common]) == 0
+    out = capsys.readouterr().out
+    assert "unsearched from 0.5" in out and "network evaluations per decision" in out
     ladder = ["ladder", str(run), "--baseline", str(tmp_path / "base.pt"), *common]
     assert main(ladder) == 0
     entries = [json.loads(line) for line in (run / "ladder.jsonl").read_text().splitlines()]

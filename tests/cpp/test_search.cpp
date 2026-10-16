@@ -27,9 +27,11 @@ using testing::put;
 // globals: tanh of the lead over 20,000 funds).
 struct FakeNet {
   bool material = false;
-  float picked = 0;  // added to the value of a decision with an action in progress
-  float lean = 0;    // taken from player 0's value and added to player 1's
+  float picked = 0;        // added to the value of a decision with an action in progress
+  float lean = 0;          // taken from player 0's value and added to player 1's
+  bool confident = false;  // a prior of nearly 1 on each leaf's first legal step
   int evals = 0;
+  int fast = 0;  // leaves of self-play's fast searches
 
   // One collect / submit round; false once there was nothing to search.
   bool round(BatchedSearch& bs) {
@@ -42,8 +44,12 @@ struct FakeNet {
     std::vector<float> globals(static_cast<size_t>(n) * kNumPolicyGlobals);
     std::vector<int64_t> legal(static_cast<size_t>(n) * width);
     bs.write_batch(planes.data(), globals.data(), legal.data(), width, movers.data());
+    std::vector<uint8_t> is_fast(n);
+    bs.fast_leaves(is_fast.data());
+    fast += static_cast<int>(std::count(is_fast.begin(), is_fast.end(), 1));
     std::vector<float> logits(legal.size(), 0.0f), values(n, 0.0f);
     for (int j = 0; j < n; ++j) {
+      if (confident) logits[static_cast<size_t>(j) * width] = 10.0f;
       const float* g = globals.data() + static_cast<size_t>(j) * kNumPolicyGlobals;
       if (material) values[j] = std::tanh(5.0f * (g[kGArmyValue] - g[kSideGlobals + kGArmyValue]));
       if (g[kNumGlobals + kSelGPhase + kPhaseIdle] == 0) values[j] += picked;
@@ -393,16 +399,18 @@ struct Played {
   std::vector<GameRecord> records;
   std::vector<SearchSample> samples;
   int evals = 0;
+  int fast = 0;  // of those, fast searches' leaves
 };
 
 Played self_play(const MapData& m, const SearchConfig& cfg, int games, bool check_trees,
-                 float lean = 0) {
+                 float lean = 0, bool confident = false) {
   std::mt19937 rng(11);
   BatchedSearch bs(cfg, 16);
   for (int g = 0; g < games; ++g) bs.add_game(m, arena_start(m, rng));
   FakeNet net;
   net.material = lean == 0;
   net.lean = lean;
+  net.confident = confident;
   Played out;
   while (net.round(bs)) {
     if (check_trees) {
@@ -416,6 +424,7 @@ Played self_play(const MapData& m, const SearchConfig& cfg, int games, bool chec
   for (SearchSample& smp : bs.take_samples()) out.samples.push_back(std::move(smp));
   out.records = bs.take_records();
   out.evals = net.evals;
+  out.fast = net.fast;
   return out;
 }
 
@@ -485,6 +494,75 @@ TEST(Search, FastSearchesArePlayedButNotKept) {
   EXPECT_GT(kept, 0.15);
   EXPECT_LT(kept, 0.35);
   for (const SearchSample& smp : p.samples) EXPECT_EQ(smp.result.sims, 8);
+  EXPECT_GT(p.fast, 0);
+  EXPECT_LT(p.fast, p.evals);
+
+  // Leaves are a fast search's exactly when the search is fast.
+  cfg.full_fraction = 1;
+  EXPECT_EQ(self_play(m, cfg, 2, false).fast, 0);
+  cfg.full_fraction = 0;
+  const Played all_fast = self_play(m, cfg, 2, false);
+  EXPECT_TRUE(all_fast.samples.empty());
+  EXPECT_EQ(all_fast.fast, all_fast.evals);
+}
+
+TEST(Search, ConfidentFastSearchesEndAtTheRoot) {
+  const MapData m = make_map(kArena);
+  SearchConfig cfg;
+  cfg.sims = 8;
+  cfg.fast_sims = 4;
+  cfg.full_fraction = 0.25f;
+  cfg.considered = 4;
+  cfg.max_days = 2;
+  cfg.skip_prior = 0.9f;
+  Played p = self_play(m, cfg, 2, false, 0, true);
+  int decisions = 0, skipped = 0;
+  for (const GameRecord& r : p.records) {
+    decisions += r.decisions;
+    skipped += r.skipped;
+  }
+  // Every fast search is skipped, at one evaluation each; full ones aren't.
+  ASSERT_FALSE(p.samples.empty());
+  EXPECT_EQ(skipped, decisions - static_cast<int>(p.samples.size()));
+  EXPECT_EQ(p.fast, skipped);
+  for (const SearchSample& smp : p.samples) EXPECT_EQ(smp.result.sims, 8);
+
+  // A uniform prior is never confident enough.
+  p = self_play(m, cfg, 2, false);
+  for (const GameRecord& r : p.records) EXPECT_EQ(r.skipped, 0);
+}
+
+TEST(Search, AConfidentRootEndsASearch) {
+  const MapData m = make_map(kArena);
+  std::mt19937 rng(3);
+  const GameState s = arena_start(m, rng);
+  SearchConfig cfg;
+  cfg.sims = 8;
+  cfg.considered = 4;
+  cfg.gumbel_scale = 0;
+  cfg.skip_prior = 0.9f;
+  BatchedSearch bs(cfg, 16);
+  const int slot = bs.add_root(m, s);
+  FakeNet net;
+  net.confident = true;
+  net.run(bs);
+  ASSERT_TRUE(bs.done(slot));
+  const SearchResult& r = bs.result(slot);
+  EXPECT_EQ(net.evals, 1);
+  EXPECT_EQ(net.fast, 0);
+  EXPECT_EQ(r.sims, 0);
+  EXPECT_EQ(r.id, r.ids[0]);  // the step the prior is sure of
+  EXPECT_NEAR(r.policy[0], r.prior[0], 1e-6);
+
+  // Without skip_prior the search runs its simulations.
+  cfg.skip_prior = 0;
+  BatchedSearch full(cfg, 16);
+  const int again = full.add_root(m, s);
+  FakeNet net2;
+  net2.confident = true;
+  net2.run(full);
+  EXPECT_EQ(full.result(again).sims, 8);
+  EXPECT_GT(net2.evals, 1);
 }
 
 TEST(Search, ALosingPlayerResignsAtItsTurnStart) {

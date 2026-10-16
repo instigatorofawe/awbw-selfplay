@@ -139,7 +139,7 @@ uint64_t BatchedSearch::add_game(const MapData& m, const GameState& s) {
   sl.game = s;
   sl.sel = Selection{};
   sl.game_no = next_game_++;
-  sl.actions = sl.decisions = 0;
+  sl.actions = sl.decisions = sl.skipped = 0;
   rng_seed(sl.rng, cfg_.seed ^ (0xD1B54A32D192ED03ull * (sl.game_no + 1)));
   rng_seed(sl.game.rng, rng_next(sl.rng));  // games from one start draw their own luck
   sl.can_resign = cfg_.resign_turns > 0 && !(uniform(sl.rng) < cfg_.resign_off);
@@ -518,6 +518,7 @@ void BatchedSearch::finish_game(Slot& sl, bool capped, int resigner) {
   rec.days = sl.game.day;
   rec.actions = sl.actions;
   rec.decisions = sl.decisions;
+  rec.skipped = sl.skipped;
   rec.capped = capped;
   rec.resigned = resigner >= 0;
   rec.would_resign = sl.would_resign;
@@ -604,6 +605,13 @@ void BatchedSearch::write_batch(uint8_t* planes, float* globals, int64_t* legal,
   }
 }
 
+void BatchedSearch::fast_leaves(uint8_t* fast) const {
+  for (size_t j = 0; j < pending_.size(); ++j) {
+    const Slot& sl = slots_[pending_[j]];
+    fast[j] = sl.mode == kGame && !sl.full;
+  }
+}
+
 void BatchedSearch::submit(const float* logits, int stride, const float* values) {
   for (size_t j = 0; j < pending_.size(); ++j) {
     Slot& sl = slots_[pending_[j]];
@@ -617,7 +625,20 @@ void BatchedSearch::submit(const float* logits, int stride, const float* values)
     n.raw = picked && !cfg_.pick_values ? sl.nodes[sl.path[sl.path.size() - 2]].raw
                                         : side(n.mover) * values[j];
     backup(sl, n.raw);
-    if (sl.leaf != 0) ++sl.sims;
+    if (sl.leaf != 0) {
+      ++sl.sims;
+    } else if (cfg_.skip_prior > 0 && sl.target > 0 && !(sl.mode == kGame && sl.full)) {
+      // A confident root ends the search (SearchConfig::skip_prior): the top
+      // step's probability is 1 / sum(exp(logit - top)).
+      float top = row[0];
+      for (int k = 1; k < n.n; ++k) top = std::max(top, row[k]);
+      double total = 0;
+      for (int k = 0; k < n.n; ++k) total += std::exp(row[k] - top);
+      if (1.0 / total >= cfg_.skip_prior) {
+        sl.target = 0;
+        sl.skipped += sl.mode == kGame;
+      }
+    }
   }
   pending_.clear();
 }

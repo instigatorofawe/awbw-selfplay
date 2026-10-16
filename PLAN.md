@@ -1450,6 +1450,35 @@ the search always uses the network being trained, the same module.
   scores them on the GPU.
   - Searches use playout caps: 25% are full (64 simulations) and become
     samples; the rest use 16 and only choose the step.
+  - **Cheaper search** (both off by default; to be measured on the box
+    after the full-archive run). A decision costs 29 evaluations on
+    average (0.25 × 65 + 0.75 × 17); the fast searches are 44% of them.
+    - **Confident roots** (`--skip-prior P`): a fast search whose root
+      gives one step at least probability P ends at the root's evaluation
+      and plays as a search of 0 simulations: a Gumbel-max draw from the
+      prior. Full searches never skip. The arena's `--skip-prior` and
+      `--opponent-skip-prior` measure what it costs in strength, and it
+      prints evaluations per decision.
+    - **A fast network** (`--fast-net PATH`) scores the fast searches'
+      leaves (`BatchedSearch.fast_leaves`); the full searches keep the main
+      network. A search uses one network throughout, so values on two
+      networks' scales never mix in a tree. At 1/6–1/8 of tf128's cost, a
+      64×6 ResNet would save about 38% of the GPU time.
+    - The fast network trains on the main one's batches, so it learns the
+      main network's search targets as self-play moves them; without that
+      it would play an ever larger share of the moves below the main
+      network's level. `--no-fast-train` keeps it fixed. It is kept as
+      `fast-last.pt` + `fast-optimizer.pt` for `--resume`.
+    - How often a root is confident, on 107k of v1-70k's validation
+      decisions (ratings hidden, forced steps left out): tf128-s1's top
+      step reaches 0.9 / 0.95 / 0.99 at 28% / 24% / 19% of them, and the
+      human took it 98.4% / 99.3% / 99.8% of the time. They are mostly
+      the action after a move (86% of those reach 0.95), rarely the choice
+      of unit (4%). v1-64x6 is a point behind. Skipping at 0.95 alone
+      saves 0.44 × 0.24 × 16/17 ≈ 10% of evaluations (24% in the arena,
+      where every search may skip), but on top of a fast network only
+      about 1.5 points more (38% → 39%): the full searches are then about
+      90% of the GPU time, so they are the next thing to cut.
   - Gumbel noise at the root (scale 1) explores.
   - A 30-day cap ends the game, decided as a day limit would.
   - **Resignation** (AlphaGo Zero's rule, by turns): a player resigns at
@@ -1568,7 +1597,10 @@ the search always uses the network being trained, the same module.
     test map, with forced steps getting no node and visits adding up;
   - every sample's steps are its state's legal ids, and the same seed plays
     the same games;
-  - fast searches are played but not kept;
+  - fast searches are played but not kept, and their leaves are marked
+    as fast; a confident root ends a fast or one-off search at one
+    evaluation, never a full one; self-play routes fast leaves to the
+    fast network, which trains alongside and resumes;
   - leaves encode exactly as `encode_policy_batch` does, and the gathered
     logits give `Policy.score`'s prior.
 - **Policy network** (`tests/python/test_policy.py`): each decision's

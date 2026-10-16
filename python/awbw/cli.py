@@ -184,6 +184,19 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--sims", type=int, help="simulations of a full search, kept as a sample (default 64)")
     sp.add_argument("--fast-sims", type=int, help="simulations of the other searches (default 16)")
     sp.add_argument("--full-fraction", type=float, help="share of searches that are full (default 0.25)")
+    sp.add_argument(
+        "--skip-prior",
+        type=float,
+        help="a fast search whose root gives one step this probability plays it unsearched (default 0: never)",
+    )
+    sp.add_argument("--fast-net", type=Path, help="policy checkpoint whose network scores the fast searches")
+    sp.add_argument(
+        "--no-fast-train",
+        dest="fast_train",
+        action="store_false",
+        default=None,
+        help="keep the fast network fixed instead of training it on the main one's batches",
+    )
     sp.add_argument("--considered", type=int, help="steps the root considers (default 16)")
     sp.add_argument("--gumbel-scale", type=float, help="the root's Gumbel noise (default 1)")
     sp.add_argument("--max-days", type=int, help="then a day limit decides the game (default 30)")
@@ -232,6 +245,10 @@ def main(argv: list[str] | None = None) -> int:
         "--sims", type=int, default=0, help="search each decision with this many simulations (0: the prior)"
     )
     ar.add_argument("--opponent-sims", type=int, default=0, help="the same for an opponent policy")
+    ar.add_argument(
+        "--skip-prior", type=float, default=0.0, help="play unsearched where the prior gives a step this (0: never)"
+    )
+    ar.add_argument("--opponent-skip-prior", type=float, default=0.0, help="the same for an opponent policy")
     ar.add_argument("--considered", type=int, default=16, help="steps the search's root considers (default 16)")
     ar.add_argument("--gumbel", type=float, default=0.0, help="the root's Gumbel noise scale (default 0: none)")
     ar.add_argument("--rescale", action="store_true", help="rescale Q by its spread at each node (mctx's way)")
@@ -699,7 +716,16 @@ def _train_selfplay(args, http: Http) -> int:
         print(line, flush=True)
 
     data = args.data or cache_dir() / "datasets" / "v1"
-    train(args.init, args.out, cfg, data=data, device=pick_device(args.device), resume=args.resume, log=log)
+    train(
+        args.init,
+        args.out,
+        cfg,
+        data=data,
+        fast=args.fast_net,
+        device=pick_device(args.device),
+        resume=args.resume,
+        log=log,
+    )
     return 0
 
 
@@ -742,18 +768,26 @@ def _eval_policy(args, http: Http) -> int:
 
 
 def _agent_maker(args, ratings):
-    """``make(path, sims, seed)``: an agent playing a saved policy, searching with
-    ``sims`` simulations or (0) playing its prior, as the arena's flags say."""
+    """``make(path, sims, seed, skip_prior)``: an agent playing a saved policy,
+    searching with ``sims`` simulations or (0) playing its prior, as the arena's
+    flags say."""
     from .agents import PolicyAgent
     from .nn.policy import Policy
     from .search import NetEvaluator, SearchAgent, SearchSettings
 
-    def make(path, sims: int, seed: int):
+    def make(path, sims: int, seed: int, skip_prior: float = 0.0):
         policy = Policy.load(path, args.device)
         if sims <= 0:
             return PolicyAgent(policy, args.temperature, ratings, seed=seed)
         settings = SearchSettings(
-            sims, args.considered, args.gumbel, args.max_days, args.rescale, args.value_scale, not args.state_values
+            sims,
+            args.considered,
+            args.gumbel,
+            args.max_days,
+            args.rescale,
+            args.value_scale,
+            not args.state_values,
+            skip_prior,
         )
         return SearchAgent(NetEvaluator(policy, ratings=ratings, compile=args.compile), settings, seed=seed)
 
@@ -770,11 +804,11 @@ def _arena(args, http: Http) -> int:
 
     starts = validation_starts(Dataset(args.data or cache_dir() / "datasets" / "v1"), args.games)
     make = _agent_maker(args, tuple(args.ratings) if args.ratings else None)
-    me = make(args.checkpoint, args.sims, args.seed)
+    me = make(args.checkpoint, args.sims, args.seed, args.skip_prior)
     if args.opponent == "random":
         them = RandomAgent(args.seed + 1)
     else:
-        them = make(args.opponent, args.opponent_sims, args.seed + 1)
+        them = make(args.opponent, args.opponent_sims, args.seed + 1, args.opponent_skip_prior)
     t0 = time.monotonic()
     r = match(me, them, starts, args.max_days)
     elapsed = time.monotonic() - t0
@@ -787,13 +821,22 @@ def _arena(args, http: Http) -> int:
             f"as player {seat + 1}: won {won}, lost {len(results) - won - drawn}, drawn {drawn}; "
             f"{ended} ended before the day limit, {days:.1f} days on average"
         )
-    me_name = f"{args.checkpoint}" + (f" ({args.sims} sims)" if args.sims > 0 else "")
-    them_name = f"{args.opponent}" + (
-        f" ({args.opponent_sims} sims)" if args.opponent != "random" and args.opponent_sims > 0 else ""
+
+    def name(path, sims: int, skip_prior: float) -> str:
+        if sims <= 0:
+            return f"{path}"
+        return f"{path} ({sims} sims" + (f", unsearched from {skip_prior:g}" if skip_prior > 0 else "") + ")"
+
+    me_name = name(args.checkpoint, args.sims, args.skip_prior)
+    them_name = (
+        "random" if args.opponent == "random" else name(args.opponent, args.opponent_sims, args.opponent_skip_prior)
     )
     print(f"{me_name} vs {them_name}: {r.won}-{r.lost}-{r.drawn} of {r.games} games")
     evals = sum(a.evaluator.evals for a in (me, them) if isinstance(a, SearchAgent))
     print(f"{elapsed:.0f}s" + (f", {evals / elapsed:,.0f} network evaluations/s in search" if evals else ""))
+    for who, agent in ((me_name, me), (them_name, them)):
+        if isinstance(agent, SearchAgent) and agent.decisions:
+            print(f"{who}: {agent.evaluator.evals / agent.decisions:.1f} network evaluations per decision")
     return 0
 
 
