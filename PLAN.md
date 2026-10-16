@@ -1889,12 +1889,40 @@ rules exactly (two players, no fog, as everywhere in v1).
 - **Undo:** allowed locally (AWBW has none). The server keeps each
   action's state, so undo steps back one action at a time, the luck
   included: an attack retried the same way rolls the same.
-- **Sprites:** AWBW's unit and terrain art is Nintendo's (the Replay
+- **Sprites (built):** AWBW's unit and terrain art is Nintendo's (the Replay
   Player's README says the same of its own), and this repo is public, so
   none of it is committed. The viewer and the play page draw sprites from
-  a local folder if one is there (`cache/sprites/`, outside git, filled
-  from art the user has, such as the Replay Player's), and otherwise draw
-  the board as now.
+  a local copy if one is there, and otherwise coloured squares.
+  - **The copy:** `cache/sprites/` (outside git) holds the Player's 9,947
+    embedded images from `AWBWApp.Resources.dll` (the .NET manifest
+    resources, extracted by name with `dnfile`) under its own folders, and
+    its index files `Json/{Tiles,Buildings,Units,Countries,COs}.json`,
+    which name each AWBW terrain, building and unit's textures and frame
+    timings. Every texture the index files name is there, and they cover
+    all 196 terrain ids the rules know and every unit type.
+  - **What the boards draw** (`sprites.py` picks one game's textures and
+    inlines them as data URIs: 280–360 KB of a viewer page and 620–760 KB
+    of the play page, which adds rain, snow and move animations, on two
+    maps tried): the
+    Player's defaults, Classic terrain and AW2 buildings; buildings on
+    plain, by owner and country; broken seams as rubble, used silos empty;
+    weather variants; units in their country's sprites, idle animations and
+    buildings' lights running, greyed once they have acted; the Player's HP
+    digits and status icons (capturing, cargo, hidden, stunned, low fuel or
+    ammo, one at a time); its arrow for the move path; and, in play, the
+    agent's units walking in their move sprites. Sprites scale by whole
+    device pixels where that shrinks the board by under a fifth, and the
+    board leaves room above the top row for tall buildings.
+  - **Coastlines:** AWBW has one sea id, so the Player picks sea and shoal
+    pieces from the neighbours. A sea tile shows land on each side that is
+    land and on each corner that is land with water on both sides next to
+    it (shoal, reef and bridges count as water); a shoal shows land toward
+    land and bridges, open water toward sea, reef and the map's edge, and
+    nothing toward more shoal. The Player ships five test maps with their
+    expected renders; this rule picks the piece shown on all 2,176 of their
+    sea and shoal tiles.
+  - Not done: the Player's other skins, and its power and explosion
+    effects (`Textures/Effects`).
 - **The network's side:** `PolicyAgent` (the prior, instant) or
   `SearchAgent` with N simulations and no root noise (as the arena), one
   decision at a time, through the same `Agent` protocol as the arena. The

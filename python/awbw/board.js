@@ -1,6 +1,9 @@
 // The board as the viewer and the play page draw it: terrain, buildings and
 // units on a canvas, from a game's static data (G: map, units, players,
 // countries) and a frame (viewer._frame: units, owners, capture points).
+// With G.sprites (sprites.py: the Replay Player's art from a local copy) it
+// draws the Player's sprites, animated once the page passes its redraw to
+// animate(); without, or for anything the copy lacks, coloured squares.
 // Each page inlines this file; makeBoard(G, canvas) returns the drawing API.
 function makeBoard(G, cv) {
   const M = G.map, W = M.width, H = M.height, ctx = cv.getContext("2d");
@@ -28,15 +31,102 @@ function makeBoard(G, cv) {
   const propAt = {};
   M.props.forEach((p, i) => { propAt[p[0] + "," + p[1]] = i; });
   // exactHp: tooltips give internal HP (7.3); false gives what players see (8)
-  const b = { T: 28, W, H, MOVED, HIDDEN, CARRIED, STUNNED, CAPTURING, BUILDING, color, propAt, exactHp: true };
+  // top: CSS px above row 0 for the top row's tall sprites (the board starts there)
+  const b = { T: 28, top: 0, W, H, MOVED, HIDDEN, CARRIED, STUNNED, CAPTURING, BUILDING, color, propAt, exactHp: true };
   const hpText = (hp) => (b.exactHp ? (hp / 10).toFixed(1) : String(Math.ceil(hp / 10)));
 
+  // Sprites: S.img holds data URIs by key; refs are [[key per weather], timing]
+  // and a timing (an index into S.anim, frame lengths in ms) adds "-<frame>".
+  const S = G.sprites || null, img = {}, grey = {}, holes = {};
+  let ready = false;
+  const greyed = (im) => {  // the Player's greyscale for units that have acted, a little darker
+    try {
+      const c = document.createElement("canvas");
+      c.width = im.width; c.height = im.height;
+      const g = c.getContext("2d");
+      g.drawImage(im, 0, 0);
+      const d = g.getImageData(0, 0, c.width, c.height), a = d.data;
+      for (let i = 0; i < a.length; i += 4) a[i] = a[i + 1] = a[i + 2] = ((a[i] + a[i + 1] + a[i + 2]) / 3) * 0.85;
+      g.putImageData(d, 0, 0);
+      return c;
+    } catch (e) { return null; }
+  };
+  const seeThrough = (im) => {  // any see-through pixel in its tile's 16x16 (drawn over plain)
+    try {
+      const c = document.createElement("canvas");
+      c.width = 16; c.height = 16;
+      const g = c.getContext("2d");
+      g.drawImage(im, (16 - im.width) / 2, 16 - im.height);
+      const a = g.getImageData(0, 0, 16, 16).data;
+      for (let i = 3; i < a.length; i += 4) if (a[i] < 255) return true;
+      return false;
+    } catch (e) { return false; }
+  };
+  if (S) {
+    const keys = Object.keys(S.img);
+    let left = keys.length;
+    const done = () => { if (--left === 0) { ready = true; if (b.redraw) b.redraw(); } };
+    for (const k of keys) {
+      const im = new Image();
+      im.onload = () => {
+        img[k] = im;
+        if (k.startsWith("Units/")) grey[k] = greyed(im);
+        else if (k.startsWith("Map/")) holes[k] = seeThrough(im);
+        done();
+      };
+      im.onerror = done;
+      im.src = S.img[k];
+    }
+    if (!keys.length) ready = true;
+  }
+  const totals = S ? S.anim.map((d) => d.reduce((a, x) => a + x, 0)) : [];
+  function frameAt(i, now) {
+    const d = S.anim[i];
+    let t = now % totals[i];
+    for (let f = 0; f < d.length; f++) { if (t < d[f]) return f; t -= d[f]; }
+    return 0;
+  }
+  function sprite(ref, w, now) {  // the loaded image a ref shows now, or null
+    if (!ready || !ref) return null;
+    const tail = ref[1] < 0 ? "" : "-" + frameAt(ref[1], now);
+    const k = (ref[0][w] || ref[0][0]) + tail;
+    return img[k] ? k : img[ref[0][0] + tail] ? ref[0][0] + tail : null;
+  }
+  function blit(im, px, py, flip, centre) {  // bottom-aligned in the tile, or centred
+    const s = b.T / 16, w = im.width * s, h = im.height * s;
+    const x = px + (b.T - w) / 2, y = centre ? py + (b.T - h) / 2 : py + b.T - h;
+    if (!flip) { ctx.drawImage(im, x, y, w, h); return; }
+    ctx.save(); ctx.translate(x + w, y); ctx.scale(-1, 1); ctx.drawImage(im, 0, 0, w, h); ctx.restore();
+  }
+  // Redraws the board with redraw() whenever an animation moves on a frame.
+  b.animate = function (redraw) {
+    b.redraw = redraw;
+    if (!S) return;
+    let last = "";
+    const tick = () => {
+      const now = performance.now();
+      if (ready) {
+        const sig = totals.map((_, i) => frameAt(i, now)).join() + "," + Math.floor(now / 1000);
+        if (sig !== last) { last = sig; redraw(); }
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  };
+
   b.size = function (avail, max = 36) {
-    const T = (b.T = Math.max(14, Math.min(max, Math.floor(avail / W))));
+    let T = Math.max(14, Math.min(max, Math.floor(avail / W)));
     const dpr = window.devicePixelRatio || 1;
-    cv.width = W * T * dpr; cv.height = H * T * dpr;
-    cv.style.width = W * T + "px"; cv.style.height = H * T + "px";
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (S) {  // whole device pixels to a sprite pixel, unless that shrinks the board much
+      const snapped = (Math.floor((T * dpr) / 16) * 16) / dpr;
+      if (snapped >= 0.8 * T) T = snapped;
+    }
+    b.T = T;
+    b.top = S ? (S.pad * T) / 16 : 0;
+    cv.width = Math.round(W * T * dpr); cv.height = Math.round((H * T + b.top) * dpr);
+    cv.style.width = W * T + "px"; cv.style.height = H * T + b.top + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, b.top * dpr);
+    ctx.imageSmoothingEnabled = false;
   };
   b.kindAt = function (x, y, f) {
     const id = M.terrain[y][x];
@@ -48,10 +138,33 @@ function makeBoard(G, cv) {
   };
   b.tileAt = function (e) {
     const r = cv.getBoundingClientRect();
-    const x = Math.floor((e.clientX - r.left) / b.T), y = Math.floor((e.clientY - r.top) / b.T);
+    const x = Math.floor((e.clientX - r.left) / b.T), y = Math.floor((e.clientY - r.top - b.top) / b.T);
     return x < 0 || y < 0 || x >= W || y >= H ? null : [x, y];
   };
-  function drawTile(x, y, f) {
+  function captureBar(px, py, points) {
+    const T = b.T;
+    ctx.fillStyle = "#000"; ctx.fillRect(px + 2, py + T - 5, T - 4, 3);
+    ctx.fillStyle = "#ffd23f"; ctx.fillRect(px + 2, py + T - 5, (T - 4) * points / 20, 3);
+  }
+  function drawTileSprite(x, y, f, now) {
+    const w = f.w || 0, px = x * b.T, py = y * b.T;
+    const g = sprite(S.ground[y * W + x], w, now);
+    if (!g) return false;
+    const p = propAt[x + "," + y], P = p === undefined ? null : S.props[p];
+    let top = null;
+    if (P) {
+      top = sprite(P.x && f.c[p] === 0 ? P.x : P[f.o[p]] || P.n, w, now);
+      if (!top) return false;
+    }
+    const under = holes[g] && sprite(S.plain, w, now);
+    if (under) blit(img[under], px, py);
+    blit(img[g], px, py);
+    if (top) blit(img[top], px, py);
+    if (P && BUILDING[b.kindAt(x, y, f)] && f.c[p] < 20) captureBar(px, py, f.c[p]);
+    return true;
+  }
+  function drawTile(x, y, f, now) {
+    if (S && drawTileSprite(x, y, f, now)) return;
     const T = b.T, k = b.kindAt(x, y, f), px = x * T, py = y * T;
     const building = BUILDING[k];
     ctx.fillStyle = building ? TERRAIN.plain : (TERRAIN[k] || TERRAIN.plain);
@@ -82,16 +195,43 @@ function makeBoard(G, cv) {
       ctx.font = `700 ${Math.round(T * (building.length > 1 ? .32 : .42))}px system-ui`;
       ctx.textAlign = "center"; ctx.textBaseline = "middle";
       ctx.fillText(building, px + T / 2, py + T / 2 + 1);
-      if (p !== undefined && f.c[p] < 20) {  // being captured
-        ctx.fillStyle = "#000"; ctx.fillRect(px + 2, py + T - 5, T - 4, 3);
-        ctx.fillStyle = "#ffd23f"; ctx.fillRect(px + 2, py + T - 5, (T - 4) * f.c[p] / 20, 3);
-      }
+      if (p !== undefined && f.c[p] < 20) captureBar(px, py, f.c[p]);  // being captured
     }
     ctx.strokeStyle = "rgba(0,0,0,.08)"; ctx.lineWidth = 1;
     ctx.strokeRect(px + .5, py + .5, T - 1, T - 1);
   }
-  // A unit row (viewer._frame), drawn at (x, y) if given (an animated move).
-  b.drawUnit = function (u, at, dim) {
+  // A unit as a sprite: greyed once it has acted, its HP and one status icon
+  // at a time (capturing, cargo, hidden, stunned, low fuel, low ammo).
+  function drawUnitSprite(u, at, dim, dir) {
+    const [, type, owner, ux, uy, hp, fuel, ammo, flags] = u;
+    const now = performance.now(), T = b.T, s = T / 16;
+    const x = at ? at[0] : ux, y = at ? at[1] : uy, px = x * T, py = y * T;
+    // idle sprites face the country's way; side moves face east, flipped going west
+    let ref = S.units[owner] && S.units[owner][type], flip = false, moving = false;
+    const m = dir && S.moves && S.moves[owner] && S.moves[owner][type];
+    const mref = m && m[dir === "N" ? "U" : dir === "S" ? "D" : "S"];
+    if (mref) { ref = mref; moving = true; flip = dir === "W"; }
+    const k = sprite(ref, 0, now);
+    if (!k) return false;
+    blit(((dim ?? flags & MOVED) && grey[k]) || img[k], px, py, flip, moving);
+    const icon = (key) => { const im = key && img[key]; return im ? [im, im.width * s, im.height * s] : null; };
+    const shown = Math.ceil(hp / 10), d = shown < 10 && icon(S.ui.hp[shown]);
+    if (d) ctx.drawImage(d[0], px + T - d[1], py + T - d[2], d[1], d[2]);
+    const low = G.unit_stats && G.unit_stats[type], icons = [];
+    if (flags & CAPTURING) icons.push("capture");
+    if (u[9] || u[10]) icons.push("cargo");
+    if (flags & HIDDEN) icons.push("dive");
+    if (flags & STUNNED) icons.push("stun");
+    if (low && fuel * 3 <= low[0]) icons.push("fuel");  // a third or less left
+    if (low && low[1] > 0 && ammo * 3 <= low[1]) icons.push("ammo");
+    const c = icons.length && icon(S.ui[icons[Math.floor(now / 1000) % icons.length]]);
+    if (c) ctx.drawImage(c[0], px, py + T - c[2], c[1], c[2]);
+    return true;
+  }
+  // A unit row (viewer._frame), drawn at (x, y) if given (an animated move,
+  // heading dir: N, E, S or W); dim: greyed, by default once it has acted.
+  b.drawUnit = function (u, at, dim, dir) {
+    if (S && drawUnitSprite(u, at, dim, dir)) return;
     const [, type, owner, ux, uy, hp, fuel, ammo, flags] = u;
     const T = b.T, x = at ? at[0] : ux, y = at ? at[1] : uy, px = x * T, py = y * T, m = T * .12;
     ctx.globalAlpha = (dim ?? flags & MOVED) ? .55 : 1;
@@ -139,8 +279,35 @@ function makeBoard(G, cv) {
     ctx.strokeStyle = stroke; ctx.lineWidth = width;
     for (const [x, y] of tiles) ctx.strokeRect(x * T + width / 2, y * T + width / 2, T - width, T - width);
   };
+  // The Player's arrow: a body (N-S), a curve (N to W) and a tip (from N,
+  // pointing S), turned to fit; each tile after the unit's.
+  const TURN = { N: 2, E: 3, S: 0, W: 1 };  // quarter turns for a tip heading that way
+  const CURVE = { NW: 0, NE: 1, ES: 2, SW: 3 };  // for a curve joining those sides
+  const heading = (a, c) => (c[0] > a[0] ? "E" : c[0] < a[0] ? "W" : c[1] < a[1] ? "N" : "S");
+  const back = { N: "S", S: "N", E: "W", W: "E" };
+  function arrow(tiles) {
+    const body = img[S.ui.body], curve = img[S.ui.curve], tip = img[S.ui.tip];
+    if (!ready || !body || !curve || !tip) return false;
+    const T = b.T;
+    for (let i = 1; i < tiles.length; i++) {
+      const [x, y] = tiles[i], from = back[heading(tiles[i - 1], tiles[i])];
+      let im = tip, turns = TURN[heading(tiles[i - 1], tiles[i])];
+      if (i + 1 < tiles.length) {
+        const to = heading(tiles[i], tiles[i + 1]);
+        if (to === back[from]) { im = body; turns = to === "N" || to === "S" ? 0 : 1; }
+        else { im = curve; turns = CURVE[[from, to].sort((p, q) => "NESW".indexOf(p) - "NESW".indexOf(q)).join("")]; }
+      }
+      ctx.save();
+      ctx.translate(x * T + T / 2, y * T + T / 2);
+      ctx.rotate((turns * Math.PI) / 2);
+      ctx.drawImage(im, -T / 2, -T / 2, T, T);
+      ctx.restore();
+    }
+    return true;
+  }
   b.path = function (tiles, stroke) {
     if (!tiles || tiles.length < 2) return;
+    if (S && arrow(tiles)) return;
     const T = b.T;
     ctx.strokeStyle = stroke; ctx.lineWidth = Math.max(3, T * .18); ctx.lineCap = "round"; ctx.lineJoin = "round";
     ctx.beginPath();
@@ -152,7 +319,9 @@ function makeBoard(G, cv) {
   // The board for a frame; skip: a unit id to leave out (one being animated);
   // under: drawn over the terrain, under the units (ranges).
   b.draw = function (f, skip, under) {
-    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) drawTile(x, y, f);
+    const now = performance.now();
+    ctx.clearRect(0, -b.top, W * b.T, H * b.T + b.top);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) drawTile(x, y, f, now);
     if (under) under();
     for (const u of f.u) if (!(u[8] & CARRIED) && u[0] !== skip) b.drawUnit(u);
   };

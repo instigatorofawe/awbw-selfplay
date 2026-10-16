@@ -14,7 +14,7 @@ from typing import Any
 
 import numpy as np
 
-from . import _core, rules
+from . import _core, rules, sprites
 from .games import SEARCHED, GameLog, Move, replay
 
 ACTION_NAMES = {v: k for k, v in _core.ACTIONS.items()}
@@ -144,9 +144,17 @@ def _frame(s: _core.GameState, n_props: int) -> dict[str, Any]:
     }
 
 
-def board_data(md: _core.MapData, start: _core.GameState, labels: tuple[str, str]) -> dict[str, Any]:
-    """What board.js draws a game's frames with: the map, unit names, and each
-    player's label, CO and country."""
+def board_data(
+    md: _core.MapData,
+    start: _core.GameState,
+    labels: tuple[str, str],
+    weathers: tuple[int, ...] = (0, 1, 2),
+    moves: bool = False,
+) -> dict[str, Any]:
+    """What board.js draws a game's frames with: the map, unit names, each
+    player's label, CO and country, and the sprites if there is a local copy
+    (``sprites.for_board``: textures for ``weathers``, move animations if
+    ``moves``)."""
     r = rules.load()
     co_names = {c.id: c.name for c in r.cos.values()}
     players = []
@@ -179,6 +187,7 @@ def board_data(md: _core.MapData, start: _core.GameState, labels: tuple[str, str
         "unit_stats": [[u.fuel, u.ammo] for u in r.units],
         "countries": {c.id: c.code for c in r.countries.values()},
         "players": players,
+        "sprites": sprites.for_board(md, (start.players[0].country, start.players[1].country), weathers, moves),
     }
 
 
@@ -207,7 +216,8 @@ def game_view(log: GameLog, title: str = "") -> dict[str, Any]:
     if log.decided == "resigned":
         loser = 1 - log.winner if log.winner in (0, 1) else int(before.active)
         frames.append(_frame(before, md.n_props) | {"t": "resigns", "m": loser, "k": []})
-    return board_data(md, log.start, log.players) | {
+    weathers = tuple(sorted({f["w"] for f in frames}))
+    return board_data(md, log.start, log.players, weathers) | {
         "title": title,
         "result": {"winner": log.winner, "days": log.days, "decided": log.decided},
         "source": log.source,

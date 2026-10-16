@@ -323,7 +323,7 @@ class Game:
 
     def board(self) -> dict[str, Any]:
         """The game's fixed data for board.js, and who plays which side."""
-        return board_data(self.md, self.start, self.labels) | {"human": self.human}
+        return board_data(self.md, self.start, self.labels, moves=True) | {"human": self.human}
 
     def view(self) -> dict[str, Any]:
         with self.lock:

@@ -140,6 +140,7 @@ if (!G.matches) {
 // Board
 function sizeBoard() { B.size(cv.parentElement.clientWidth - 20); }
 function drawBoard(f) { B.draw(f); B.drawMarks(f.k); }
+B.animate(() => drawBoard(F[cur]));
 
 // Side panel
 const WEATHER = ["clear", "rain", "snow"];

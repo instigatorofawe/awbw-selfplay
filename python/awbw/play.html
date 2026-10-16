@@ -168,6 +168,11 @@ function targetAt(t) { return targeting ? targeting.targets.find((x) => x.at[0] 
 
 function render() {
   if (!V) return;
+  renderBoard();
+  renderSide();
+}
+function renderBoard() {
+  if (!V) return;
   const f = V.frame, o = opts(), ph = phase();
   const sel = selectedRow();
   const skip = anim ? anim.u[0] : ph === "moved" && sel ? sel[0] : undefined;
@@ -195,10 +200,9 @@ function render() {
     }
   }
   if (o && ph === "factory") B.outline([o.factory], "#ffd23f", 3);
-  if (anim) B.drawUnit(anim.u, anim.at, false);
+  if (anim) B.drawUnit(anim.u, anim.at, false, anim.dir);
   const last = V.log[V.log.length - 1];
   if (last && last.m === AGENT && ph === "idle" && !anim) B.drawMarks(last.k);
-  renderSide();
 }
 function blast(c) {
   const out = [];
@@ -276,7 +280,7 @@ function renderLog() {
 // The floating menu: a moved unit's actions, or a factory's builds
 function placeMenu(at) {
   const m = $("menu"), T = B.T;
-  const left = cv.offsetLeft + (at[0] + 1) * T + 6, top = cv.offsetTop + at[1] * T;
+  const left = cv.offsetLeft + (at[0] + 1) * T + 6, top = cv.offsetTop + B.top + at[1] * T;
   m.style.left = Math.min(left, cv.offsetLeft + cv.offsetWidth - 160) + "px";
   m.style.top = top + "px";
 }
@@ -343,10 +347,11 @@ async function animate(before, done) {
   if (path.length < 2) return;
   const u = before.u.find((r) => r[3] === path[0][0] && r[4] === path[0][1] && !(r[8] & B.CARRIED));
   if (!u) return;
-  for (const at of path) {
-    anim = { u, at };
-    B.draw(before, u[0]);
-    B.drawUnit(u, at, false);
+  for (let i = 0; i < path.length; i++) {  // V.frame is still before's
+    const at = path[i], [a, c] = i + 1 < path.length ? [at, path[i + 1]] : [path[i - 1], at];
+    const dx = c[0] - a[0], dy = c[1] - a[1];
+    anim = { u, at, dir: dx > 0 ? "E" : dx < 0 ? "W" : dy < 0 ? "N" : "S" };
+    renderBoard();
     await sleep(70);
   }
   anim = null;
@@ -403,7 +408,7 @@ cv.addEventListener("mousemove", (e) => {
   const changed = !hover || !t || key(hover) !== key(t);
   hover = t;
   if (!t) { tip.style.display = "none"; return; }
-  if (changed && V && !anim) render();
+  if (changed && V && !anim) renderBoard();
   let html = B.tileInfo(V.frame, t[0], t[1]);
   const x = targetAt(t);
   if (x && x.preview) html = previewHtml(x.preview, t) + "<br>" + html;
@@ -413,7 +418,7 @@ cv.addEventListener("mousemove", (e) => {
   tip.style.left = Math.min(e.clientX + 14, window.innerWidth - 290) + "px";
   tip.style.top = e.clientY + 14 + "px";
 });
-cv.addEventListener("mouseleave", () => { tip.style.display = "none"; hover = null; render(); });
+cv.addEventListener("mouseleave", () => { tip.style.display = "none"; hover = null; renderBoard(); });
 function spread(rows) {
   const ks = rows.map((r) => r[0]);
   const lo = Math.min(...ks), hi = Math.max(...ks);
@@ -461,6 +466,7 @@ document.addEventListener("keydown", (e) => {
 window.addEventListener("resize", () => { sizeBoard(); render(); });
 
 sizeBoard();
+B.animate(renderBoard);
 api("view").then((out) => { V = out; render(); runAgent(); }).catch((e) => showError(e.message));
 </script>
 </body>

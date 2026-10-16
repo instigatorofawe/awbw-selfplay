@@ -109,6 +109,12 @@ and attack ranges, paths, damage previews and any unit's range
 (right-click), and allows undo. Finished games go to
 `cache/games/local.jsonl`, for `view-game` and `export-replay`.
 
+The art is Nintendo's, so none is in the repo. With a copy of the AWBW
+Replay Player's resources in `cache/sprites/` (its `Textures/` and `Json/`
+folders, extracted from `AWBWApp.Resources.dll`), the play page and the
+viewer draw the board with the Player's sprites, animated; without one,
+they draw coloured squares.
+
 ```python
 from awbw.nn.policy import Policy
 
