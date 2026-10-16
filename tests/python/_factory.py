@@ -8,31 +8,7 @@ import json
 import zipfile
 
 from awbw.phpser import PhpObject
-
-
-def php_dumps(value: object) -> bytes:
-    if value is None:
-        return b"N;"
-    if isinstance(value, bool):
-        return b"b:1;" if value else b"b:0;"
-    if isinstance(value, int):
-        return b"i:%d;" % value
-    if isinstance(value, float):
-        return b"d:" + repr(value).encode() + b";"
-    if isinstance(value, str):
-        raw = value.encode()
-        return b's:%d:"' % len(raw) + raw + b'";'
-    if isinstance(value, list):
-        value = dict(enumerate(value))
-    if isinstance(value, dict):
-        body = b"".join(php_dumps(k) + php_dumps(v) for k, v in value.items())
-        return b"a:%d:{" % len(value) + body + b"}"
-    if isinstance(value, PhpObject):
-        name = value.class_name.encode()
-        body = b"".join(php_dumps(k) + php_dumps(v) for k, v in value.fields.items())
-        return b'O:%d:"' % len(name) + name + b'":%d:{' % len(value.fields) + body + b"}"
-    raise TypeError(type(value))
-
+from awbw.phpser import dumps as php_dumps
 
 GAME_ID = 1000
 MAP_ID = 77

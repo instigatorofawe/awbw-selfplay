@@ -1,6 +1,6 @@
 import pytest
 
-from awbw.phpser import PhpObject, PhpParseError, load_at, loads
+from awbw.phpser import PhpObject, PhpParseError, dumps, load_at, loads
 
 
 @pytest.mark.parametrize(
@@ -49,3 +49,33 @@ def test_load_at_returns_end_offset():
 def test_malformed_input_raises(raw):
     with pytest.raises(PhpParseError):
         loads(raw)
+
+
+@pytest.mark.parametrize(
+    ("value", "raw"),
+    [
+        (42, b"i:42;"),
+        (10.0, b"d:10;"),
+        (9.5, b"d:9.5;"),
+        (5.7, b"d:5.7000000000000002;"),  # 17 digits, as AWBW's PHP writes them
+        (True, b"b:1;"),
+        (None, b"N;"),
+        ("Pokémon", 's:8:"Pokémon";'.encode()),
+        (["x", 5], b'a:2:{i:0;s:1:"x";i:1;i:5;}'),
+        ({1: 5, "k": None}, b'a:2:{i:1;i:5;s:1:"k";N;}'),
+        (
+            PhpObject("awbwUnit", {"id": 9, "hit_points": 7.5}),
+            b'O:8:"awbwUnit":2:{s:2:"id";i:9;s:10:"hit_points";d:7.5;}',
+        ),
+    ],
+)
+def test_dumps(value, raw):
+    assert dumps(value) == raw
+    assert loads(raw) == value
+
+
+def test_dumps_refuses_what_php_has_no_form_for():
+    with pytest.raises(TypeError):
+        dumps({(1, 2): 3})
+    with pytest.raises(TypeError):
+        dumps(object())

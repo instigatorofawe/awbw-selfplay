@@ -4,11 +4,14 @@ Fetch some with e.g. ``awbw index "2p global league std" --max-pages 1`` and
 ``awbw fetch --index cache/index/2p_global_league_std.jsonl --limit 50``.
 """
 
+import json
 import random
+import zipfile
+import zlib
 
 import pytest
 
-from awbw import _core, engine
+from awbw import _core, engine, phpser
 from awbw.maps import map_path
 from awbw.net import cache_dir
 from awbw.replay import load_replay
@@ -16,6 +19,7 @@ from awbw.replay.combat_check import check_file
 from awbw.replay.extract import extract_v0, extract_v1
 from awbw.replay.move_check import check_replay as check_moves
 from awbw.replay.step_check import check_file as check_turns
+from awbw.replay.write import action_line
 
 # The 200 newest games: the cache grows back in time, so these stay put.
 PATHS = sorted((cache_dir() / "replays").glob("*.zip"), key=lambda p: int(p.stem) if p.stem.isdigit() else 0)[-200:]
@@ -71,6 +75,34 @@ def test_snapshots_load_and_logged_moves_are_legal(path):
     rep = check_moves(path)
     assert not rep.snapshot_errors, rep.snapshot_errors[:3]
     assert not rep.failures, rep.failures[:3]
+
+
+def _gzip_members(data: bytes) -> list[bytes]:
+    out = []
+    while data:
+        d = zlib.decompressobj(wbits=31)
+        out.append(d.decompress(data))
+        data = d.unused_data
+    return out
+
+
+@pytest.mark.skipif(not PATHS, reason="no cached replays")
+@pytest.mark.parametrize("path", PATHS, ids=[p.stem for p in PATHS])
+def test_replay_files_rewrite_byte_for_byte(path):
+    """What the export writes with: every snapshot and log line, parsed and written
+    back, is the same bytes."""
+    with zipfile.ZipFile(path) as z:
+        for name in z.namelist():
+            for member in _gzip_members(z.read(name)):
+                body = member.rstrip(b"\n")
+                if body.startswith(b"p:"):
+                    for line in body.split(b"\n"):
+                        pid, day, actions = phpser.loads(line.split(b";a:", 1)[1])
+                        assert isinstance(actions, list)
+                        decoded = [a if a == "Array" else json.loads(a) for a in actions]
+                        assert action_line(pid, day, decoded) == line
+                elif body:
+                    assert phpser.dumps(phpser.loads(body)) == body
 
 
 # Turns where AWBW's result has no rule behind it that we can see.

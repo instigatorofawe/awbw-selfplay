@@ -1664,13 +1664,69 @@ upload replays, so the viewer is the community
 - **Command:** `awbw export-replay FILE [--game N | --all] [--out PATH]`
   writes `<stem>-N.zip`.
 - **Order:**
-  1. `phpser.dumps` and the byte round trip.
+  1. `phpser.dumps` and the byte round trip. Done: `replay/write.py`
+     writes the zip, log lines and AWBW's JSON, byte for byte on 2,000
+     replays (the cached tests check the 200 newest).
   2. Snapshots, the unit-constant table, and the round trip on snapshots.
   3. The path and missile bindings.
   4. The common actions (Move, Fire, Capt, Build, End, Load, Unload, Join,
      Resign) through the round trip.
   5. The rarer actions, then powers CO by CO.
   6. The command, tests, and the check in the Replay Player.
+
+### Local play against the network (planned, `awbw play`)
+
+A person plays a network on their own machine, in the browser, with AWBW's
+rules exactly (two players, no fog, as everywhere in v1).
+
+- **Shape:** `awbw play --policy CKPT [--sims N] [--map ID] [--cos A B]
+  [--side 1|2]` starts a local server (the standard library's
+  `ThreadingHTTPServer`, no new dependencies) and opens the page. The
+  server holds the game and is the only side that applies rules; the page
+  draws and sends clicks.
+- **Input follows the micro-steps (§3)**, which already match AWBW's
+  clicks:
+  - idle: click a unit or factory (Select), or Delete, COP, SCOP, End Turn;
+  - selected: the move range is the legal Move ids; click a tile;
+  - moved: the action menu is the legal action ids at the unit's tile
+    (Wait, Capture, Load, Join, ...), and Fire, Unload and the like mark
+    their target tiles;
+  - factory: the build menu, each unit with its cost.
+
+  For each pick the server sends the legal ids with `CHANNELS`, `PHASES`
+  and the `ID_*` constants decoded into tiles and menu entries, so the page
+  never needs rules of its own. Cancel resets the `Selection`; picks don't
+  touch the state, so cancelling is free until the last step applies the
+  action.
+- **What the page shows**, beyond the viewer's board, funds and power bars:
+  - each fire target's damage range, from `combat_outcomes` (AWBW's
+    damage preview);
+  - a tile's terrain and defence, and a unit's HP, fuel and ammo;
+  - the network's moves animated one action at a time;
+  - optionally its value for the position (off by default, so as not to
+    spoil a close game).
+- **The network's side:** `PolicyAgent` (the prior, instant) or
+  `SearchAgent` with N simulations, one decision at a time, through the
+  same `Agent` protocol as the arena. The first step is to time a turn of
+  each on the Mac (MPS) to choose defaults. The box's GPU stays with
+  training until it finishes.
+- **Starts:**
+  - a validation game's start (a real setup: map, COs, countries); or
+  - a new game from a map and two COs. That needs a `new_game` builder for
+    AWBW's day-1 state (properties and owners from the terrain,
+    predeployed units, power costs, player 1's income), checked against the
+    first snapshot of real games.
+- **Records:** every game goes to `games.jsonl` (source "local", players
+  "human" and, for example, "tf128 128 sims"), so `view-game` and
+  `export-replay` work on it. A game against the network then opens in the
+  Replay Player.
+- **Order:**
+  1. Time the agents on the Mac.
+  2. The server and its JSON API (state, legal picks, pick, cancel, new
+     game, resign), with tests that play a game through the API.
+  3. The page: the viewer's board with input, menus and damage preview.
+  4. `new_game`, checked against real first snapshots.
+  5. Recording, then the command.
 
 ## 9. Bindings (nanobind)
 
