@@ -446,6 +446,24 @@ def known_oddity(replay, day: int) -> bool:
 
 @pytest.mark.skipif(not PATHS, reason="no cached replays")
 @pytest.mark.parametrize("path", PATHS, ids=[p.stem for p in PATHS])
+def test_new_games_start_as_awbw_starts_them(path):
+    """engine.new_game from a game's map, COs, countries and settings is its first snapshot."""
+    replay = load_replay(path)
+    g = replay.game
+    if len(replay.player_ids) != 2 or not map_path(g.map_id).exists() or engine.map_edit(replay):
+        pytest.skip("not a two-player game on its map as cached")
+    first = replay.turns[0]
+    if (first.day, first.player_id) != (1, replay.player_ids[0]):
+        pytest.skip("the replay starts later than the game")
+    s = engine.state_from_turn(replay, first)
+    p = s.players
+    cos, countries = (int(p[0].co), int(p[1].co)), (int(p[0].country), int(p[1].country))
+    new = engine.new_game(g.map_id, cos, countries, engine.settings_for(g), g.starting_funds)
+    assert _core.state_hash(new) == _core.state_hash(s)
+
+
+@pytest.mark.skipif(not PATHS, reason="no cached replays")
+@pytest.mark.parametrize("path", PATHS, ids=[p.stem for p in PATHS])
 def test_turns_replay_exactly(path):
     rep = check_turns(path)
     replay = load_replay(path)

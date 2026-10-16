@@ -1826,16 +1826,21 @@ upload replays, so the viewer is the community
   5. The rarer actions, then powers CO by CO (done).
   6. The command, tests, and the check in the Replay Player (done).
 
-### Local play against the network (planned, `awbw play`)
+### Local play against the network (`awbw play`, built; to try by hand)
 
 A person plays a network on their own machine, in the browser, with AWBW's
 rules exactly (two players, no fog, as everywhere in v1).
 
-- **Shape:** `awbw play --policy CKPT [--sims N] [--map ID] [--cos A B]
-  [--side 1|2]` starts a local server (the standard library's
-  `ThreadingHTTPServer`, no new dependencies) and opens the page. The
-  server holds the game and is the only side that applies rules; the page
-  draws and sends clicks.
+- **Shape:** `awbw play CKPT [--sims N] [--map ID] [--cos A B]
+  [--countries A B] [--side 1|2]` starts a local server (the standard
+  library's `ThreadingHTTPServer`, no new dependencies) and opens the page
+  (done: `play.py`, `play.html`). The server holds the game and is the only
+  side that applies rules; the page draws and sends clicks.
+  - The API: `GET /api/view` (the board, players, and the person's legal
+    picks decoded), `/api/unit?x&y` (any unit's ranges), and `POST`
+    `/api/pick`, `cancel`, `undo`, `resign`, `think` (the network's next
+    action, which the page animates) and `new`.
+  - The viewer and the play page share `board.js`.
 - **Input follows the micro-steps (§3)**, which already match AWBW's
   clicks:
   - idle: click a unit or factory (Select), or Delete, COP, SCOP, End Turn;
@@ -1850,11 +1855,13 @@ rules exactly (two players, no fog, as everywhere in v1).
   never needs rules of its own. Cancel resets the `Selection`; picks don't
   touch the state, so cancelling is free until the last step applies the
   action.
-- **What the page shows**, beyond the viewer's board, funds and power bars:
+- **What the page shows** (done), beyond the viewer's board, funds and
+  power bars:
   - the network's moves animated one action at a time;
   - optionally its value for the position (off by default, so as not to
     spoil a close game).
-- **AWBW's conveniences**, all from the engine so they follow its rules:
+- **AWBW's conveniences** (done), all from the engine so they follow its
+  rules:
   - **Movement range:** selecting a unit shades the tiles it can reach
     (its legal Move ids), and hovering one draws the path the unit will
     take (the cheapest path the engine moves along; the binding the export
@@ -1865,8 +1872,12 @@ rules exactly (two players, no fog, as everywhere in v1).
   - **Any unit's range, enemies included:** clicking a unit that can't act
     shows where it could move and fire on its next turn. `reachable`
     already works for any unit.
-  - **Damage preview:** each target's damage range from `combat_outcomes`,
-    with the counterattack.
+  - **Damage preview:** each target's damage % (the formula at the luck
+    rolls' bounds), its displayed HP after and the counter's, with their
+    chances. Players see only displayed HP, as the network does, so the
+    chances come from `fire_outcomes` over the HP beliefs (search's chance
+    nodes; bound as `seen_fight_outcomes`), and the page's tooltips give
+    displayed HP. The viewer keeps internal HP.
   - **Status icons on units:** HP, low fuel, low ammo, capturing, cargo
     aboard, dived or hidden; units that have acted are greyed out.
   - **Info panels:** a tile's terrain, defence stars, owner and capture
@@ -1885,27 +1896,51 @@ rules exactly (two players, no fog, as everywhere in v1).
   from art the user has, such as the Replay Player's), and otherwise draw
   the board as now.
 - **The network's side:** `PolicyAgent` (the prior, instant) or
-  `SearchAgent` with N simulations, one decision at a time, through the
-  same `Agent` protocol as the arena. The first step is to time a turn of
-  each on the Mac (MPS) to choose defaults. The box's GPU stays with
-  training until it finishes.
-- **Starts:**
-  - a validation game's start (a real setup: map, COs, countries); or
-  - a new game from a map and two COs. That needs a `new_game` builder for
-    AWBW's day-1 state (properties and owners from the terrain,
-    predeployed units, power costs, player 1's income), checked against the
-    first snapshot of real games.
-- **Records:** every game goes to `games.jsonl` (source "local", players
-  "human" and, for example, "tf128 128 sims"), so `view-game` and
-  `export-replay` work on it. A game against the network then opens in the
-  Replay Player.
+  `SearchAgent` with N simulations and no root noise (as the arena), one
+  decision at a time, through the same `Agent` protocol as the arena. The
+  box's GPU stays with training until it finishes.
+  - **Timing on the Mac** (M4 Pro, one game, so a network call per
+    simulation): a whole turn of player 1, from 12 turn starts (days 3–18)
+    of three prior-vs-prior games:
+
+    | network | device | prior | 16 sims | 32 sims | 64 sims | 128 sims |
+    |---|---|---|---|---|---|---|
+    | tf128-s1 | MPS | 0.2 s (6 ms a decision) | 3.8 s | 7.9 s | 13.8 s | 26.9 s |
+    | v1-64x6 | MPS | 0.2 s (4 ms) | 3.3 s | 6.1 s | 12.3 s | 22.6 s |
+    | tf128-s1 | CPU | 0.6 s (14 ms) | 10.3 s | 20.0 s | | |
+
+    Medians; the slowest turns took 1.5–1.7 times as long. MPS is 2.6 times
+    the CPU. In a game played through the page, tf128-s1's turns at 64 sims
+    took 41–54 s on days 9–12 with a large army (moves animated). The
+    default is 32 simulations (search beat its prior 59–61% at 16 and
+    67–72% at 64, above).
+- **Starts** (done): a validation game's setup (map, COs, countries,
+  settings), each replaced by `--map`, `--cos` or `--countries`, built by
+  `engine.new_game` (AWBW's day-1 state; `play.start_for`):
+  - player 1 is the map's first country slot (by AWBW country id); players
+    may take any country, and in 62% of real games at least one does;
+  - each slot's properties and predeployed units (full fuel and ammo) go to
+    its player; capture points 20, pipe seams 99 HP; meters empty;
+  - player 1 has a day's income (CO bonus included), player 2 none, both
+    plus the game's starting funds;
+  - checked: the same `state_hash` as all 33,860 first states of the v1
+    dataset's training games (43 maps), and as AWBW's own first snapshot
+    in all 2,941 of 3,000 sampled cached replays that start at the game's
+    start on the map as cached (56 maps were edited since; one replay
+    starts at player 2's turn). The cached tests check the 200 newest.
+- **Records** (done): every finished game goes to
+  `cache/games/local.jsonl` (source "local", players "human" and, for
+  example, "tf128-s1 (32 sims)"), so `view-game` and `export-replay` work on
+  it, and it opens in the Replay Player. Undone actions leave no trace.
 - **Order:**
-  1. Time the agents on the Mac.
-  2. The server and its JSON API (state, legal picks, pick, cancel, new
-     game, resign), with tests that play a game through the API.
-  3. The page: the viewer's board with input, menus and damage preview.
-  4. `new_game`, checked against real first snapshots.
-  5. Recording, then the command.
+  1. Time the agents on the Mac (done).
+  2. The server and its JSON API, with tests that play a game through the
+     API, offering exactly the legal picks at every step (done).
+  3. The page (done): played through by clicks in headless Chrome, with
+     undos, a whole game without a page error.
+  4. `new_game`, checked against real first snapshots (done).
+  5. Recording, then the command (done).
+  6. Playing it by hand.
 
 ## 9. Bindings (nanobind)
 

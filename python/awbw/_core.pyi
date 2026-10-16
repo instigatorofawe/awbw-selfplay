@@ -622,6 +622,11 @@ def fight_outcomes(state: GameState, slot: int, from_: tuple[int, int], target: 
     (attacker_hp, defender_hp, probability) results of the unit attacking from `from_` the unit on `target`.
     """
 
+def seen_fight_outcomes(state: GameState, slot: int, to: tuple[int, int], target: tuple[int, int]) -> list[tuple[int, int, float]]:
+    """
+    The results of the unit moving to `to` and firing on `target` as the players see them, knowing only displayed HP (fire_outcomes, search's chance nodes): (attacker_hp, defender_hp, probability), internal HPs that show each pair of displays; [] if there is nothing to fight.
+    """
+
 class SearchConfig:
     """Settings of a BatchedSearch (core/search.h)."""
 

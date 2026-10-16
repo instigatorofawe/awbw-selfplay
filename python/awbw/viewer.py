@@ -144,13 +144,50 @@ def _frame(s: _core.GameState, n_props: int) -> dict[str, Any]:
     }
 
 
+def board_data(md: _core.MapData, start: _core.GameState, labels: tuple[str, str]) -> dict[str, Any]:
+    """What board.js draws a game's frames with: the map, unit names, and each
+    player's label, CO and country."""
+    r = rules.load()
+    co_names = {c.id: c.name for c in r.cos.values()}
+    players = []
+    for label, p in zip(labels, start.players[:2], strict=True):
+        country = r.countries.get(p.country)
+        players.append(
+            {
+                "name": label,
+                "co": co_names.get(p.co, str(p.co)),
+                "country": country.name if country else "",
+                "code": country.code if country else "",
+            }
+        )
+    terrain_kinds = {}
+    for tid in np.unique(md.terrain()).tolist():
+        t = r.terrain.get(int(tid))
+        terrain_kinds[int(tid)] = [t.kind, t.name, t.defense] if t else ["plain", str(tid), 1]
+    return {
+        "map": {
+            "id": md.id,
+            "name": _map_name(md.id),
+            "width": md.width,
+            "height": md.height,
+            "terrain": md.terrain().tolist(),
+            "terrain_kinds": terrain_kinds,
+            "props": [list(p) for p in md.props()],
+        },
+        "kinds": list(r.terrain_kinds),
+        "units": [u.name for u in r.units],
+        "unit_stats": [[u.fuel, u.ammo] for u in r.units],
+        "countries": {c.id: c.code for c in r.countries.values()},
+        "players": players,
+    }
+
+
 def game_view(log: GameLog, title: str = "") -> dict[str, Any]:
     """The game as plain data for viewer.html."""
     replayed = replay(log)
     md = _core.find_map(log.map_id)
     assert md is not None
     describer = _Describer(md)
-    r = rules.load()
     frames = [_frame(log.start, md.n_props) | {"t": "start", "m": -1, "k": []}]
     before = log.start
     searched = log.searched if log.searched is not None else np.zeros(0, SEARCHED)
@@ -170,35 +207,8 @@ def game_view(log: GameLog, title: str = "") -> dict[str, Any]:
     if log.decided == "resigned":
         loser = 1 - log.winner if log.winner in (0, 1) else int(before.active)
         frames.append(_frame(before, md.n_props) | {"t": "resigns", "m": loser, "k": []})
-    players = []
-    for p in log.start.players[:2]:
-        country = r.countries.get(p.country)
-        players.append(
-            {
-                "co": describer.co_names.get(p.co, str(p.co)),
-                "country": country.name if country else "",
-                "code": country.code if country else "",
-            }
-        )
-    terrain_kinds = {}
-    for tid in np.unique(md.terrain()).tolist():
-        t = r.terrain.get(int(tid))
-        terrain_kinds[int(tid)] = [t.kind if t else "plain", t.name if t else str(tid)]
-    return {
+    return board_data(md, log.start, log.players) | {
         "title": title,
-        "map": {
-            "id": log.map_id,
-            "name": _map_name(log.map_id),
-            "width": md.width,
-            "height": md.height,
-            "terrain": md.terrain().tolist(),
-            "terrain_kinds": terrain_kinds,
-            "props": [list(p) for p in md.props()],
-        },
-        "kinds": list(r.terrain_kinds),
-        "units": [u.name for u in r.units],
-        "countries": {c.id: c.code for c in r.countries.values()},
-        "players": [{"name": log.players[i]} | players[i] for i in range(2)],
         "result": {"winner": log.winner, "days": log.days, "decided": log.decided},
         "source": log.source,
         "info": log.info,
@@ -207,8 +217,13 @@ def game_view(log: GameLog, title: str = "") -> dict[str, Any]:
     }
 
 
+def page(template: str, data: Any) -> str:
+    """An HTML template from this package with board.js and ``data`` (JSON) put in."""
+    here = Path(__file__).parent
+    html = (here / template).read_text().replace("/*BOARD_JS*/", (here / "board.js").read_text())
+    return html.replace("/*GAME_DATA*/null", json.dumps(data, separators=(",", ":")).replace("</", "<\\/"))
+
+
 def write_page(view: dict[str, Any], out: Path) -> Path:
-    template = (Path(__file__).parent / "viewer.html").read_text()
-    data = json.dumps(view, separators=(",", ":")).replace("</", "<\\/")
-    out.write_text(template.replace("/*GAME_DATA*/null", data))
+    out.write_text(page("viewer.html", view))
     return out

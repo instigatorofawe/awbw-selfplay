@@ -311,6 +311,23 @@ def main(argv: list[str] | None = None) -> int:
     vg.add_argument("--out", type=Path, help="the page to write (default: game-N.html next to the record file)")
     vg.add_argument("--open", action="store_true", help="open the page in the browser")
 
+    pl = sub.add_parser("play", help="play a saved policy yourself, in the browser")
+    pl.add_argument("checkpoint", type=Path, help="the policy to play against")
+    pl.add_argument(
+        "--sims", type=int, default=32, help="it searches each decision this much (default 32; 0: plays its prior)"
+    )
+    pl.add_argument("--considered", type=int, default=16, help="steps the search's root considers (default 16)")
+    pl.add_argument("--map", type=int, help="an AWBW map id (default: a validation game's)")
+    pl.add_argument("--cos", nargs=2, metavar=("P1", "P2"), help="the COs, by name or id (default: the game's)")
+    pl.add_argument("--countries", nargs=2, metavar=("P1", "P2"), help="by name or code (default: the game's)")
+    pl.add_argument("--side", type=int, choices=(1, 2), default=1, help="the side you play: 1 moves first (default)")
+    pl.add_argument("--record", type=Path, help="where finished games go (default: cache/games/local.jsonl)")
+    pl.add_argument("--data", type=Path, help="v1 dataset whose validation games give the setups (default: v1)")
+    pl.add_argument("--port", type=int, default=0, help="the local server's port (default: any free one)")
+    pl.add_argument("--no-open", action="store_true", help="don't open the page in the browser")
+    pl.add_argument("--device", default="auto")
+    pl.add_argument("--seed", type=int, help="for the setups and the luck (default: random)")
+
     er = sub.add_parser("export-replay", help="recorded games as AWBW replay zips, for the AWBW Replay Player")
     er.add_argument("record", type=Path, help="a record file, such as a self-play run's games.jsonl")
     which = er.add_mutually_exclusive_group()
@@ -347,6 +364,7 @@ def main(argv: list[str] | None = None) -> int:
         "live": _live,
         "view-game": _view_game,
         "export-replay": _export_replay,
+        "play": _play,
     }
     return commands[args.cmd](args, http)
 
@@ -1091,4 +1109,52 @@ def _view_game(args, http: Http) -> int:
         import webbrowser
 
         webbrowser.open(out.resolve().as_uri())
+    return 0
+
+
+def _play(args, http: Http) -> int:
+    import numpy as np
+
+    from . import maps
+    from .agents import PolicyAgent
+    from .data.shards import Dataset
+    from .ladder import validation_starts
+    from .nn.policy import Policy
+    from .play import Game, record_to, serve, start_for
+    from .search import NetEvaluator, SearchAgent, SearchSettings
+
+    if args.map is not None:
+        maps.fetch_map(args.map, http)
+    bases = validation_starts(Dataset(args.data or cache_dir() / "datasets" / "v1"), 200)
+    rng = np.random.default_rng(args.seed)
+    policy = Policy.load(args.checkpoint, args.device)
+    if args.sims > 0:
+        settings = SearchSettings(args.sims, args.considered, gumbel_scale=0.0)
+        agent = SearchAgent(NetEvaluator(policy), settings, seed=int(rng.integers(2**31)))
+    else:
+        agent = PolicyAgent(policy)
+    name = args.checkpoint.parent.name if args.checkpoint.stem in ("best", "last") else args.checkpoint.stem
+    label = f"{name} ({args.sims} sims)" if args.sims > 0 else f"{name} (prior)"
+    record = args.record or cache_dir() / "games" / "local.jsonl"
+    human = args.side - 1
+    labels = ("human", label) if human == 0 else (label, "human")
+    info = {"checkpoint": str(args.checkpoint), "sims": args.sims}
+
+    def new_game(params: dict) -> Game:
+        base = bases[int(rng.integers(len(bases)))]
+        start = start_for(base, rng, args.map, tuple(args.cos) if args.cos else None, args.countries)
+        return Game(start, human, agent, labels, on_over=record_to(record), info=info)
+
+    server = serve(new_game({}), args.port, new_game)
+    print(f"playing {label} at {server.url} (finished games go to {record}); Ctrl-C stops")
+    if not args.no_open:
+        import webbrowser
+
+        webbrowser.open(server.url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
     return 0

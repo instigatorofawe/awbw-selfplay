@@ -97,7 +97,17 @@ uv run awbw eval-policy cache/policies/run1/best.pt            # by phase, again
 uv run awbw arena cache/policies/run1/best.pt --games 32       # whole games against a random mover
 uv run awbw arena cache/policies/run1/best.pt --record games.jsonl   # ...and keep them
 uv run awbw view-game games.jsonl --game 0 --open              # step through one in the browser
+uv run awbw export-replay games.jsonl --game 0                 # as a zip for the AWBW Replay Player
+uv run awbw play cache/policies/run1/best.pt                   # play it yourself, in the browser
 ```
+
+`awbw play` starts a local server and opens the page: a validation game's
+map, COs and countries (`--map`, `--cos`, `--countries` change them), you
+as player 1 (`--side 2` for the other), the network searching 32
+simulations a decision (`--sims`, 0 for its prior). The page shows move
+and attack ranges, paths, damage previews and any unit's range
+(right-click), and allows undo. Finished games go to
+`cache/games/local.jsonl`, for `view-game` and `export-replay`.
 
 ```python
 from awbw.nn.policy import Policy

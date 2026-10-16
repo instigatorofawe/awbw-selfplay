@@ -114,27 +114,11 @@ svg#vchart { width: 100%; height: 160px; display: block; cursor: pointer; }
 </div>
 <div class="tip" id="tip"></div>
 <script>
+/*BOARD_JS*/
 const G = /*GAME_DATA*/null;
 const $ = (id) => document.getElementById(id);
-const F = G.frames, M = G.map, W = M.width, H = M.height;
-const MOVED = 1, HIDDEN = 2, CARRIED = 4, STUNNED = 8, CAPTURING = 16;
-const COUNTRY = { os: "#e8562a", bm: "#3a6fd8", ge: "#3aa155", yc: "#d9b21a", bh: "#5b4e72", rf: "#b8332e",
-  gs: "#7d8a99", bd: "#9c6b3c", ab: "#f0a040", js: "#6aa86a", ci: "#3fa3c7", pc: "#e877b8", tg: "#2fa59a",
-  pl: "#8a52c9", ar: "#8db33a", wn: "#cfc9b8", aa: "#4f86c6", ne: "#3a3a3a", sc: "#a8a8b8", uw: "#7a5a3a" };
-const FALLBACK = ["#e8562a", "#3a6fd8"];
-const NEUTRAL = "#d9d4c6";
-const TERRAIN = { plain: "#a9cf7a", mountain: "#9b7b55", wood: "#3f7f3a", river: "#63a8e0", road: "#cfc8b6",
-  bridge: "#b8a27e", sea: "#2d64a8", shoal: "#e3d49a", reef: "#2d64a8", pipe: "#6e6e6e", seam: "#8e8e8e",
-  rubble: "#9a8f7c", silo: "#a9cf7a", silo_empty: "#a9cf7a", teleport: "#b9b0d6" };
-const BUILDING = { city: "C", base: "B", airport: "A", port: "P", hq: "HQ", comtower: "T", lab: "L" };
-const CODES = { "Infantry": "Inf", "Mech": "Mch", "Md.Tank": "Md", "Tank": "Tnk", "Recon": "Rcn", "APC": "APC",
-  "Artillery": "Art", "Rocket": "Rkt", "Anti-Air": "AA", "Missile": "Msl", "Fighter": "Ftr", "Bomber": "Bmb",
-  "B-Copter": "BCp", "T-Copter": "TCp", "Battleship": "BS", "Cruiser": "Cru", "Lander": "Lnd", "Sub": "Sub",
-  "Black Boat": "BB", "Carrier": "Car", "Stealth": "Stl", "Neotank": "Neo", "Piperunner": "Pip",
-  "Black Bomb": "Bom", "Mega Tank": "Mg" };
-const color = (p) => COUNTRY[G.players[p].code] || FALLBACK[p];
-const propAt = {};
-M.props.forEach((p, i) => { propAt[p[0] + "," + p[1]] = i; });
+const F = G.frames, M = G.map;
+const cv = $("map"), B = makeBoard(G, cv), color = B.color, escapeHtml = B.escape;
 const turnStarts = [0];
 for (let i = 1; i < F.length; i++) if (F[i].a !== F[i - 1].a || F[i].d !== F[i - 1].d) turnStarts.push(i);
 
@@ -154,98 +138,8 @@ if (!G.matches) {
 }
 
 // Board
-const cv = $("map"), ctx = cv.getContext("2d");
-let T = 28;
-function sizeBoard() {
-  const avail = cv.parentElement.clientWidth - 20;
-  T = Math.max(14, Math.min(36, Math.floor(avail / W)));
-  const dpr = window.devicePixelRatio || 1;
-  cv.width = W * T * dpr; cv.height = H * T * dpr;
-  cv.style.width = W * T + "px"; cv.style.height = H * T + "px";
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-}
-function kindAt(x, y, f) {
-  const id = M.terrain[y][x];
-  let k = (M.terrain_kinds[id] || ["plain"])[0];
-  const p = propAt[x + "," + y];
-  if (p !== undefined && k === "seam" && f.c[p] === 0) k = "rubble";
-  if (p !== undefined && k === "silo" && f.c[p] === 0) k = "silo_empty";
-  return k;
-}
-function drawTile(x, y, f) {
-  const k = kindAt(x, y, f), px = x * T, py = y * T;
-  const building = BUILDING[k];
-  ctx.fillStyle = building ? TERRAIN.plain : (TERRAIN[k] || TERRAIN.plain);
-  ctx.fillRect(px, py, T, T);
-  if (k === "reef") {
-    ctx.fillStyle = "#6f9cc0";
-    for (const [a, b] of [[.25, .3], [.65, .25], [.45, .65], [.8, .7]]) ctx.fillRect(px + a * T, py + b * T, T * .12, T * .12);
-  } else if (k === "mountain") {
-    ctx.fillStyle = "#7d6142";
-    ctx.beginPath(); ctx.moveTo(px + T * .15, py + T * .85); ctx.lineTo(px + T * .5, py + T * .2); ctx.lineTo(px + T * .85, py + T * .85); ctx.fill();
-  } else if (k === "wood") {
-    ctx.fillStyle = "#2f6a2c";
-    ctx.beginPath(); ctx.arc(px + T / 2, py + T / 2, T * .3, 0, 7); ctx.fill();
-  } else if (k === "silo" || k === "silo_empty") {
-    ctx.fillStyle = k === "silo" ? "#c0392b" : "#888";
-    ctx.fillRect(px + T * .35, py + T * .25, T * .3, T * .5);
-  }
-  if (building) {
-    const p = propAt[x + "," + y];
-    const owner = p === undefined ? 255 : f.o[p];
-    ctx.fillStyle = owner < 2 ? color(owner) : NEUTRAL;
-    ctx.strokeStyle = "rgba(0,0,0,.45)"; ctx.lineWidth = 1;
-    const m = T * .1;
-    ctx.beginPath(); ctx.roundRect(px + m, py + m, T - 2 * m, T - 2 * m, T * .12); ctx.fill(); ctx.stroke();
-    ctx.fillStyle = owner < 2 ? "#fff" : "#555";
-    ctx.font = `700 ${Math.round(T * (building.length > 1 ? .32 : .42))}px system-ui`;
-    ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.fillText(building, px + T / 2, py + T / 2 + 1);
-    if (p !== undefined && f.c[p] < 20) {  // being captured
-      ctx.fillStyle = "#000"; ctx.fillRect(px + 2, py + T - 5, T - 4, 3);
-      ctx.fillStyle = "#ffd23f"; ctx.fillRect(px + 2, py + T - 5, (T - 4) * f.c[p] / 20, 3);
-    }
-  }
-  ctx.strokeStyle = "rgba(0,0,0,.08)"; ctx.lineWidth = 1;
-  ctx.strokeRect(px + .5, py + .5, T - 1, T - 1);
-}
-function drawUnit(u) {
-  const [id, type, owner, x, y, hp, fuel, ammo, flags] = u;
-  const px = x * T, py = y * T, m = T * .12;
-  ctx.globalAlpha = flags & MOVED ? .55 : 1;
-  ctx.fillStyle = color(owner);
-  ctx.strokeStyle = "rgba(0,0,0,.6)"; ctx.lineWidth = 1.2;
-  ctx.beginPath(); ctx.roundRect(px + m, py + m, T - 2 * m, T - 2 * m, T * .25); ctx.fill(); ctx.stroke();
-  if (flags & HIDDEN) { ctx.setLineDash([2, 2]); ctx.strokeStyle = "#fff"; ctx.stroke(); ctx.setLineDash([]); }
-  const name = G.units[type];
-  ctx.fillStyle = "#fff";
-  ctx.font = `700 ${Math.round(T * .3)}px system-ui`;
-  ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  ctx.fillText(CODES[name] || name.slice(0, 3), px + T / 2, py + T / 2);
-  ctx.globalAlpha = 1;
-  const shown = Math.ceil(hp / 10);
-  if (shown < 10) {
-    ctx.fillStyle = "#000"; ctx.fillRect(px + T - T * .38, py + T - T * .36, T * .36, T * .34);
-    ctx.fillStyle = "#fff"; ctx.font = `700 ${Math.round(T * .3)}px system-ui`;
-    ctx.fillText(String(shown), px + T - T * .2, py + T - T * .18);
-  }
-  if (u[9] || u[10]) { ctx.fillStyle = "#ffd23f"; ctx.beginPath(); ctx.arc(px + T * .2, py + T * .2, T * .1, 0, 7); ctx.fill(); }
-  if (flags & CAPTURING) { ctx.fillStyle = "#ffd23f"; ctx.fillRect(px + T * .12, py + T * .78, T * .2, T * .1); }
-}
-function drawMarks(f) {
-  const style = ["rgba(255,255,255,.9)", "#ffd23f", "#ff3b30"];
-  for (const [x, y, role] of f.k || []) {
-    ctx.strokeStyle = style[role]; ctx.lineWidth = role === 0 ? 2 : 3;
-    if (role === 0) ctx.setLineDash([4, 3]);
-    ctx.strokeRect(x * T + 1.5, y * T + 1.5, T - 3, T - 3);
-    ctx.setLineDash([]);
-  }
-}
-function drawBoard(f) {
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) drawTile(x, y, f);
-  for (const u of f.u) if (!(u[8] & CARRIED)) drawUnit(u);
-  drawMarks(f);
-}
+function sizeBoard() { B.size(cv.parentElement.clientWidth - 20); }
+function drawBoard(f) { B.draw(f); B.drawMarks(f.k); }
 
 // Side panel
 const WEATHER = ["clear", "rain", "snow"];
@@ -270,7 +164,6 @@ function actionLine(f) {
   if (f.m < 0) return "Start of the game";
   return `<span class="who" style="color:${color(f.m)}">P${f.m + 1}</span> ${escapeHtml(f.t)}`;
 }
-function escapeHtml(s) { return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]); }
 function turnIndex(i) { let t = 0; while (t + 1 < turnStarts.length && turnStarts[t + 1] <= i) t++; return t; }
 let cur = 0, timer = null, logTurn = -1;
 function renderLog(i) {
@@ -346,28 +239,9 @@ svg.addEventListener("click", (e) => {
 // Tooltip
 const tip = $("tip");
 cv.addEventListener("mousemove", (e) => {
-  const r = cv.getBoundingClientRect();
-  const x = Math.floor((e.clientX - r.left) / T), y = Math.floor((e.clientY - r.top) / T);
-  if (x < 0 || y < 0 || x >= W || y >= H) { tip.style.display = "none"; return; }
-  const f = F[cur];
-  const id = M.terrain[y][x];
-  let html = `<b>(${x},${y})</b> ${escapeHtml((M.terrain_kinds[id] || ["", "?"])[1])}`;
-  const p = propAt[x + "," + y];
-  if (p !== undefined && BUILDING[kindAt(x, y, f)] && f.c[p] < 20) html += ` · capture ${f.c[p]}/20`;
-  if (p !== undefined && kindAt(x, y, f) === "seam") html += ` · ${f.c[p]} HP`;
-  const here = f.u.filter((u) => u[3] === x && u[4] === y && !(u[8] & CARRIED));
-  for (const u of here) {
-    html += `<br><span style="color:${color(u[2])}">■</span> ${escapeHtml(G.units[u[1]])}: ${(u[5] / 10).toFixed(1)} HP, fuel ${u[6]}, ammo ${u[7]}`;
-    const flags = [];
-    if (u[8] & MOVED) flags.push("moved"); if (u[8] & HIDDEN) flags.push("hidden");
-    if (u[8] & STUNNED) flags.push("stunned"); if (u[8] & CAPTURING) flags.push("capturing");
-    if (flags.length) html += ` (${flags.join(", ")})`;
-    for (const c of [u[9], u[10]]) {
-      const cu = c && f.u.find((v) => v[0] === c);
-      if (cu) html += `<br>&nbsp;&nbsp;carrying ${escapeHtml(G.units[cu[1]])} ${(cu[5] / 10).toFixed(1)} HP`;
-    }
-  }
-  tip.innerHTML = html;
+  const at = B.tileAt(e);
+  if (!at) { tip.style.display = "none"; return; }
+  tip.innerHTML = B.tileInfo(F[cur], at[0], at[1]);
   tip.style.display = "block";
   tip.style.left = Math.min(e.clientX + 14, window.innerWidth - 270) + "px";
   tip.style.top = e.clientY + 14 + "px";

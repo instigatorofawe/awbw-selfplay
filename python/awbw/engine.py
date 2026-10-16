@@ -119,3 +119,91 @@ def state_from_turn(
         weather=_WEATHER[turn.weather],
         weather_owner=index.get(turn.weather_start, -1) if turn.weather_start is not None else -1,
     )
+
+
+def map_countries(game_map: MapInfo) -> list[int]:
+    """The map's country slots in turn order: the countries its properties and
+    predeployed units belong to, by AWBW country id (player 1 takes the first)."""
+    r = rules.load()
+    by_code = {c.code: c.id for c in r.countries.values()}
+    found = {t.country for tid in np.unique(game_map.terrain).tolist() if (t := r.terrain.get(int(tid))) and t.country}
+    found |= {by_code[u.country_code] for u in game_map.predeployed if u.country_code in by_code}
+    return sorted(found)
+
+
+def _lookup(table: dict, key: int | str, what: str) -> int:
+    """The id of a CO or country given by id, name or (a country) code, any case."""
+    for k, v in table.items():
+        names = (str(v.name).lower(), getattr(v, "code", ""))
+        if key == k or (isinstance(key, str) and key.lower() in names):
+            return int(k)
+    raise ValueError(f"no {what} {key!r}")
+
+
+def new_game(
+    game_map: MapInfo | int,
+    cos: tuple[int | str, int | str],
+    countries: tuple[int | str, int | str] | None = None,
+    settings: _core.Settings | None = None,
+    starting_funds: int = 0,
+    seed: int | None = None,
+) -> _core.GameState:
+    """AWBW's first state of a game on a two-player map, as its replays' first
+    snapshots have it: day 1, clear weather, player 1 (the map's first country
+    slot) to move with a day's income, player 2 with none (both with
+    ``starting_funds`` on top, AWBW's option); each slot's
+    properties and predeployed units (full fuel and ammo) to its player;
+    capture points 20 and pipe seams 99 HP; power meters empty.
+
+    ``cos`` and ``countries`` (AWBW ids, names or country codes) are player
+    1's then player 2's; countries default to the map's slots (players may take
+    any). ``seed`` reseeds the luck.
+    """
+    game_map = load_map(game_map) if isinstance(game_map, int) else game_map
+    r = rules.load()
+    md = register(game_map)
+    slots = map_countries(game_map)
+    if len(slots) != 2:
+        raise ValueError(f"map {game_map.id} has {len(slots)} countries; only two-player maps are played")
+    co_ids = [_lookup(r.cos, c, "CO") for c in cos]
+    country_ids = slots if countries is None else [_lookup(r.countries, c, "country") for c in countries]
+    if country_ids[0] == country_ids[1]:
+        raise ValueError("the players need different countries")
+    settings = settings if settings is not None else _core.Settings()
+    rank = {cid: i for i, cid in enumerate(slots)}
+    building_id = {}
+    for t in r.terrain.values():
+        building_id.setdefault((t.kind, t.country), t.id)
+    buildings, paying = [], [0, 0]
+    for x, y, kind, _ in md.props():
+        tid = int(game_map.terrain[y, x])
+        t = r.terrain[tid]
+        name = r.terrain_kinds[kind]
+        if t.country:
+            owner = rank[t.country]
+            tid = building_id[(t.kind, country_ids[owner])]
+            paying[owner] += name in ("city", "base", "airport", "port", "hq")
+        buildings.append((x, y, tid, 99 if name == "seam" else 20))
+    players = np.zeros((2, 8), dtype=np.int64)
+    for p in (0, 1):
+        co = co_ids[p]
+        players[p] = (co, country_ids[p], starting_funds, 0, _core.cop_cost(co, 0), _core.scop_cost(co, 0), 0, 0)
+    players[0, 2] += paying[0] * (settings.funds_per_property + r.cos[co_ids[0]].d2d.income_bonus)
+    by_code = {c.code: c.id for c in r.countries.values()}
+    rows = []
+    for i, u in enumerate(game_map.predeployed):
+        ut = r.unit(u.unit_id)
+        owner = rank[by_code[u.country_code]]
+        rows.append((i + 1, ut.index, owner, u.x, u.y, u.hp * 10, ut.fuel, ut.ammo, 0, 0, 0))
+    s = _core.load_snapshot(
+        md,
+        settings,
+        1,
+        0,
+        players,
+        np.array(buildings, dtype=np.int64).reshape(-1, 4),
+        np.array(rows, dtype=np.int64).reshape(-1, 11),
+    )
+    if seed is not None:
+        s.seed(seed)
+    return s

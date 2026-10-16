@@ -1219,6 +1219,27 @@ NB_MODULE(_core, m) {
       "state"_a, "slot"_a, "from_"_a, "target"_a,
       "(attacker_hp, defender_hp, probability) results of the unit attacking from `from_` the "
       "unit on `target`.");
+  m.def(
+      "seen_fight_outcomes",
+      [](const awbw::GameState& s, int slot, XY to, XY target) {
+        check_slot(s, slot);
+        const awbw::MapData& md = map_for(s);
+        awbw::Action a;
+        a.kind = awbw::kActFire;
+        a.unit = static_cast<uint8_t>(slot);
+        a.to = static_cast<uint16_t>(tile_of(md, to));
+        a.target = static_cast<uint16_t>(tile_of(md, target));
+        std::vector<awbw::SeenOutcome> out;
+        awbw::fire_outcomes(md, s, a, out);
+        std::vector<std::tuple<int, int, double>> res;
+        for (const auto& o : out) res.emplace_back(o.att_hp, o.def_hp, o.prob);
+        return res;
+      },
+      "state"_a, "slot"_a, "to"_a, "target"_a,
+      "The results of the unit moving to `to` and firing on `target` as the players see them, "
+      "knowing only displayed HP (fire_outcomes, search's chance nodes): (attacker_hp, "
+      "defender_hp, probability), internal HPs that show each pair of displays; [] if there "
+      "is nothing to fight.");
   nb::class_<awbw::SearchConfig>(m, "SearchConfig", "Settings of a BatchedSearch (core/search.h).")
       .def(
           "__init__",
