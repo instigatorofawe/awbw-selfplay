@@ -1,7 +1,8 @@
 from awbw import _core, engine
 from awbw.games import replay
 from awbw.replay import load_replay
-from awbw.replay.export import FIRST_GAME_ID, GameMeta, snapshots
+from awbw.replay.export import FIRST_GAME_ID, GameMeta, action_lines, snapshots
+from awbw.replay.step_check import check_turns
 from awbw.replay.write import replay_zip
 from test_games import _arena_logs
 from test_search import md  # noqa: F401 (a fixture)
@@ -33,3 +34,18 @@ def test_exported_snapshots_read_back_as_the_game(md):  # noqa: F811
         assert [(back.prop_owner(p), back.prop_points(p)) for p in range(md.n_props)] == [
             (s.prop_owner(p), s.prop_points(p)) for p in range(md.n_props)
         ]
+
+
+def test_exported_actions_step_as_the_game(md):  # noqa: F811
+    """The log steps through every turn to the next snapshot, as a real replay's does."""
+    for log in _arena_logs(md, 2):
+        meta = GameMeta(id=FIRST_GAME_ID, name="search vs random", players=(11, 12))
+        lines = action_lines(log, meta)
+        snaps = snapshots(log, meta)
+        # A game stopped at the day limit ends on a snapshot with nothing logged yet.
+        assert len(lines) == len(snaps) - (log.decided == "day limit")
+        r = load_replay(replay_zip(meta.id, snaps, lines))
+        results = check_turns(r, md)
+        assert len(results) == len(r.turns)
+        bad = [(t.day, t.category, t.detail) for t, _ in results[:-1] if not t.ok]
+        assert not bad, bad[:3]

@@ -11,16 +11,16 @@ import zlib
 
 import pytest
 
-from awbw import _core, engine, phpser
+from awbw import _core, engine, phpser, rules
 from awbw.maps import map_path
 from awbw.net import cache_dir
 from awbw.replay import load_replay
 from awbw.replay.combat_check import check_file
-from awbw.replay.export import GameMeta, Snapshots
+from awbw.replay.export import ActionLog, GameMeta, Snapshots
 from awbw.replay.extract import extract_v0, extract_v1
 from awbw.replay.move_check import check_replay as check_moves
 from awbw.replay.step_check import check_file as check_turns
-from awbw.replay.step_check import step_turn
+from awbw.replay.step_check import step_last_turn, step_turn
 from awbw.replay.write import action_line
 
 # The 200 newest games: the cache grows back in time, so these stay put.
@@ -219,6 +219,133 @@ def test_snapshots_export_as_awbw_writes_them(path):
         s = states[-1].copy()
         assert _core.apply(s, end) == _core.OK
         diffs += [f"turn {k + 1}: {d}" for d in _snapshot_diffs(snaps.take(s, states).fields, raw[k + 1])]
+    assert not diffs, diffs[:5]
+
+
+A = _core.ACTIONS
+EXPORTED = {A[k] for k in ("Wait", "Fire", "Capture", "Load", "Join", "Unload", "Build", "Delete", "EndTurn", "Resign")}
+# Dates, AWBW's timers, and messages naming its users can't match.
+LOG_UNCHECKED = {"nextTurnStart", "gameEndDate", "nextTimer", "message"}
+LOG_IDS = {"0", "units_id", "units_cargo1_units_id", "units_cargo2_units_id", "transportID", "global"}
+SONJA = next(c.id for c in rules.load().cos.values() if c.name == "Sonja")
+# Log entries with no rule behind them that we can see.
+LOG_ODDITIES = {
+    "1741903 day 8 Capt",  # an enemy lab with one left logs onElimination (6 of 567 such captures)
+}
+
+
+def _forced_after(before: _core.GameState, steps: list[int], logged: dict) -> _core.GameState | None:
+    """A turn's last traced action played again, with its logged fight result:
+    no later trace state holds it. None if the engine refuses that result."""
+    s = before.copy()
+    sel = _core.Selection()
+    att_hp = def_hp = -1
+    if logged.get("action") == "Fire":
+        info = logged["Fire"]["combatInfoVision"]["global"]["combatInfo"]
+
+        def hp(side: dict) -> int:
+            now = before.unit(before.find_unit(side["units_id"])).hp
+            shown = side["units_hit_points"]
+            return now if (now + 9) // 10 == shown else min(now, shown * 10)
+
+        att_hp, def_hp = hp(info["attacker"]), hp(info["defender"])
+    status = _core.OK
+    for step in steps:
+        status = _core.step(s, sel, step, att_hp=att_hp, def_hp=def_hp)
+    return s if status in (_core.OK, _core.TRAPPED) else None
+
+
+def _logged_actions(r, md, k: int) -> list[tuple[list[dict], _core.GameState, _core.GameState, tuple, int]]:
+    """Each action of turn ``k`` the engine steps: (its log entries, the states
+    before and after it, the action as step_action gives it, its status)."""
+    turn = r.turns[k]
+    last = k == len(r.turns) - 1
+    start = engine.state_from_turn(r, turn, md)
+    trace = {}
+    try:
+        why = step_last_turn(r, md, start, trace) if last else step_turn(r, md, k, start, trace)[2]
+    except ValueError:
+        why = "unloadable"
+    if why:
+        return []
+    out = []
+    order = sorted(trace)
+    prev, state = -1, start
+    for j, i in enumerate(order):
+        before = _core.GameState.from_bytes(trace[i].state)
+        s, sel = before.copy(), _core.Selection()
+        action, status = None, _core.OK
+        for step in trace[i].steps:
+            action = _core.step_action(s, sel, step)
+            status = _core.step(s, sel, step)
+        assert action is not None
+        theirs = turn.actions[prev + 1 : i + 1]
+        if j + 1 < len(order):
+            after = _core.GameState.from_bytes(trace[order[j + 1]].state)
+        elif (after := _forced_after(before, trace[i].steps, theirs[-1])) is None:
+            break
+        out.append((theirs, before, after, tuple(action), status))
+        prev, state = i, after
+    rest = turn.actions[prev + 1 :]
+    # Resigning in the opponent's turn is something the engine doesn't do.
+    if last and rest and rest[0]["action"] == "Resign" and rest[0]["Resign"]["playerId"] == r.player_ids[state.active]:
+        out.append((rest[:1], state, state, (A["Resign"], -1, None, None, 0), _core.OK))
+    return out
+
+
+def _log_diffs(ours, theirs, where: str, ids: dict[int, int], key: str = "") -> list[str]:
+    if key in LOG_IDS and isinstance(ours, int):
+        ours = ids.get(ours, ours)
+    if isinstance(theirs, dict) and isinstance(ours, dict):
+        diffs = [f"{where}: keys {list(ours)} vs {list(theirs)}"] if list(ours) != list(theirs) else []
+        for k, v in theirs.items():
+            if k in ours and k not in LOG_UNCHECKED:
+                diffs += _log_diffs(ours[k], v, f"{where}.{k}", ids, k)
+        return diffs
+    if isinstance(theirs, list) and isinstance(ours, list) and len(ours) == len(theirs):
+        return [d for a, b in zip(ours, theirs, strict=True) for d in _log_diffs(a, b, f"{where}[]", ids, key)]
+    if key in ("supplied", "units_id") and isinstance(ours, str) and ours.isdigit():
+        ours = str(ids.get(int(ours), int(ours)))
+    if ours != theirs or type(ours) is not type(theirs):
+        return [f"{where}: {ours!r} vs {theirs!r}"]
+    return []
+
+
+@pytest.mark.skipif(not PATHS, reason="no cached replays")
+@pytest.mark.parametrize("path", PATHS, ids=[p.stem for p in PATHS])
+def test_actions_export_as_awbw_logs_them(path):
+    """Each action the engine steps, exported, is AWBW's log entry, given the
+    path the player took (the engine's own export takes its cheapest)."""
+    r = load_replay(path)
+    if r.game.fog or len(r.player_ids) != 2 or not map_path(r.game.map_id).exists():
+        pytest.skip("not 2 players without fog, or map not cached")
+    if SONJA in {p.co_id for p in r.turns[0].players}:
+        pytest.skip("Sonja hides HP in the log")
+    md = engine.map_data(r.game.map_id)
+    meta = GameMeta(id=r.game.id, name=r.game.name, players=(r.player_ids[0], r.player_ids[1]))
+    diffs = []
+    for k, turn in enumerate(r.turns):
+        log = ActionLog(md, meta, {(b.x, b.y): b.id for b in turn.buildings})
+        ids: dict[int, int] = {}  # engine id -> AWBW id of the units built this turn
+        for theirs, before, after, action, status in _logged_actions(r, md, k):
+            if action[0] not in EXPORTED:
+                continue
+            move = theirs[0] if theirs[0]["action"] == "Move" else theirs[0].get("Move")
+            path_taken = None
+            if isinstance(move, dict):  # the mover's own view: a hidden unit's has no global one
+                paths = move["paths"]
+                path_taken = [(p["x"], p["y"]) for p in paths.get(str(meta.players[before.active])) or paths["global"]]
+            ours = log.entries(before, after, action, status, path_taken)
+            where = f"day {turn.day} {theirs[-1]['action']}"
+            if f"{r.game.id} {where}" in LOG_ODDITIES:
+                continue
+            if action[0] == A["Build"]:
+                ids[ours[0]["newUnit"]["global"]["units_id"]] = theirs[0]["newUnit"]["global"]["units_id"]
+            if len(ours) != len(theirs):
+                diffs.append(f"{where}: {len(ours)} entries vs {len(theirs)}")
+                continue
+            for o, t in zip(ours, theirs, strict=True):
+                diffs += _log_diffs(o, t, where, ids)
     assert not diffs, diffs[:5]
 
 

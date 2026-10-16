@@ -1666,6 +1666,37 @@ upload replays, so the viewer is the community
   - **Game end:** a `GameOver` inside the action that ended the game (Capt
     for an HQ or the capture limit, Fire for a rout, Resign). A game stopped
     at the day limit has none, like an unfinished AWBW game.
+- **Action log, done** (`ActionLog` and `action_lines(log)` in
+  `replay/export.py`). The check (`test_actions_export_as_awbw_logs_them`)
+  steps every turn of the 200 newest cached replays, last turns included,
+  exports each action from the states before and after it, given the path
+  the player took, and compares it with AWBW's entry field by field and in
+  key order: no differences. On 1,000 replays what's left is rare or old:
+  two games whose per-player views follow another order, hidden Stealths
+  and Subs (step 5), 0.2% of End entries (mostly older games on day 2) that
+  log null lists, and an enemy lab capture that logs `onElimination` in 6
+  of 567. Exported arena games read back and step exactly every turn
+  (`test_exported_actions_step_as_the_game`). What the logs showed:
+  - A moved unit is logged three times alike: per player in player-id order,
+    with "global" just before the first player who isn't moving (309k
+    moves). Its movement and range include its CO's, its vision is one less
+    in rain, and HP is the shown HP.
+  - `dist` is the movement cost. A unit acting where it stands has `Move`
+    []; a Wait in place is still a Move. A unit destroyed by the
+    counterattack moves with `discovered` [], and destroyed units show 0 HP
+    and 0 ammo.
+  - End lists repaired units (every unit on a property of its owner that
+    services it) and supplied ones (once per APC next to it), each by id.
+  - Sasha's `gainedFunds` appears only when War Bonds actually gains funds.
+  - An HQ, or a lab, captured to end the game is logged as it was: the
+    loser's terrain, its points below zero (Victory March counts 30), and
+    only the loser's income; `onElimination` lists the loser's buildings.
+    A capture-limit win flips normally. A neutral lab taken always logs an
+    empty `onElimination` (2,217 of 2,217).
+  - AWBW gives transports (unarmed units) none of Max's movement: under his
+    powers they log their base movement and none of 1,807 transport moves
+    went further, while armed direct units often did. The engine gave them
+    +1/+2; `direct` now means armed (rules and tables.h).
 - **Validation:**
   1. **Serializer:** `phpser.dumps(loads(x)) == x` byte for byte on real
      snapshot and log files (floats as `d:10;` and `d:9.5;`, strings
@@ -1695,7 +1726,8 @@ upload replays, so the viewer is the community
   3. The path and missile bindings (done: `move_path`; `missile_targets`
      already existed).
   4. The common actions (Move, Fire, Capt, Build, End, Load, Unload, Join,
-     Resign) through the round trip.
+     Resign) through the round trip (done, with Delete and the game-ending
+     entries).
   5. The rarer actions, then powers CO by CO.
   6. The command, tests, and the check in the Replay Player.
 
