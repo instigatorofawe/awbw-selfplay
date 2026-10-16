@@ -1648,11 +1648,12 @@ upload replays, so the viewer is the community
     AWBW logs it per viewer even without fog, with the opponent's copy
     empty. The export does the same.
   - **Paths:** AWBW logs the path taken. The engine moves along the
-    cheapest path its owner can see, and fuel follows it, so the export
-    needs a binding that returns that path (`movegen` keeps `prev`).
-  - **Missiles** (Von Bolt, Rachel, Sturm): `missileCoords` needs the
-    centres the engine aimed at, so a binding must return them (`step`
-    already takes forced ones).
+    cheapest path its owner can see, and fuel follows it. `move_path`
+    returns that path, where an unseen enemy stops the unit, and the fuel
+    spent (the planner `apply` uses).
+  - **Missiles** (Von Bolt, Rachel, Sturm): `missileCoords` are the
+    centres the engine aimed at. Aiming is deterministic, so
+    `missile_targets` on the state before the power returns them.
   - **Fights:** displayed HP and ammo after, power meters after
     (`copValues`) and Sasha's `gainedFunds`, all from the state after.
   - **End's `updatedInfo`:** the next player, their funds, weather, units
@@ -1691,7 +1692,8 @@ upload replays, so the viewer is the community
      replays (the cached tests check the 200 newest).
   2. Snapshots, the unit-constant table, and the round trip on snapshots
      (done).
-  3. The path and missile bindings.
+  3. The path and missile bindings (done: `move_path`; `missile_targets`
+     already existed).
   4. The common actions (Move, Fire, Capt, Build, End, Load, Unload, Join,
      Resign) through the round trip.
   5. The rarer actions, then powers CO by CO.

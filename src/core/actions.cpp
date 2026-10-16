@@ -140,15 +140,7 @@ void destroy(const MapData& m, GameState& s, int slot) {
 // Damage from powers, bombs and silos never destroys: units keep at least 1 HP.
 void hurt(GameState& s, int slot, int amount) { change_hp(s, slot, -amount); }
 
-struct MovePlan {
-  int n = 0;  // tiles on the path, the start included
-  uint16_t tiles[kMaxPath];
-  int stop = 0;  // index of the tile the unit ends on
-  int fuel = 0;  // movement cost up to `stop`
-  bool trapped = false;
-
-  int dest() const { return tiles[stop]; }
-};
+}  // namespace
 
 Status plan_move(const MapData& m, const GameState& s, int slot, int to, const Detail& d,
                  MovePlan& mp) {
@@ -194,6 +186,8 @@ Status plan_move(const MapData& m, const GameState& s, int slot, int to, const D
   for (int i = 1; i <= mp.stop; ++i) mp.fuel += step_cost(m, s, u, mp.tiles[i]);
   return kOk;
 }
+
+namespace {
 
 // Spend the fuel and leave the old tile. `place` puts the unit on its
 // destination (Load and Join take it off the board instead).

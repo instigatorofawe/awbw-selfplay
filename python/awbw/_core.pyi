@@ -392,6 +392,11 @@ def path_cost(state: GameState, slot: int, path: Sequence[tuple[int, int]]) -> i
     Movement cost of a path of (x, y) starting on the unit's tile, or -1 if it is not a legal move.
     """
 
+def move_path(state: GameState, slot: int, to: tuple[int, int]) -> tuple[list[tuple[int, int]], int, bool, int] | None:
+    """
+    The path a move of the unit to `to` takes, as apply carries it out: (path, stop, trapped, fuel). path is the cheapest path its owner can see, [(x, y), ...] from the unit's tile to `to`; an unseen enemy on the way stops the unit on path[stop] (trapped), having spent `fuel`. None if the unit can't reach `to`.
+    """
+
 def move_points(state: GameState, slot: int) -> int:
     """Movement points with CO bonuses, before the fuel cap."""
 

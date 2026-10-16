@@ -91,6 +91,22 @@ def test_movement(md):
         _core.reachable(s, 5)
 
 
+def test_move_path_is_the_one_apply_takes(md):
+    s = snapshot(md, [(60, U["Infantry"], 0, 1, 1, 100, 99, 0, 0, 0, 0)])
+    assert _core.move_path(s, 0, (2, 0)) == ([(1, 1), (1, 0), (2, 0)], 2, False, 2)  # around the mountain
+    assert _core.move_path(s, 0, (1, 1)) == ([(1, 1)], 0, False, 0)
+    assert _core.move_path(s, 0, (0, 2)) is None  # sea
+    # A hidden Stealth no unit of Orange Star's is next to blocks the only way
+    # round the mountain: the Recon is planned through it and stops on the city.
+    hidden = (70, U["Stealth"], 1, 2, 0, 100, 60, 6, _core.UNIT_HIDDEN, 0, 0)
+    s = snapshot(md, [(60, U["Recon"], 0, 3, 2, 100, 80, 0, 0, 0, 0), hidden])
+    recon = s.find_unit(60)
+    path = [(3, 2), (3, 1), (3, 0), (2, 0), (1, 0)]
+    assert _core.move_path(s, recon, (1, 0)) == (path, 2, True, 3)
+    assert _core.apply(s, A["Wait"], recon, to=(1, 0)) == _core.TRAPPED
+    assert s.unit_at(3, 0) == recon and s.unit(recon).fuel == 77
+
+
 A = _core.ACTIONS
 
 

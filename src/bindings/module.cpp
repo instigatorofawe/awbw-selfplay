@@ -956,6 +956,25 @@ NB_MODULE(_core, m) {
       "Movement cost of a path of (x, y) starting on the unit's tile, or -1 if it is not a legal "
       "move.");
   m.def(
+      "move_path",
+      [](const awbw::GameState& s, int slot,
+         XY to) -> std::optional<std::tuple<std::vector<XY>, int, bool, int>> {
+        check_slot(s, slot);
+        const awbw::MapData& md = map_for(s);
+        awbw::MovePlan mp;
+        if (awbw::plan_move(md, s, slot, tile_of(md, to), {}, mp) != awbw::kOk) return std::nullopt;
+        std::vector<XY> path;
+        path.reserve(mp.n);
+        for (int i = 0; i < mp.n; ++i)
+          path.emplace_back(md.x_of(mp.tiles[i]), md.y_of(mp.tiles[i]));
+        return std::make_tuple(std::move(path), mp.stop, mp.trapped, mp.fuel);
+      },
+      "state"_a, "slot"_a, "to"_a,
+      "The path a move of the unit to `to` takes, as apply carries it out: (path, stop, trapped, "
+      "fuel). path is the cheapest path its owner can see, [(x, y), ...] from the unit's tile to "
+      "`to`; an unseen enemy on the way stops the unit on path[stop] (trapped), having spent "
+      "`fuel`. None if the unit can't reach `to`.");
+  m.def(
       "move_points",
       [](const awbw::GameState& s, int slot) {
         check_slot(s, slot);

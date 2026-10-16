@@ -130,6 +130,21 @@ bool fire_outcomes(const MapData& m, const GameState& s, const Action& a,
 inline constexpr uint16_t kNoTile = 0xFFFF;
 int missile_targets(const MapData& m, const GameState& s, int level, uint16_t* out);
 
+// The path a move to `to` takes, as apply carries it out: d.path if given,
+// else the cheapest path the mover's owner can see. On the real board an
+// unseen enemy on the way stops the unit early (trapped).
+struct MovePlan {
+  int n = 0;  // tiles on the path, the start included
+  uint16_t tiles[kMaxPath];
+  int stop = 0;  // index of the tile the unit ends on
+  int fuel = 0;  // movement cost up to `stop`
+  bool trapped = false;
+
+  int dest() const { return tiles[stop]; }
+};
+Status plan_move(const MapData& m, const GameState& s, int slot, int to, const Detail& d,
+                 MovePlan& mp);
+
 // Whether the active player can build a unit of `type` on `tile` now: an
 // empty factory of theirs that makes it, the type not banned, room under the
 // unit limit, and the funds.
