@@ -2,14 +2,26 @@ import numpy as np
 
 from awbw import _core, engine, games, rules
 from awbw.agents import RandomAgent, play
+from awbw.cli import main
 from awbw.games import replay
+from awbw.nn.train_selfplay import Games, cycle
 from awbw.replay import load_replay
-from awbw.replay.export import FIRST_GAME_ID, ActionLog, GameMeta, action_lines, snapshots
-from awbw.replay.step_check import check_turns
+from awbw.replay.export import (
+    FIRST_GAME_ID,
+    ActionLog,
+    GameMeta,
+    action_lines,
+    game_meta,
+    replay_file,
+    snapshots,
+)
+from awbw.replay.step_check import _TurnStepper, check_turns
 from awbw.replay.write import replay_zip
+from awbw.search import NetEvaluator
 from test_games import _arena_logs
 from test_policy import start
 from test_search import md  # noqa: F401 (a fixture)
+from test_selfplay import _net
 
 A = _core.ACTIONS
 KEPT = _core.UNIT_HIDDEN | _core.UNIT_CAPTURING | _core.UNIT_CARRIED  # what a turn start's flags say
@@ -87,6 +99,17 @@ POWER_PAIRS = [
 ]
 
 
+def _rebuilt(md, s: _core.GameState, players=None, settings=None) -> _core.GameState:  # noqa: F811
+    """A fresh start ``s`` again, with these players' rows or settings."""
+    if players is None:
+        players = [[p.co, p.country, p.funds, p.power, p.cop_cost, p.scop_cost, 0, 0] for p in s.players[:2]]
+    terrain = md.terrain()  # a fresh start's owners are the map's
+    props = [(x, y, int(terrain[y, x]), s.prop_points(i)) for i, (x, y, _, _) in enumerate(md.props())]
+    rows = np.array(s.unit_rows(), dtype=np.int64).reshape(-1, 11)
+    settings = settings or s.settings
+    return _core.load_snapshot(md, settings, int(s.day), int(s.active), np.array(players), np.array(props), rows)
+
+
 def _with_cos(md, s: _core.GameState, cos: tuple[str, str]) -> _core.GameState:  # noqa: F811
     """``s`` with these COs, their meters full."""
     by_name = {c.name: c for c in rules.load().cos.values()}
@@ -95,10 +118,7 @@ def _with_cos(md, s: _core.GameState, cos: tuple[str, str]) -> _core.GameState: 
         c = by_name[name]
         cop, scop = (c.cop_stars or 0) * _core.STAR_VALUE, (c.scop_stars or 0) * _core.STAR_VALUE
         players.append([c.id, p.country, p.funds, scop, cop, scop, 0, 0])
-    terrain = md.terrain()  # a fresh start's owners are the map's
-    props = [(x, y, int(terrain[y, x]), s.prop_points(i)) for i, (x, y, _, _) in enumerate(md.props())]
-    rows = np.array(s.unit_rows(), dtype=np.int64).reshape(-1, 11)
-    return _core.load_snapshot(md, s.settings, int(s.day), int(s.active), np.array(players), np.array(props), rows)
+    return _rebuilt(md, s, players)
 
 
 def test_exported_powers_step_as_the_game(md):  # noqa: F811
@@ -185,3 +205,84 @@ def test_colin_and_sensei_powers_log_as_the_replay_player_reads_them():
         "unitName": "Infantry",
         "units": [{"units_id": new["units_id"], "units_x": 2, "units_y": 0}],
     }
+
+
+def _bad_turns(r, md) -> list[tuple]:  # noqa: F811
+    results = check_turns(r, md)
+    assert len(results) == len(r.turns)
+    return [(t.day, t.category, t.detail) for t, _ in results[:-1] if not t.ok]
+
+
+def test_self_play_games_export_and_step_as_played(md):  # noqa: F811
+    """Self-play records, stopped at the day cap or resigned, export under a
+    stable id and name, read back and step exactly every turn."""
+    s = start(md)
+    starts = cycle(np.frombuffer(s.to_bytes(), np.uint8)[None], np.random.default_rng(0))
+    capped = _core.SearchConfig(sims=4, considered=4, max_days=3, seed=1)
+    resigning = _core.SearchConfig(sims=4, considered=4, max_days=6, resign_turns=2, resign_off=0, seed=1)
+
+    def lost(planes, globals_, legal, movers):  # player 0 sees every position as lost
+        return np.zeros(legal.shape, np.float32), np.where(movers == 0, -1.0, 1.0).astype(np.float32)
+
+    logs = []
+    for evaluate, cfg in ((NetEvaluator(_net()), capped), (lost, resigning)):
+        played = Games(evaluate, starts, cfg, 2)  # type: ignore[arg-type]
+        done = []
+        while len(done) < 2:
+            done += played.round()
+        logs += [games.from_record(g.record, ("self-play step 7", "self-play step 7"), step=7) for g in done]
+    assert {log.decided for log in logs} == {"day limit", "resigned"}
+    ids = set()
+    for log in logs:
+        meta = game_meta(log)
+        assert FIRST_GAME_ID <= meta.id < 2 * FIRST_GAME_ID and game_meta(log).id == meta.id
+        ids.add(meta.id)
+        assert meta.name == "self-play step 7: Andy vs Max"
+        r = load_replay(replay_file(log, meta))
+        assert (r.game.id, r.game.name, r.game.map_id) == (meta.id, meta.name, log.map_id)
+        assert not _bad_turns(r, md)
+        last = (r.turns[-1].actions or [{}])[-1]
+        if log.decided == "resigned":
+            assert last["action"] == "Resign" and last["Resign"]["message"] == "Player 1 (Andy) has resigned!"
+        else:  # stopped after an End Turn: the last snapshot has nothing logged
+            assert r.turns[-1].actions is None or not r.turns[-1].actions
+    assert len(ids) == len(logs)
+
+
+def test_a_game_its_day_limit_decides_ends_at_the_last_end_turn(md):  # noqa: F811
+    """AWBW's day limit decides the game at End Turn: the End logs a GameOver,
+    and no snapshot follows it."""
+    settings = _core.Settings()
+    settings.day_limit = 2
+    s = _rebuilt(md, start(md), settings=settings)
+    (result,) = play([s], (RandomAgent(1), RandomAgent(2)), max_days=30)
+    assert result.decided == "game over" and result.days == 2
+    log = games.from_result(result, ("random", "random"))
+    meta = game_meta(log)
+    snaps, lines = snapshots(log, meta), action_lines(log, meta)
+    assert len(snaps) == len(lines) == 4  # two days of two turns
+    r = load_replay(replay_zip(meta.id, snaps, lines))
+    end = (r.turns[-1].actions or [{}])[-1]
+    elim = {str(meta.players[p]): "Y" if result.winner == 1 - p else "N" for p in (0, 1)}
+    assert end["action"] == "End" and end["updatedInfo"]["event"] == "GameOver"
+    assert end["updatedInfo"]["playersElim"] == elim
+    assert not _bad_turns(r, md)
+    # A snapshot has no day limit, so the last turn steps to the result only
+    # from a state that has it.
+    _TurnStepper(r, md, r.turns[-1], None).run(engine.state_from_turn(r, r.turns[-1], md, settings))
+
+
+def test_export_replay_writes_a_zip_per_game(md, tmp_path, capsys):  # noqa: F811
+    record = tmp_path / "games.jsonl"
+    logs = _arena_logs(md, 2)
+    assert games.append(record, logs) == 2
+    assert main(["export-replay", str(record)]) == 0
+    one = tmp_path / "games-1.zip"
+    assert load_replay(one.read_bytes()).game.name == "search (Andy) vs random (Max)"
+    out = tmp_path / "zips"
+    assert main(["export-replay", str(record), "--all", "--out", str(out)]) == 0
+    assert sorted(p.name for p in out.iterdir()) == ["games-0.zip", "games-1.zip"]
+    assert (out / "games-1.zip").read_bytes() == one.read_bytes()
+    assert main(["export-replay", str(record), "--game", "0", "--out", str(tmp_path / "first.zip")]) == 0
+    assert (tmp_path / "first.zip").read_bytes() == (out / "games-0.zip").read_bytes()
+    assert "games-0.zip: game 1" in capsys.readouterr().out

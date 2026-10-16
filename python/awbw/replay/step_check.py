@@ -573,6 +573,10 @@ class _TurnStepper:
         elif name == "End":
             self._apply(state, i, "EndTurn")
             info = a["updatedInfo"]
+            if info.get("event") == "GameOver":  # the game's day limit decided it
+                lost = [self.index[int(pid)] for pid, e in info["playersElim"].items() if e in ("Y", "y")]
+                self._expect("day limit winner", state.winner, 1 - lost[0] if lost else _core.DRAW, i)
+                return True
             self._expect("next funds", state.players[state.active].funds, int(_view(info["nextFunds"])), i)
             repaired = info.get("repaired")
             # The repaired units are the next player's; the global view hides

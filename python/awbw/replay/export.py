@@ -52,12 +52,15 @@ logs showed:
   left or right edge into the next row, and AWBW lists the units there
   undamaged.
 
-Exported games get ids no real game has (1,000,000,000 and up), and players
-get user id -1, which the Replay Player doesn't look up on AWBW.
+Exported games get ids no real game has (1,000,000,000 and up, from a hash
+of the record, so a game exported again keeps its id), and players get user
+id -1, which the Replay Player doesn't look up on AWBW. A game AWBW's day limit
+decides logs a GameOver at its last End, and no snapshot follows.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -68,7 +71,7 @@ from typing import Any
 from .. import _core, rules
 from ..games import GameLog, replay
 from ..phpser import PhpObject
-from .write import action_line
+from .write import action_line, replay_zip
 
 FIRST_GAME_ID = 1_000_000_000
 NO_USER = -1  # the Replay Player asks AWBW for no username
@@ -416,6 +419,8 @@ def snapshots(log: GameLog, meta: GameMeta) -> list[PhpObject]:
     turn = [log.start]
     for mv in replay(log).moves:
         if mv.action[0] == _core.ACTIONS["EndTurn"]:
+            if mv.state.winner != _core.NO_OWNER:
+                break  # a day limit ended the game at End Turn: no next turn
             out.append(snaps.take(mv.state, turn))
             turn = [mv.state]
         else:
@@ -443,6 +448,35 @@ def action_lines(log: GameLog, meta: GameMeta) -> list[bytes]:
     if turn:
         lines.append(action_line(meta.players[start.active], start.day, turn))
     return lines
+
+
+def game_id(log: GameLog) -> int:
+    """An id no real game has, the same each time the game is exported (the
+    Replay Player files replays by id): 1,000,000,000 plus a hash of the
+    record's start and steps."""
+    h = hashlib.blake2b(log.start.to_bytes(), digest_size=8)
+    h.update(log.steps.astype("<u2", copy=False).tobytes())
+    return FIRST_GAME_ID + int.from_bytes(h.digest(), "little") % FIRST_GAME_ID
+
+
+def game_meta(log: GameLog, name: str = "") -> GameMeta:
+    """A recorded game's id and names. The default name says who played which
+    CO: "self-play step 120000: Hawke vs Grit" (one network on both sides), or
+    "a.pt (64 sims) (Hawke) vs random (Grit)"."""
+    r = rules.load()
+    cos = [r.cos[int(p.co)].name for p in log.start.players[:2]]
+    same = log.players[0] == log.players[1]
+    labels = ("Player 1", "Player 2") if same else log.players
+    names = (f"{labels[0]} ({cos[0]})", f"{labels[1]} ({cos[1]})")
+    if not name:
+        name = f"{log.players[0] or log.source or 'game'}: {cos[0]} vs {cos[1]}" if same else " vs ".join(names)
+    return GameMeta(id=game_id(log), name=name, names=names)
+
+
+def replay_file(log: GameLog, meta: GameMeta | None = None) -> bytes:
+    """A recorded game as a replay zip the AWBW Replay Player imports."""
+    meta = meta or game_meta(log)
+    return replay_zip(meta.id, snapshots(log, meta), action_lines(log, meta))
 
 
 def shown_hp(hp: int) -> int:
@@ -1054,6 +1088,8 @@ class ActionLog:
             return {"global": [e for e in shown for _ in (0, 1)], str(self._pid(nxt)): entries}
 
         when = self.meta.start + timedelta(minutes=self.meta.turn_minutes * self.turns)
+        if after.winner != _core.NO_OWNER:  # the game's day limit decided it
+            return {"action": "End", "updatedInfo": self._day_limit_over(after)}
         return {
             "action": "End",
             "updatedInfo": {
@@ -1246,6 +1282,19 @@ class ActionLog:
 
     def _ended(self, s: _core.GameState) -> bool:
         return s.winner in (0, 1)
+
+    def _day_limit_over(self, s: _core.GameState) -> Json:
+        """End's GameOver, the shape the Replay Player reads (no cached replay has a
+        day limit): who is eliminated, none in a draw."""
+        winner = int(s.winner)
+        message = "The game is over! It's a draw!"
+        if winner in (0, 1):
+            message = f"The game is over! {self.meta.names[winner]} is the winner!"
+        return {
+            "event": "GameOver",
+            "message": message,
+            "playersElim": {str(self._pid(p)): "Y" if winner == 1 - p else "N" for p in (0, 1)},
+        }
 
     def _game_over(self, s: _core.GameState, winner: int | None = None) -> Json:
         """AWBW's GameOver for a game ``winner`` (default: the state's) has won."""

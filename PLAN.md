@@ -1788,7 +1788,25 @@ upload replays, so the viewer is the community
      parse errors in its log, especially powers, a resignation and a
      day-limit game.
 - **Command:** `awbw export-replay FILE [--game N | --all] [--out PATH]`
-  writes `<stem>-N.zip`.
+  writes `<stem>-N.zip` (done, `replay_file` and `game_meta`).
+  - The game id is 1,000,000,000 plus a hash of the record's start and
+    steps (`game_id`), so exporting a game again gives the same id and the
+    Replay Player files it in the same place.
+  - The name says who played which CO: "self-play step 120000: Hawke vs
+    Grit" when one label played both sides, otherwise "a.pt (64 sims)
+    (Hawke) vs random (Grit)". Players are named "Player 1 (Hawke)" and so
+    on in AWBW's messages ("... has resigned!").
+  - AWBW's day-limit setting (`Settings.day_limit`, none in any cached
+    replay or start) decides a game at End Turn without a next turn. The
+    End then logs `"event": "GameOver"` with `playersElim`, the shape the
+    Replay Player's End parser reads, and no snapshot follows. A snapshot
+    has no field for the limit, so the step check reaches that result only
+    from a state that has it. Games stopped at `max_days` (arena,
+    self-play) end on a snapshot with nothing logged, like an unfinished
+    AWBW game.
+  - Tests: self-play games stopped at the day cap and resigned export,
+    read back and step exactly every turn; a day-limit game ends on its
+    GameOver End; the command writes one zip or all of them.
 - **Order:**
   1. `phpser.dumps` and the byte round trip. Done: `replay/write.py`
      writes the zip, log lines and AWBW's JSON, byte for byte on 2,000
@@ -1801,7 +1819,7 @@ upload replays, so the viewer is the community
      Resign) through the round trip (done, with Delete and the game-ending
      entries).
   5. The rarer actions, then powers CO by CO (done).
-  6. The command, tests, and the check in the Replay Player.
+  6. The command, tests (done), and the check in the Replay Player.
 
 ### Local play against the network (planned, `awbw play`)
 

@@ -311,6 +311,17 @@ def main(argv: list[str] | None = None) -> int:
     vg.add_argument("--out", type=Path, help="the page to write (default: game-N.html next to the record file)")
     vg.add_argument("--open", action="store_true", help="open the page in the browser")
 
+    er = sub.add_parser("export-replay", help="recorded games as AWBW replay zips, for the AWBW Replay Player")
+    er.add_argument("record", type=Path, help="a record file, such as a self-play run's games.jsonl")
+    which = er.add_mutually_exclusive_group()
+    which.add_argument("--game", type=int, default=-1, help="which game, from 0; negative counts from the end (-1)")
+    which.add_argument("--all", action="store_true", help="every game in the file")
+    er.add_argument(
+        "--out",
+        type=Path,
+        help="the zip to write, or with --all a directory (default: <stem>-N.zip next to the record)",
+    )
+
     args = p.parse_args(argv)
     http = Http(min_interval=args.rate)
     commands = {
@@ -335,6 +346,7 @@ def main(argv: list[str] | None = None) -> int:
         "value": _value,
         "live": _live,
         "view-game": _view_game,
+        "export-replay": _export_replay,
     }
     return commands[args.cmd](args, http)
 
@@ -1010,6 +1022,37 @@ def _live(args, http: Http) -> int:
         print(f"  note: the site hides {owner}'s {u.name} from spectators; put back {where}")
     for (pid, name), n in now.unplaced.items():
         print(f"  note: {n} {name} of {who[pid]}'s missing from the page and left out")
+    return 0
+
+
+def _export_replay(args, http: Http) -> int:
+    import json
+
+    from . import games
+    from .replay.export import game_meta, replay_file
+
+    with args.record.open() as f:
+        lines = [line for line in f if line.strip()]
+    if not lines:
+        print(f"{args.record} has no games")
+        return 1
+    if args.all:
+        picked = range(len(lines))
+    else:
+        n = args.game if args.game >= 0 else len(lines) + args.game
+        if not 0 <= n < len(lines):
+            print(f"{args.record} has {len(lines)} games")
+            return 1
+        picked = range(n, n + 1)
+    folder = args.out if args.all and args.out else args.record.parent
+    if args.all:
+        folder.mkdir(parents=True, exist_ok=True)
+    for n in picked:
+        log = games.from_json(json.loads(lines[n]))
+        meta = game_meta(log)
+        out = args.out if args.out and not args.all else folder / f"{args.record.stem}-{n}.zip"
+        out.write_bytes(replay_file(log, meta))
+        print(f"{out}: game {meta.id}, {meta.name}, day {log.days} ({log.decided})")
     return 0
 
 
