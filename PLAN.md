@@ -1608,11 +1608,33 @@ upload replays, so the viewer is the community
     Units: type, owner, tile, internal HP with one decimal, fuel, ammo,
     moved/capture/fired, dive, cargo and carried.
   - Per-type unit constants (movement points, vision, fuel per turn,
-    ranges, second weapon, symbol, cost, movement type) come from a table
-    learned from recent replays, checked constant per unit name.
+    ranges, cost, movement type) match the rules tables in every snapshot
+    of 3,000 replays. Ranges are 0/0 for direct units, `symbol` follows the
+    class (G ground, M air, S naval), and `second_weapon` is Y for Tank,
+    Md.Tank, Neotank, Mega Tank, Mech, B-Copter and Piperunner.
   - Units keep the engine's ids. Building, player and game ids are
     synthetic and stable. Dates are synthetic (a minute a turn from the
     record's time) and timers are AWBW's defaults.
+  - Done (`replay/export.py`, `Snapshots` and `snapshots(log)`). What the
+    replays showed:
+    - Buildings are every property, pipe seam (rubble once broken) and
+      silo, loaded or empty, sorted by x then y. Some maps also list their
+      pipes; the export doesn't. Units are sorted by tile, and a carried
+      unit sits on its transport's tile. CO images are the name in
+      lowercase letters plus `.png`.
+    - `last_capture` is 0 once a building changes hands, and 20 once its
+      capture points change or the unit on it leaves or dies; otherwise it
+      stays as it was (every change in 200 replays).
+    - At a turn start the mover's units are unmoved, except units Von
+      Bolt's SCOP stunned (moved and fired). The engine clears the waiting
+      player's moved flags at End Turn, so the export takes "acted" from
+      the state just before it. AWBW's `fired` there has quirks: a transport
+      that only moved stays 0, and some units that didn't act show 1. The
+      Replay Player doesn't show it, so the check leaves that one field out.
+    - The check (`test_snapshots_export_as_awbw_writes_them`) steps every
+      turn of the 200 newest cached replays, exports each turn start the
+      engine reaches, and compares it with AWBW's snapshot field by field,
+      including field order: no differences in 5,130 snapshots.
 - **Action log**, a line per turn: `p:<pid>;d:<day>;a:` and the PHP array
   `[pid, day, [json, ...]]` (the middle entry is the day in all 17,412
   lines checked).
@@ -1667,7 +1689,8 @@ upload replays, so the viewer is the community
   1. `phpser.dumps` and the byte round trip. Done: `replay/write.py`
      writes the zip, log lines and AWBW's JSON, byte for byte on 2,000
      replays (the cached tests check the 200 newest).
-  2. Snapshots, the unit-constant table, and the round trip on snapshots.
+  2. Snapshots, the unit-constant table, and the round trip on snapshots
+     (done).
   3. The path and missile bindings.
   4. The common actions (Move, Fire, Capt, Build, End, Load, Unload, Join,
      Resign) through the round trip.
@@ -1699,12 +1722,30 @@ rules exactly (two players, no fog, as everywhere in v1).
   touch the state, so cancelling is free until the last step applies the
   action.
 - **What the page shows**, beyond the viewer's board, funds and power bars:
-  - each fire target's damage range, from `combat_outcomes` (AWBW's
-    damage preview);
-  - a tile's terrain and defence, and a unit's HP, fuel and ammo;
   - the network's moves animated one action at a time;
   - optionally its value for the position (off by default, so as not to
     spoil a close game).
+- **AWBW's conveniences**, all from the engine so they follow its rules:
+  - **Movement range:** selecting a unit shades the tiles it can reach
+    (its legal Move ids), and hovering one draws the path the unit will
+    take (the cheapest path the engine moves along; the binding the export
+    needs).
+  - **Attack range:** with a unit selected, the tiles it could fire on this
+    turn (from any reachable tile for a direct unit, from where it stands
+    for an indirect one), and after moving, its actual targets.
+  - **Any unit's range, enemies included:** clicking a unit that can't act
+    shows where it could move and fire on its next turn. `reachable`
+    already works for any unit.
+  - **Damage preview:** each target's damage range from `combat_outcomes`,
+    with the counterattack.
+  - **Status icons on units:** HP, low fuel, low ammo, capturing, cargo
+    aboard, dived or hidden; units that have acted are greyed out.
+  - **Info panels:** a tile's terrain, defence stars, owner and capture
+    points; a unit's HP, fuel and ammo; each player's funds, income, unit
+    count, army value and power meter.
+  - **Build menu:** costs with the CO's discount, unaffordable units
+    greyed out, banned ones left out.
+  - Confirmation before End Turn while units haven't acted.
 - **Undo:** allowed locally (AWBW has none). The server keeps each
   action's state, so undo steps back one action at a time, the luck
   included: an attack retried the same way rolls the same.

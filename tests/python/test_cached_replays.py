@@ -16,9 +16,11 @@ from awbw.maps import map_path
 from awbw.net import cache_dir
 from awbw.replay import load_replay
 from awbw.replay.combat_check import check_file
+from awbw.replay.export import GameMeta, Snapshots
 from awbw.replay.extract import extract_v0, extract_v1
 from awbw.replay.move_check import check_replay as check_moves
 from awbw.replay.step_check import check_file as check_turns
+from awbw.replay.step_check import step_turn
 from awbw.replay.write import action_line
 
 # The 200 newest games: the cache grows back in time, so these stay put.
@@ -103,6 +105,121 @@ def test_replay_files_rewrite_byte_for_byte(path):
                         assert action_line(pid, day, decoded) == line
                 elif body:
                     assert phpser.dumps(phpser.loads(body)) == body
+
+
+# Snapshot fields an export can't match: ids, names, dates, users, timers, and
+# settings of real games (league, official, ratings).
+GAME_UNCHECKED = {"id", "name", "creator", "start_date", "activity_date", "aet_date", "type", "official", "league"}
+GAME_UNCHECKED |= {"min_rating", "max_rating", "password", "comment", "boot_interval", "aet_interval"}
+GAME_UNCHECKED |= {"timers_initial", "timers_increment", "timers_max_turn", "players", "buildings", "units"}
+PLAYER_UNCHECKED = {"id", "users_id", "games_id", "last_read", "turn_start", "turn_clock", "order", "team"}
+PLAYER_UNCHECKED |= {"accept_draw", "aet_count"}
+UNIT_IDS = {"id", "games_id", "players_id", "cargo1_units_id", "cargo2_units_id"}
+
+
+def _raw_snapshots(path) -> list[dict]:
+    with zipfile.ZipFile(path) as z:
+        for name in z.namelist():
+            members = _gzip_members(z.read(name))
+            if members and members[0].startswith(b'O:8:"awbwGame"'):
+                return [phpser.loads(m.rstrip(b"\n")).fields for m in members]
+    return []
+
+
+def _snapshot_diffs(ours: dict, theirs: dict) -> list[str]:
+    """Where an exported snapshot differs from AWBW's, matching units by tile, and
+    leaving out AWBW's pipes and the waiting player's ``fired`` (see export)."""
+    diffs = []
+    if list(ours) != list(theirs):
+        diffs.append("game fields")
+    diffs += [
+        f"game {k}: {ours.get(k)!r} vs {v!r}" for k, v in theirs.items() if k not in GAME_UNCHECKED and ours.get(k) != v
+    ]
+    for a, b in zip(ours["players"], sorted(theirs["players"], key=lambda p: p.fields["order"]), strict=True):
+        a, b = a.fields, b.fields
+        if list(a) != list(b):
+            diffs.append("player fields")
+        diffs += [
+            f"player {k}: {a.get(k)!r} vs {v!r}" for k, v in b.items() if k not in PLAYER_UNCHECKED and a.get(k) != v
+        ]
+    built = {(b.fields["x"], b.fields["y"]): b.fields for b in ours["buildings"]}
+    for b in (x.fields for x in theirs["buildings"]):
+        a = built.pop((b["x"], b["y"]), None)
+        if a is None:
+            if not 101 <= b["terrain_id"] <= 110:  # only some maps list their pipes
+                diffs.append(f"building at {b['x'], b['y']} missing")
+            continue
+        broken = b["terrain_id"] in (115, 116)  # a broken seam keeps a capture value of its own
+        for k in ("terrain_id", "capture", "last_capture"):
+            if a[k] != b[k] and not (k == "capture" and broken):
+                diffs.append(f"building {b['x'], b['y']} {k}: {a[k]} vs {b[k]}")
+        if list(a) != list(b):
+            diffs.append("building fields")
+    diffs += [f"extra building at {xy}" for xy in built]
+
+    def key(u: dict) -> tuple:
+        return (u["x"], u["y"], u["name"], u["players_id"], u["carried"])
+
+    pool: dict[tuple, list[dict]] = {}
+    for u in theirs["units"]:
+        pool.setdefault(key(u.fields), []).append(u.fields)
+    matched = {}
+    for a in (u.fields for u in ours["units"]):
+        cands = pool.get(key(a), [])
+        if not cands:
+            diffs.append(f"unit {a['name']} at {a['x'], a['y']} unmatched")
+            continue
+        b = min(cands, key=lambda c: abs(c["hit_points"] - a["hit_points"]))
+        cands.remove(b)
+        matched[a["id"]] = (a, b)
+    diffs += [f"AWBW's {u['name']} at {u['x'], u['y']} unmatched" for us in pool.values() for u in us]
+    ids = {k: b["id"] for k, (_, b) in matched.items()}
+    for a, b in matched.values():
+        if list(a) != list(b):
+            diffs.append("unit fields")
+        for k, v in b.items():
+            mine = a[k]
+            if k in ("cargo1_units_id", "cargo2_units_id"):
+                mine = ids.get(mine, mine)
+            elif k in UNIT_IDS or (k == "fired" and b["players_id"] != theirs["turn"]):
+                continue
+            elif k == "sub_dive":  # the Replay Player reads D as Y and R as N
+                mine, v = mine in "YD", v in "YD"
+            if mine != v:
+                diffs.append(f"{b['name']} at {b['x'], b['y']} {k}: {mine!r} vs {v!r}")
+    return diffs
+
+
+@pytest.mark.skipif(not PATHS, reason="no cached replays")
+@pytest.mark.parametrize("path", PATHS, ids=[p.stem for p in PATHS])
+def test_snapshots_export_as_awbw_writes_them(path):
+    """Each turn start the engine reaches, exported, is AWBW's snapshot."""
+    r = load_replay(path)
+    if r.game.fog or len(r.player_ids) != 2 or not map_path(r.game.map_id).exists():
+        pytest.skip("not 2 players without fog, or map not cached")
+    raw = _raw_snapshots(path)
+    md = engine.map_data(r.game.map_id)
+    snaps = Snapshots(md, GameMeta(id=r.game.id, name=r.game.name, players=(r.player_ids[0], r.player_ids[1])))
+    diffs = _snapshot_diffs(snaps.take(engine.state_from_turn(r, r.turns[0], md)).fields, raw[0])
+    end = _core.ACTIONS["EndTurn"]
+    for k in range(len(r.turns) - 1):
+        trace = {}
+        try:
+            why = step_turn(r, md, k, engine.state_from_turn(r, r.turns[k], md), trace)[2]
+        except ValueError:
+            why = "unloadable"
+        if why or not trace or trace[max(trace)].kind != end:
+            # Go on from AWBW's own snapshot.
+            snaps.take(engine.state_from_turn(r, r.turns[k + 1], md))
+            real = {(b.fields["x"], b.fields["y"]): b.fields["last_capture"] for b in raw[k + 1]["buildings"]}
+            for b in snaps.buildings:
+                b.last_capture = real.get((b.x, b.y), b.last_capture)
+            continue
+        states = [_core.GameState.from_bytes(trace[i].state) for i in sorted(trace)]
+        s = states[-1].copy()
+        assert _core.apply(s, end) == _core.OK
+        diffs += [f"turn {k + 1}: {d}" for d in _snapshot_diffs(snaps.take(s, states).fields, raw[k + 1])]
+    assert not diffs, diffs[:5]
 
 
 # Turns where AWBW's result has no rule behind it that we can see.
