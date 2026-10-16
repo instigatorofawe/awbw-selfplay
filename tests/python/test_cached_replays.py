@@ -25,6 +25,16 @@ from awbw.replay.write import action_line
 
 # The 200 newest games: the cache grows back in time, so these stay put.
 PATHS = sorted((cache_dir() / "replays").glob("*.zip"), key=lambda p: int(p.stem) if p.stem.isdigit() else 0)[-200:]
+# The 40 newest without fog or Sonja whose logs hide a Sub or Stealth (the 200
+# newest have few), for what AWBW logs around hidden units.
+HIDDEN_GAMES = """
+    1736242 1735903 1735608 1735586 1732999 1731072 1730686 1729233 1729114 1728206
+    1727836 1725169 1724305 1722376 1722136 1720634 1720543 1720505 1720412 1719539
+    1718587 1717603 1717047 1714000 1713909 1713380 1713242 1712243 1711818 1711663
+    1711638 1710421 1710078 1708060 1707347 1705211 1704486 1702933 1702052 1701154
+""".split()  # noqa: SIM905
+_HIDDEN_PATHS = [cache_dir() / "replays" / f"{g}.zip" for g in HIDDEN_GAMES]
+EXPORT_PATHS = PATHS + [p for p in _HIDDEN_PATHS if p.exists() and p not in PATHS]
 
 
 @pytest.mark.skipif(not PATHS, reason="no cached replays")
@@ -183,15 +193,13 @@ def _snapshot_diffs(ours: dict, theirs: dict) -> list[str]:
                 mine = ids.get(mine, mine)
             elif k in UNIT_IDS or (k == "fired" and b["players_id"] != theirs["turn"]):
                 continue
-            elif k == "sub_dive":  # the Replay Player reads D as Y and R as N
-                mine, v = mine in "YD", v in "YD"
             if mine != v:
                 diffs.append(f"{b['name']} at {b['x'], b['y']} {k}: {mine!r} vs {v!r}")
     return diffs
 
 
 @pytest.mark.skipif(not PATHS, reason="no cached replays")
-@pytest.mark.parametrize("path", PATHS, ids=[p.stem for p in PATHS])
+@pytest.mark.parametrize("path", EXPORT_PATHS, ids=[p.stem for p in EXPORT_PATHS])
 def test_snapshots_export_as_awbw_writes_them(path):
     """Each turn start the engine reaches, exported, is AWBW's snapshot."""
     r = load_replay(path)
@@ -223,14 +231,20 @@ def test_snapshots_export_as_awbw_writes_them(path):
 
 
 A = _core.ACTIONS
-EXPORTED = {A[k] for k in ("Wait", "Fire", "Capture", "Load", "Join", "Unload", "Build", "Delete", "EndTurn", "Resign")}
+EXPORTED = {A[k] for k in A if k != "Power"}
 # Dates, AWBW's timers, and messages naming its users can't match.
 LOG_UNCHECKED = {"nextTurnStart", "gameEndDate", "nextTimer", "message"}
 LOG_IDS = {"0", "units_id", "units_cargo1_units_id", "units_cargo2_units_id", "transportID", "global"}
+ID_LISTS = ("supplied", "rows")  # lists of unit ids as strings
 SONJA = next(c.id for c in rules.load().cos.values() if c.name == "Sonja")
 # Log entries with no rule behind them that we can see.
 LOG_ODDITIES = {
     "1741903 day 8 Capt",  # an enemy lab with one left logs onElimination (6 of 567 such captures)
+    "1735903 day 18 Build",  # one Build logged three times, twice with no unit
+    "1727836 day 1 End",  # null repaired and supplied lists (0.2% of Ends, mostly early)
+    "1730686 day 15 Supply",  # a hidden Stealth the opponent's list has (others leave them out)
+    "1720412 day 27 Capt",  # a discovered unit that moved -1
+    "1720412 day 27 Move",
 }
 
 
@@ -241,7 +255,12 @@ def _forced_after(before: _core.GameState, steps: list[int], logged: dict) -> _c
     sel = _core.Selection()
     att_hp = def_hp = -1
     if logged.get("action") == "Fire":
-        info = logged["Fire"]["combatInfoVision"]["global"]["combatInfo"]
+        # The global view of a fight with a hidden unit leaves that side out.
+        info = next(
+            v["combatInfo"]
+            for v in logged["Fire"]["combatInfoVision"].values()
+            if all(isinstance(v["combatInfo"][side], dict) for side in ("attacker", "defender"))
+        )
 
         def hp(side: dict) -> int:
             now = before.unit(before.find_unit(side["units_id"])).hp
@@ -293,18 +312,28 @@ def _logged_actions(r, md, k: int) -> list[tuple[list[dict], _core.GameState, _c
     return out
 
 
+def _mover_view(entry: dict, mover: str) -> dict:
+    """The entry with a hidden unit's move as its owner sees it: the opponent's view
+    follows a rule the export only approximates (see ActionLog._hidden_views)."""
+    move = entry if entry["action"] == "Move" else entry.get("Move")
+    if not isinstance(move, dict) or "global" in move["unit"]:
+        return entry
+    move = {**move, "unit": {mover: move["unit"][mover]}, "paths": {mover: move["paths"][mover]}}
+    return move if entry["action"] == "Move" else {**entry, "Move": move}
+
+
 def _log_diffs(ours, theirs, where: str, ids: dict[int, int], key: str = "") -> list[str]:
     if key in LOG_IDS and isinstance(ours, int):
         ours = ids.get(ours, ours)
     if isinstance(theirs, dict) and isinstance(ours, dict):
         diffs = [f"{where}: keys {list(ours)} vs {list(theirs)}"] if list(ours) != list(theirs) else []
         for k, v in theirs.items():
-            if k in ours and k not in LOG_UNCHECKED:
-                diffs += _log_diffs(ours[k], v, f"{where}.{k}", ids, k)
+            if k in ours and k not in LOG_UNCHECKED:  # a player's view of a list: as the list
+                diffs += _log_diffs(ours[k], v, f"{where}.{k}", ids, key if k.isdigit() and key in ID_LISTS else k)
         return diffs
     if isinstance(theirs, list) and isinstance(ours, list) and len(ours) == len(theirs):
         return [d for a, b in zip(ours, theirs, strict=True) for d in _log_diffs(a, b, f"{where}[]", ids, key)]
-    if key in ("supplied", "units_id") and isinstance(ours, str) and ours.isdigit():
+    if key in (*ID_LISTS, "units_id") and isinstance(ours, str) and ours.isdigit():
         ours = str(ids.get(int(ours), int(ours)))
     if ours != theirs or type(ours) is not type(theirs):
         return [f"{where}: {ours!r} vs {theirs!r}"]
@@ -312,7 +341,7 @@ def _log_diffs(ours, theirs, where: str, ids: dict[int, int], key: str = "") -> 
 
 
 @pytest.mark.skipif(not PATHS, reason="no cached replays")
-@pytest.mark.parametrize("path", PATHS, ids=[p.stem for p in PATHS])
+@pytest.mark.parametrize("path", EXPORT_PATHS, ids=[p.stem for p in EXPORT_PATHS])
 def test_actions_export_as_awbw_logs_them(path):
     """Each action the engine steps, exported, is AWBW's log entry, given the
     path the player took (the engine's own export takes its cheapest)."""
@@ -326,16 +355,22 @@ def test_actions_export_as_awbw_logs_them(path):
     diffs = []
     for k, turn in enumerate(r.turns):
         log = ActionLog(md, meta, {(b.x, b.y): b.id for b in turn.buildings})
+        # What the turn's snapshot says of the turn before: who acted, who hid or surfaced.
+        log.acted = {u.id for u in turn.units if u.players_id != turn.player_id and u.fired}
+        log.dives = {u.id: u.sub_dive for u in turn.units if u.sub_dive in ("D", "R")}
         ids: dict[int, int] = {}  # engine id -> AWBW id of the units built this turn
         for theirs, before, after, action, status in _logged_actions(r, md, k):
             if action[0] not in EXPORTED:
                 continue
             move = theirs[0] if theirs[0]["action"] == "Move" else theirs[0].get("Move")
             path_taken = None
+            mover = str(meta.players[before.active])
             if isinstance(move, dict):  # the mover's own view: a hidden unit's has no global one
                 paths = move["paths"]
-                path_taken = [(p["x"], p["y"]) for p in paths.get(str(meta.players[before.active])) or paths["global"]]
+                path_taken = [(p["x"], p["y"]) for p in paths.get(mover) or paths["global"]]
+                status = _core.TRAPPED if move["trapped"] else _core.OK  # where the path taken stops
             ours = log.entries(before, after, action, status, path_taken)
+            ours, theirs = [_mover_view(e, mover) for e in ours], [_mover_view(e, mover) for e in theirs]
             where = f"day {turn.day} {theirs[-1]['action']}"
             if f"{r.game.id} {where}" in LOG_ODDITIES:
                 continue

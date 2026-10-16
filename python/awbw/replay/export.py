@@ -27,11 +27,22 @@ logs showed:
   and its vision is one less in rain.
 * ``dist`` is the movement cost. A unit the counterattack destroys moves
   with ``discovered`` []; destroyed units show 0 HP and 0 ammo.
-* Repaired and supplied units are listed by id, a unit once per APC next to
-  it.
+* Repaired and supplied units are listed by id, a unit (and its cargo) once
+  per APC next to it; a unit whose repair it couldn't afford isn't listed.
 * An HQ (or the last lab) taken to end the game is logged as it was: the
   loser's, its points spent below zero (Victory March takes 30), and only the
   loser's income. A neutral lab taken logs an empty ``onElimination``.
+* A broken pipe seam logs its HP below 0 and the rubble's movement costs. A
+  Supply's list for the opponent has only the units on woods, mountains, pipe
+  seams and its own properties.
+* Hidden Subs and Stealths are logged per player even without fog: a hidden
+  unit's move (the opponent's view only approximated), a fight with one (the
+  "global" view shows it as "?"), and the hidden enemies a unit stops next to
+  (``discovered``). At End, a player with a hidden unit gets its own lists,
+  and the "global" ones list each other unit twice.
+* ``sub_dive`` is "D" for a unit that hid in its owner's last turn and "R"
+  for one that surfaced, until the owner's next turn starts. A unit stopped by
+  a hidden enemy is logged moving alone, spent.
 
 Exported games get ids no real game has (1,000,000,000 and up), and players
 get user id -1, which the Replay Player doesn't look up on AWBW.
@@ -66,6 +77,16 @@ BUILDING_KINDS = frozenset(["city", "base", "airport", "port", "hq", "lab", "com
 SECOND_WEAPON = frozenset(["Tank", "Md.Tank", "Neotank", "Mega Tank", "Mech", "B-Copter", "Piperunner"])
 SYMBOLS = {"foot": "G", "vehicle": "G", "copter": "M", "plane": "M", "naval": "S"}
 RUBBLE = {113: 115, 114: 116}  # pipe seam -> its rubble
+MOVE_TYPES = "FBTWASLP"  # AWBW's movement types, in the order it lists costs
+# What the opponent's view of a hidden unit's move has when it doesn't see where the unit stopped.
+HIDDEN_FIELDS = (
+    "units_id",
+    "units_players_id",
+    "units_name",
+    "countries_code",
+    "units_sub_dive",
+    "units_movement_type",
+)
 
 
 def _date(t: datetime) -> str:
@@ -141,6 +162,7 @@ class Snapshots:
         went through, from its start to just before End Turn (none before the
         first snapshot)."""
         acted = acted_ids(turn[-1]) if turn else set()
+        dives = dive_marks(turn[0], turn[-1]) if turn else {}
         vacated = self._vacated(turn)
         meta = self.meta
         when = meta.start + timedelta(minutes=meta.turn_minutes * self.turns)
@@ -226,7 +248,7 @@ class Snapshots:
                 "use_powers": "Y" if settings.use_powers else "N",
                 "players": players,
                 "buildings": self._buildings(s, when, first, vacated),
-                "units": self._units(s, acted),
+                "units": self._units(s, acted, dives),
                 **TIMERS,
             },
         )
@@ -285,7 +307,7 @@ class Snapshots:
             )
         return out
 
-    def _units(self, s: _core.GameState, acted: set[int]) -> list[PhpObject]:
+    def _units(self, s: _core.GameState, acted: set[int], dives: dict[int, str]) -> list[PhpObject]:
         active = int(s.active)
         rows = sorted(s.unit_rows(), key=lambda u: (u[3], u[4], bool(u[8] & _core.UNIT_CARRIED), u[0]))
         out = []
@@ -295,12 +317,15 @@ class Snapshots:
                 moved, fired = spent, spent
             else:
                 moved, fired = 0, int(row[0] in acted)
-            out.append(PhpObject("awbwUnit", _unit_fields(self.meta, row, moved, fired, row[5] / 10)))
+            out.append(PhpObject("awbwUnit", _unit_fields(self.meta, row, moved, fired, row[5] / 10, dives)))
         return out
 
 
-def _unit_fields(meta: GameMeta, row: tuple, moved: int, fired: int, hit_points: float) -> dict:
-    """A unit as AWBW's ``awbwUnit`` has it; ``row`` as ``GameState.unit_rows`` gives it."""
+def _unit_fields(
+    meta: GameMeta, row: tuple, moved: int, fired: int, hit_points: float, dives: dict[int, str] | None = None
+) -> dict:
+    """A unit as AWBW's ``awbwUnit`` has it; ``row`` as ``GameState.unit_rows`` gives it.
+    ``dives``: ``dive_marks`` of the turn before."""
     uid, typ, owner, x, y, _, fuel, ammo, flags, cargo1, cargo2 = row
     t = rules.load().units[typ]
     return {
@@ -312,7 +337,7 @@ def _unit_fields(meta: GameMeta, row: tuple, moved: int, fired: int, hit_points:
         "vision": t.vision,
         "fuel": fuel,
         "fuel_per_turn": t.fuel_per_day,
-        "sub_dive": "Y" if flags & _core.UNIT_HIDDEN else "N",
+        "sub_dive": (dives or {}).get(uid) or ("Y" if flags & _core.UNIT_HIDDEN else "N"),
         "ammo": ammo,
         "short_range": t.min_range if t.indirect else 0,
         "long_range": t.max_range if t.indirect else 0,
@@ -330,6 +355,19 @@ def _unit_fields(meta: GameMeta, row: tuple, moved: int, fired: int, hit_points:
         "cargo2_units_id": cargo2,
         "carried": "Y" if flags & _core.UNIT_CARRIED else "N",
     }
+
+
+def dive_marks(start: _core.GameState, end: _core.GameState) -> dict[int, str]:
+    """AWBW's ``sub_dive`` for the units that hid ("D") or surfaced ("R") in a turn,
+    from its start and its state just before End Turn. They keep the mark until
+    their owner's next turn starts (then "Y" and "N")."""
+    was = {u[0]: bool(u[8] & _core.UNIT_HIDDEN) for u in start.unit_rows()}
+    out = {}
+    for u in end.unit_rows():
+        hidden = bool(u[8] & _core.UNIT_HIDDEN)
+        if u[0] in was and was[u[0]] != hidden:
+            out[u[0]] = "D" if hidden else "R"
+    return out
 
 
 def acted_ids(s: _core.GameState) -> set[int]:
@@ -397,8 +435,22 @@ class ActionLog:
     meta: GameMeta
     buildings: dict[tuple[int, int], int]
     turns: int = 0  # End Turns so far, for the next turn's start date
+    # Ids of the waiting player's units that acted in its last turn: "fired" on
+    # the hidden units a move discovers.
+    acted: set[int] = field(default_factory=set)
+    # ``sub_dive`` marks: of the waiting player's units that hid or surfaced in its
+    # last turn, and of the mover's this turn.
+    dives: dict[int, str] = field(default_factory=dict)
+    _dived: dict[int, str] = field(default_factory=dict)
     _path: Sequence[tuple[int, int]] | None = None
     _trapped: bool = False
+    _props: dict[tuple[int, int], int] = field(default_factory=dict)  # property index by tile
+    _kinds: list[list[str]] = field(default_factory=list)  # the map's terrain kind by [y][x]
+
+    def __post_init__(self) -> None:
+        r = rules.load()
+        self._props = {(x, y): i for i, (x, y, _, _) in enumerate(self.md.props())}
+        self._kinds = [[r.terrain[int(t)].kind for t in row] for row in self.md.terrain()]
 
     def entries(
         self,
@@ -427,8 +479,9 @@ class ActionLog:
                 delete["eliminated"] = self._rout(after)
             return [{"action": "Delete", "Delete": delete}]
         assert to is not None
-        move = self._move(before, slot, to, alone=kind == A["Wait"])
-        if kind == A["Wait"]:
+        trapped = status == _core.TRAPPED  # stopped by a hidden enemy: AWBW logs the move alone
+        move = self._move(before, after, slot, to, alone=kind == A["Wait"] or trapped, fires=kind == A["Fire"])
+        if kind == A["Wait"] or trapped:
             assert move is not None
             return [move]
         nested: Json | list = move if move is not None else []  # [] for a unit acting where it stands
@@ -455,6 +508,55 @@ class ActionLog:
             assert target is not None
             unload = self._unload(before, after, slot, target, arg)
             return [unload] if move is None else [move, unload]
+        uid = before.unit(slot).id
+        if kind == A["Supply"]:
+            return [{"action": "Supply", "Move": nested, "Supply": self._supply(after, slot)}]
+        if kind == A["Repair"]:
+            assert target is not None
+            mover = int(before.active)
+            fixed = after.unit_at(*target)
+            repaired = {"units_id": after.unit(fixed).id, "units_hit_points": shown_hp(after.unit(fixed).hp)}
+            repair = {
+                "action": "Repair",
+                "unit": {"global": uid},
+                # Only its owner sees a hidden unit repaired.
+                "repaired": {str(self._pid(mover)): repaired} if _hidden(after, fixed) else {"global": repaired},
+                "funds": {"global": int(after.players[mover].funds)},
+            }
+            return [{"action": "Repair", "Move": nested, "Repair": repair}]
+        if kind == A["Hide"]:
+            mover = int(before.active)
+            self._dived[uid] = "D"
+            hide = {
+                "action": "Hide",
+                "unit": {str(pid): uid for pid in sorted(self.meta.players)},
+                "vision": {str(self._pid(p)): p == mover or self._sees_hidden(after, p, to) for p in self._by_pid()},
+            }
+            return [{"action": "Hide", "Move": nested, "Hide": hide}]
+        if kind == A["Unhide"]:
+            up = after.find_unit(uid)
+            self._dived[uid] = "R"
+            unit = self._unit(after, up, self._row(after, up), 1, 1)
+            return [{"action": "Unhide", "Move": nested, "Unhide": {"action": "Unhide", "unit": {"global": unit}}}]
+        if kind == A["AttackSeam"]:
+            assert target is not None
+            seam = self._attack_seam(before, after, slot, to, target)
+            return [{"action": "AttackSeam", "Move": nested, "AttackSeam": seam}]
+        if kind == A["Explode"]:
+            explode = {"action": "Explode", "hp": -5, "vision": {"global": {"x": to[0], "y": to[1]}}, "unitId": uid}
+            return [{"action": "Explode", "Move": nested, "Explode": explode}]
+        if kind == A["Launch"]:
+            # No replay in the archive launches a missile: this is what the Replay Player reads.
+            assert target is not None
+            launch = {
+                "action": "Launch",
+                "siloX": to[0],
+                "siloY": to[1],
+                "targetX": target[0],
+                "targetY": target[1],
+                "hp": -3,
+            }
+            return [{"action": "Launch", "Move": nested, "Launch": launch}]
         raise ValueError(f"no AWBW log entry for {NAMES[kind]}")
 
     # -- pieces ------------------------------------------------------------
@@ -471,7 +573,7 @@ class ActionLog:
         shown HP, movement and range with its CO's bonuses, and vision one less
         in rain."""
         r = rules.load()
-        f = _unit_fields(self.meta, row, moved, fired, shown_hp(row[5]))
+        f = _unit_fields(self.meta, row, moved, fired, shown_hp(row[5]), self.dives | self._dived)
         f["movement_points"] = _core.move_points(s, slot)
         if WEATHER_CODES[s.weather] == "R":
             f["vision"] = max(1, f["vision"] - 1)
@@ -494,9 +596,34 @@ class ActionLog:
             out[str(pid)] = value
         return out
 
-    def _move(self, before: _core.GameState, slot: int, to: tuple[int, int], alone: bool) -> Json | None:
+    def _by_pid(self) -> list[int]:
+        """The players in AWBW player id order, the order of per-player views."""
+        return sorted((0, 1), key=self._pid)
+
+    def _sees_hidden(self, s: _core.GameState, viewer: int, at: tuple[int, int]) -> bool:
+        """Whether ``viewer`` sees a hidden unit on ``at``: on a property it owns, or
+        next to one of its units."""
+        prop = self._props.get(at)
+        if prop is not None and s.prop_owner(prop) == viewer:
+            return True
+        x, y = at
+        return any(
+            r[2] == viewer and not r[8] & _core.UNIT_CARRIED and abs(r[3] - x) + abs(r[4] - y) == 1
+            for r in s.unit_rows()
+        )
+
+    def _move(
+        self,
+        before: _core.GameState,
+        after: _core.GameState,
+        slot: int,
+        to: tuple[int, int],
+        alone: bool,
+        fires: bool = False,
+    ) -> Json | None:
         """The Move entry, or None for a unit acting where it stands (``alone``:
-        the move is the whole action, logged even in place)."""
+        the move is the whole action, logged even in place). ``fires``: the unit
+        attacks where it stops, which shows it even hidden."""
         if self._path is None:
             plan = _core.move_path(before, slot, to)
             if plan is None:
@@ -513,14 +640,48 @@ class ActionLog:
         row[6] -= fuel
         if stop:
             row[8] &= ~_core.UNIT_CAPTURING
+        unit = self._unit(before, slot, tuple(row), 1, int(trapped))  # a trapped unit is spent
+        steps = path[: stop + 1]
+        if _hidden(before, slot):
+            units, paths = self._hidden_views(after, mover, unit, steps, fires)
+        else:
+            units = self._views(mover, unit)
+            paths = {"global": [{"unit_visible": True, "x": x, "y": y} for x, y in steps]}
         return {
             "action": "Move",
-            "unit": self._views(mover, self._unit(before, slot, tuple(row), 1, 0)),
-            "paths": {"global": [{"unit_visible": True, "x": x, "y": y} for x, y in path[: stop + 1]]},
+            "unit": units,
+            "paths": paths,
             "dist": fuel,
             "trapped": trapped,
-            "discovered": {str(self._pid(mover)): None},
+            "discovered": self._discovered(before, path[stop]),
         }
+
+    def _hidden_views(
+        self, after: _core.GameState, mover: int, unit: Json, steps: Sequence[tuple[int, int]], fires: bool
+    ) -> tuple[Json, Json]:
+        """A hidden unit's move as each player sees it (no "global"): its owner sees
+        all of it; the opponent the tiles where it sees the unit and the tiles next
+        to those on the path, and the unit in full only if it sees where it stopped
+        (AWBW's own rule is subtler: this one gets most moves)."""
+        seen = [self._sees_hidden(after, 1 - mover, xy) for xy in steps]
+        seen[-1] = seen[-1] or fires
+        units: Json = {}
+        paths: Json = {}
+        for p in self._by_pid():
+            pid = str(self._pid(p))
+            if p == mover:
+                units[pid] = unit
+                paths[pid] = [{"unit_visible": True, "x": x, "y": y} for x, y in steps]
+            elif not any(seen):
+                units[pid] = ""
+            else:
+                units[pid] = unit if seen[-1] else {k: unit[k] for k in HIDDEN_FIELDS}
+                paths[pid] = [
+                    {"unit_visible": v, "x": x, "y": y}
+                    for i, ((x, y), v) in enumerate(zip(steps, seen, strict=True))
+                    if any(seen[max(0, i - 1) : i + 2])
+                ]
+        return units, paths
 
     def _fire(
         self, before: _core.GameState, after: _core.GameState, slot: int, to: tuple[int, int], target: tuple[int, int]
@@ -534,17 +695,26 @@ class ActionLog:
             ammo, hp = (row[7], shown_hp(row[5])) if row else (0, 0)  # destroyed
             return {"units_ammo": ammo, "units_hit_points": hp, "units_id": u.id, "units_x": at[0], "units_y": at[1]}
 
-        info: Json = {"attacker": side(slot, to), "defender": side(before.unit_at(*target), target)}
+        foe = before.unit_at(*target)
+        info: Json = {"attacker": side(slot, to), "defender": side(foe, target)}
         players = after.players
-        bonds = [p for p in (mover, 1 - mover) if _war_bonds(before, p) and players[p].funds > before.players[p].funds]
-        if bonds:  # Sasha's SCOP: funds from the damage she deals (logged when she gains some)
-            info["gainedFunds"] = {
-                str(self._pid(p)): players[p].funds - before.players[p].funds if p in bonds else None
-                for p in (mover, 1 - mover)
-            }
+        bonds = [p for p in (mover, 1 - mover) if _war_bonds(before, p)]
+        gains = {p: players[p].funds - before.players[p].funds for p in bonds}
+        if any(gains.values()):  # Sasha's SCOP: funds from the damage she deals (logged when she gains some)
+            info["gainedFunds"] = {str(self._pid(p)): gains.get(p) for p in (mover, 1 - mover)}
+        views: Json = {"global": {"hasVision": True, "combatInfo": info}}
+        if _hidden(before, slot) or _hidden(before, foe):
+            # Both players see the fight; the "global" view doesn't see a hidden side.
+            masked = dict(info)
+            for key, s in (("attacker", slot), ("defender", foe)):
+                if _hidden(before, s) and after.find_unit(before.unit(s).id) >= 0:  # shown once destroyed
+                    masked[key] = "?"
+            if masked != info:
+                views = {str(self._pid(p)): {"hasVision": True, "combatInfo": info} for p in self._by_pid()}
+                views["global"] = {"hasVision": True, "combatInfo": masked}
         return {
             "action": "Fire",
-            "combatInfoVision": {"global": {"hasVision": True, "combatInfo": info}},
+            "combatInfoVision": views,
             "copValues": {
                 k: {"playerId": self._pid(p), "copValue": int(players[p].power), "tagValue": None}
                 for k, p in (("attacker", mover), ("defender", 1 - mover))
@@ -635,6 +805,67 @@ class ActionLog:
             }
         return out
 
+    def _supply(self, after: _core.GameState, slot: int) -> Json:
+        """A Supply: the units next to the supplier (and their cargo), by id. The
+        opponent's list has only those on woods, mountains, pipe seams and its own
+        properties, as AWBW logs it (634 of 751 Supplies list fewer for it)."""
+        mover = int(after.active)
+        u = after.unit(slot)
+        x, y = self._xy(after, slot)
+        near = sorted(
+            (r for r in after.unit_rows() if r[2] == mover and r[0] != u.id and abs(r[3] - x) + abs(r[4] - y) == 1),
+            key=lambda r: r[0],
+        )
+        rows = [str(r[0]) for r in near]
+
+        def shown_to_opponent(r: tuple) -> bool:
+            at = (r[3], r[4])
+            if r[8] & _core.UNIT_HIDDEN:  # mostly left out (11 of 300 games with Stealths list one)
+                return False
+            prop = self._props.get(at)
+            if prop is not None and after.prop_owner(prop) == 1 - mover:
+                return True
+            kind = self._kinds[r[4]][r[3]]
+            return kind in ("wood", "mountain", "seam")  # a seam broken or not
+
+        opponent = [str(r[0]) for r in near if shown_to_opponent(r)]
+        return {
+            "action": "Supply",
+            "unit": {"global": u.id},
+            "rows": rows,
+            "supplied": {str(self._pid(p)): rows if p == mover else opponent for p in self._by_pid()},
+        }
+
+    def _xy(self, s: _core.GameState, slot: int) -> tuple[int, int]:
+        r = self._row(s, slot)
+        return r[3], r[4]
+
+    def _attack_seam(
+        self, before: _core.GameState, after: _core.GameState, slot: int, to: tuple[int, int], seam: tuple[int, int]
+    ) -> Json:
+        """An attack on a pipe seam: its HP after, below 0 once broken (AWBW doesn't
+        floor it), and the rubble's movement costs once broken."""
+        r = rules.load()
+        uid = before.unit(slot).id
+        hp = before.prop_points(self._props[seam]) - _core.seam_damage(_core.combatant(before, slot, to))
+        terrain = int(self.md.terrain()[seam[1], seam[0]])
+        ammo = after.unit(after.find_unit(uid)).ammo
+        attacker = {"units_ammo": ammo, "units_id": uid, "units_x": to[0], "units_y": to[1]}
+        out: Json = {
+            "action": "AttackSeam",
+            "unit": {"global": {"hasVision": True, "combatInfo": attacker}},
+            "buildings_hit_points": hp,
+            "buildings_terrain_id": terrain if hp > 0 else RUBBLE[terrain],
+            "seamX": seam[0],
+            "seamY": seam[1],
+        }
+        if hp <= 0:
+            out["newMoveCosts"] = {
+                code: {t: r.move_costs[w]["rubble"].get(t, 0) for t in MOVE_TYPES}
+                for code, w in zip(WEATHER_CODES, ("clear", "rain", "snow"), strict=True)
+            }
+        return out
+
     def _capture_points(self, before: _core.GameState, slot: int) -> int:
         """The capture points AWBW logs a unit taking."""
         p = before.players[before.unit(slot).owner]
@@ -653,27 +884,37 @@ class ActionLog:
         return paying * (s.settings.funds_per_property + r.cos[s.players[player].co].d2d.income_bonus)
 
     def _build(self, before: _core.GameState, after: _core.GameState, at: tuple[int, int]) -> Json:
-        mover = int(before.active)
         new = after.unit_at(*at)
         unit = self._unit(after, new, self._row(after, new), 1, 1)
-        return {"action": "Build", "newUnit": {"global": unit}, "discovered": {str(self._pid(mover)): None}}
+        return {"action": "Build", "newUnit": {"global": unit}, "discovered": self._discovered(before, at)}
 
     def _join(self, before: _core.GameState, after: _core.GameState, slot: int, at: tuple[int, int]) -> Json:
         mover = int(before.active)
         joined = after.unit_at(*at)
         unit = self._unit(after, joined, self._row(after, joined), 1, 1)
+        funds = int(after.players[mover].funds)
+        uid = before.unit(slot).id
+        if not _hidden(after, joined):
+            return {
+                "action": "Join",
+                "newFunds": {"global": funds},
+                "playerId": self._pid(mover),
+                "unit": {"global": unit},
+                "joinID": {"global": uid},
+            }
+        # Hidden units joined: per player, the opponent's view empty unless it sees them.
+        seen = {mover: True, 1 - mover: self._sees_hidden(after, 1 - mover, at)}
         return {
             "action": "Join",
-            "newFunds": {"global": int(after.players[mover].funds)},
+            "newFunds": {str(self._pid(mover)): funds, "global": funds},
             "playerId": self._pid(mover),
-            "unit": {"global": unit},
-            "joinID": {"global": before.unit(slot).id},
+            "unit": {str(self._pid(p)): unit if seen[p] else "" for p in self._by_pid()},
+            "joinID": {str(self._pid(p)): uid for p in self._by_pid()},
         }
 
     def _unload(
         self, before: _core.GameState, after: _core.GameState, slot: int, at: tuple[int, int], arg: int
     ) -> Json:
-        mover = int(before.active)
         cargo = before.unit(slot).cargo[arg]
         dropped = after.find_unit(before.unit(cargo).id)
         unit = self._unit(after, dropped, self._row(after, dropped), 1, 1)
@@ -681,12 +922,69 @@ class ActionLog:
             "action": "Unload",
             "unit": {"global": unit},
             "transportID": before.unit(slot).id,
-            "discovered": {str(self._pid(mover)): None},
+            "discovered": self._discovered(before, at),
         }
+
+    def _discovered(self, before: _core.GameState, at: tuple[int, int]) -> Json:
+        """The hidden enemies next to a unit of the mover arriving on ``at``, as they
+        were before the action (a hidden unit it attacks too), and the buildings they
+        stand on."""
+        mover = int(before.active)
+        x, y = at
+        units, buildings = [], []
+        for slot, row in ((before.find_unit(row[0]), row) for row in before.unit_rows()):
+            xy = (row[3], row[4])
+            if row[2] != 1 - mover or not row[8] & _core.UNIT_HIDDEN or abs(xy[0] - x) + abs(xy[1] - y) != 1:
+                continue
+            units.append(self._unit(before, slot, row, 0, int(row[0] in self.acted)))
+            if xy in self.buildings:
+                t, capture, owner = self._building(before, xy)
+                pid = self._pid(owner) if owner < 2 else None
+                buildings.append(
+                    {
+                        "0": self.buildings[xy] if pid is None else pid,
+                        "buildings_id": self.buildings[xy],
+                        "buildings_x": xy[0],
+                        "buildings_y": xy[1],
+                        "buildings_capture": capture,
+                        "terrain_id": t.id,
+                        "terrain_name": t.name,
+                        "terrain_defense": t.defense,
+                        "is_occupied": True,
+                        "buildings_players_id": pid,
+                        "buildings_team": None if pid is None else str(pid),
+                    }
+                )
+        if not units:
+            return {str(self._pid(mover)): None}
+        found: Json = {"units": units}
+        if buildings:
+            found["buildings"] = buildings
+        return {str(self._pid(mover)): found}
+
+    def _building(self, s: _core.GameState, at: tuple[int, int]) -> tuple[rules.Terrain, int, int]:
+        """The AWBW building on ``at`` as it is in ``s``: its terrain, capture points
+        (a seam's HP) and owner."""
+        r = rules.load()
+        terrain = r.terrain[int(self.md.terrain()[at[1], at[0]])]
+        prop = self._props.get(at)
+        if prop is None:  # an empty silo
+            return terrain, FULL_CAPTURE, _core.NO_OWNER
+        points = s.prop_points(prop)
+        if terrain.kind == "seam":
+            return (terrain if points else r.terrain[RUBBLE[terrain.id]]), points, _core.NO_OWNER
+        if terrain.kind == "silo":
+            empty = r.terrain[_terrain_ids()[("silo_empty", None)]]
+            return (terrain if points else empty), FULL_CAPTURE, _core.NO_OWNER
+        owner = s.prop_owner(prop)
+        country = s.players[owner].country if owner < 2 else None
+        return r.terrain[_terrain_ids()[(terrain.kind, country)]], points, owner
 
     def _end(self, before: _core.GameState, after: _core.GameState) -> Json:
         r = rules.load()
         self.turns += 1
+        self.acted = acted_ids(before)
+        self.dives, self._dived = self._dived, {}
         nxt = int(after.active)
         repaired = []
         supplied: list[str] = []
@@ -697,6 +995,9 @@ class ActionLog:
             if row is None or row[2] != nxt or xy not in props:
                 continue
             prop, kind = props[xy]
+            hp_was = before.unit(before.find_unit(row[0])).hp
+            if hp_was < 100 and row[5] == hp_was:
+                continue  # a repair it couldn't afford: AWBW doesn't list the unit
             if after.prop_owner(prop) == nxt and _services(kind, r.units[row[1]].cls):
                 repaired.append({"units_id": str(row[0]), "units_hit_points": shown_hp(row[5])})
         repaired.sort(key=lambda u: int(u["units_id"]))
@@ -704,9 +1005,19 @@ class ActionLog:
             if row[2] == nxt and r.units[row[1]].supplies:
                 for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0)):
                     v = by_tile.get((row[3] + dx, row[4] + dy))
-                    if v is not None and v[2] == nxt:
-                        supplied.append(str(v[0]))  # once per APC
+                    if v is not None and v[2] == nxt:  # with its cargo, once per APC
+                        supplied += [str(uid) for uid in (v[0], v[9], v[10]) if uid]
         supplied.sort(key=int)
+        hidden = {row[0] for row in after.unit_rows() if row[2] == nxt and row[8] & _core.UNIT_HIDDEN}
+
+        def views(entries: list, uid: Any) -> Json:
+            if not hidden or not entries:
+                return {"global": entries}
+            # A player with a hidden unit gets its own full list, and the "global"
+            # one leaves hidden units out and lists each other unit twice.
+            shown = [e for e in entries if int(uid(e)) not in hidden]
+            return {"global": [e for e in shown for _ in (0, 1)], str(self._pid(nxt)): entries}
+
         when = self.meta.start + timedelta(minutes=self.meta.turn_minutes * self.turns)
         return {
             "action": "End",
@@ -716,8 +1027,8 @@ class ActionLog:
                 "nextFunds": {"global": int(after.players[nxt].funds)},
                 "nextTimer": TURN_CLOCK,
                 "nextWeather": WEATHER_CODES[after.weather],
-                "supplied": {"global": supplied},
-                "repaired": {"global": repaired},
+                "supplied": views(supplied, lambda e: e),
+                "repaired": views(repaired, lambda e: e["units_id"]),
                 "day": int(after.day),
                 "nextTurnStart": _date(when),
             },
@@ -758,6 +1069,10 @@ class ActionLog:
             "message": f"The game is over! {self.meta.names[winner]} is the winner!",
             "winners": [self._pid(winner)],
         }
+
+
+def _hidden(s: _core.GameState, slot: int) -> bool:
+    return bool(s.unit(slot).flags & _core.UNIT_HIDDEN)
 
 
 def _war_bonds(s: _core.GameState, player: int) -> bool:

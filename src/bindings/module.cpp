@@ -1014,6 +1014,8 @@ NB_MODULE(_core, m) {
   m.def("damage", &awbw::damage, "att"_a, "defender"_a, "luck"_a, "counter"_a = false,
         "Damage in internal HP for a given net luck roll.");
   m.def("can_attack", &awbw::can_attack, "att"_a, "defender"_a, "dist"_a);
+  m.def("seam_damage", &awbw::seam_damage, "att"_a,
+        "Pipe seam HP an attack takes off, before the seam's HP is floored at 0.");
   m.def(
       "weapon",
       [](const awbw::Combatant& att, int def_type) {

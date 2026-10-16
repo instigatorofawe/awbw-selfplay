@@ -1641,12 +1641,11 @@ upload replays, so the viewer is the community
   - Each action `games.replay` yields becomes AWBW's JSON, built from the
     states before and after it: Move (path, dist, trapped, the unit after),
     Fire, Capt, Build, Load, Unload, Join, Supply, Repair, Hide, Unhide,
-    Delete, AttackSeam, Power, End and Resign. Explode and Launch appear in
-    none of the 6,000 newest replays (Black Bomb is banned, silos are rare),
-    so their shapes come from older ones.
-  - No fog, so every view is "global", except a hidden Sub or Stealth:
-    AWBW logs it per viewer even without fog, with the opponent's copy
-    empty. The export does the same.
+    Delete, AttackSeam, Power, End and Resign. Of 216k cached replays, one
+    (an old team game) explodes a Black Bomb and none launches a missile, so
+    those shapes come from it and from the Replay Player's parser.
+  - No fog, so every view is "global", except around a hidden Sub or
+    Stealth: AWBW logs those per player even without fog (below).
   - **Paths:** AWBW logs the path taken. The engine moves along the
     cheapest path its owner can see, and fuel follows it. `move_path`
     returns that path, where an unseen enemy stops the unit, and the fuel
@@ -1697,6 +1696,42 @@ upload replays, so the viewer is the community
     powers they log their base movement and none of 1,807 transport moves
     went further, while armed direct units often did. The engine gave them
     +1/+2; `direct` now means armed (rules and tables.h).
+- **Rarer actions and hidden units, done** (step 5's first half). The same
+  check now covers Supply, Repair, Hide, Unhide, AttackSeam, Explode and
+  Launch, and runs on the 40 newest games where a Sub or Stealth hides too
+  (`HIDDEN_GAMES`): no differences left but AWBW one-offs (`LOG_ODDITIES`).
+  A synthetic test covers Explode and Launch. What the logs showed:
+  - Supply lists the units next to the supplier and their cargo, by id. The
+    opponent's copy has only those on woods, mountains, pipe seams (broken or
+    not) and its own properties (634 of 751 Supplies list fewer for it), no
+    hidden ones. End's supplied list has the cargo too.
+  - A Repair of a hidden unit is listed for its owner only. End doesn't list
+    a unit whose repair its owner couldn't afford.
+  - AttackSeam logs the seam's HP after, below 0 once broken (AWBW doesn't
+    floor it), the rubble's terrain, and then the rubble's movement costs by
+    weather. `seam_damage` is bound for it.
+  - Hide: the unit and what each player sees of it, per player. Unhide: the
+    unit with `sub_dive` "R". `sub_dive` is "D" for a unit that hid in its
+    owner's last turn and "R" for one that surfaced, until its owner's next
+    turn starts, in snapshots too (the snapshot check had read D as Y and R
+    as N; it's exact now).
+  - A hidden unit's move is logged per player in player-id order, with no
+    "global": the owner sees all of it; the opponent "" if it never sees
+    the unit, its id, name and dive only if it doesn't see where it stops,
+    and the stretch of path around the tiles it sees it on. It sees it on
+    its own properties, and mostly next to its units: the export's rule
+    gets about 80% of those tiles, so the check compares the owner's view
+    (the Replay Player reads that one).
+  - A fight with a hidden unit: both players see it, the "global" view
+    shows the hidden side as "?" unless it was destroyed. A unit that stops
+    next to hidden enemies lists them in `discovered`, as they were before
+    the action, with the buildings they stand on. A unit stopped by a hidden
+    enemy is logged as a Move alone, trapped and spent.
+  - At End, a player with a hidden unit gets its own repaired and supplied
+    lists, and the "global" ones leave hidden units out and list every other
+    unit twice.
+  - Sasha's `gainedFunds` gives 0, not null, for an opponent whose War Bonds
+    is on but gains nothing.
 - **Validation:**
   1. **Serializer:** `phpser.dumps(loads(x)) == x` byte for byte on real
      snapshot and log files (floats as `d:10;` and `d:9.5;`, strings
@@ -1728,7 +1763,7 @@ upload replays, so the viewer is the community
   4. The common actions (Move, Fire, Capt, Build, End, Load, Unload, Join,
      Resign) through the round trip (done, with Delete and the game-ending
      entries).
-  5. The rarer actions, then powers CO by CO.
+  5. The rarer actions (done), then powers CO by CO.
   6. The command, tests, and the check in the Replay Player.
 
 ### Local play against the network (planned, `awbw play`)

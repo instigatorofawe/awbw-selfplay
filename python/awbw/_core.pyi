@@ -489,6 +489,11 @@ def damage(att: Combatant, defender: Combatant, luck: int, counter: bool = False
 
 def can_attack(att: Combatant, defender: Combatant, dist: int) -> bool: ...
 
+def seam_damage(att: Combatant) -> int:
+    """
+    Pipe seam HP an attack takes off, before the seam's HP is floored at 0.
+    """
+
 def weapon(att: Combatant, def_type: int) -> int:
     """-1 none, 0 ammo weapon, 1 weapon without ammo"""
 
