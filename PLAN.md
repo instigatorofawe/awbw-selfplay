@@ -1255,9 +1255,24 @@ is `cache/logs/bigrun.log`, the runs `cache/runs/tf128-full` and
     `v1-64x6-5070`, 200 games each from validation starts;
   - played against `tf128-s1` with 64 simulations each side, 100 games.
 
-  The main run then goes on through epochs 5–8, and the final net plays
-  the midway copy and `tf128-s1` the same way. Results land in
-  `cache/runs/eval-*.txt` and `arena-*.txt`.
+  Results land in `cache/runs/eval-*.txt` and `arena-*.txt`.
+- **Likely stop at epoch 4** (decided 2026-10-16). The grid's runs were
+  80k steps of 5.1M decisions an epoch (`--fraction 0.0772`); this one
+  uses every decision, 750k steps an epoch, and by step 200k its training
+  batches (unseen games, peak rate) were as low as `tf128-s1`'s at its
+  end (1.091 policy). Eight epochs may be more than the data rewards.
+  Validation every 250k steps, three times an epoch on the flat rate,
+  gives each epoch's gain. If epoch 4 improves validation policy loss on
+  epoch 3 by less than about 0.003, or validation value loss rises, the
+  run stops once the midway arenas are in: kill `bigrun.sh` and the
+  training it resumed, by PID. Relaunching `bigrun.sh` would go on with
+  epochs 5–8, as every finished step is skipped and `--pause-at 4`
+  returns at once. The midway copy is then the pretrained net (a longer
+  decay from the epoch-4 checkpoint if 0.2 epochs looks short), and the
+  box installs the current code for the search tests (§8 "Cheaper
+  search") and self-play from that copy.
+- Otherwise the main run goes on through epochs 5–8, and the final net
+  plays the midway copy and `tf128-s1` the same way.
 - If the midway copy doesn't beat `tf128-s1` clearly, the rest of the
   run is in question: stop it and rethink, rather than spend 5 more days.
 
