@@ -7,8 +7,10 @@ engine's ``src/core/tables.h``.
 Unit selectors (used by CO modifiers and transports) name a unit, a class
 (``foot``, ``vehicle``, ``copter``, ``plane``, ``naval``) or a group:
 ``all``, ``ground`` (foot + vehicle), ``air`` (copter + plane), ``direct``
-(max range 1), ``indirect`` (max range > 1) and ``transport`` (units that
-carry others and have no weapon).
+(armed, max range 1), ``indirect`` (max range > 1) and ``transport`` (units
+that carry others and have no weapon). Unarmed units aren't direct: under
+Max's powers AWBW logs transports with their base movement, and none of 1,807
+transport moves went further.
 """
 
 from __future__ import annotations
@@ -158,7 +160,7 @@ def _select(units, primary, secondary, selector: str) -> frozenset[int]:
         "all": lambda u: True,
         "ground": lambda u: u.cls in ("foot", "vehicle"),
         "air": lambda u: u.cls in ("copter", "plane"),
-        "direct": lambda u: not u.indirect,
+        "direct": lambda u: armed(u) and not u.indirect,
         "indirect": lambda u: u.indirect,
         "transport": lambda u: u.carry_slots > 0 and not armed(u),
     }
