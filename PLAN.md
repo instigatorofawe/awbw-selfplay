@@ -1705,6 +1705,15 @@ rules exactly (two players, no fog, as everywhere in v1).
   - the network's moves animated one action at a time;
   - optionally its value for the position (off by default, so as not to
     spoil a close game).
+- **Undo:** allowed locally (AWBW has none). The server keeps each
+  action's state, so undo steps back one action at a time, the luck
+  included: an attack retried the same way rolls the same.
+- **Sprites:** AWBW's unit and terrain art is Nintendo's (the Replay
+  Player's README says the same of its own), and this repo is public, so
+  none of it is committed. The viewer and the play page draw sprites from
+  a local folder if one is there (`cache/sprites/`, outside git, filled
+  from art the user has, such as the Replay Player's), and otherwise draw
+  the board as now.
 - **The network's side:** `PolicyAgent` (the prior, instant) or
   `SearchAgent` with N simulations, one decision at a time, through the
   same `Agent` protocol as the arena. The first step is to time a turn of
