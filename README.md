@@ -95,6 +95,8 @@ micro-step of a decision) pre-trained by behaviour cloning on the v1 dataset:
 uv run awbw train-policy --out cache/policies/run1 --compile   # --fraction: share of decisions per epoch
 uv run awbw eval-policy cache/policies/run1/best.pt            # by phase, against a uniform choice
 uv run awbw arena cache/policies/run1/best.pt --games 32       # whole games against a random mover
+uv run awbw arena cache/policies/run1/best.pt --record games.jsonl   # ...and keep them
+uv run awbw view-game games.jsonl --game 0 --open              # step through one in the browser
 ```
 
 ```python

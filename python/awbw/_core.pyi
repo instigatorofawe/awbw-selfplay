@@ -149,6 +149,11 @@ class MapData:
         bonuses; 255 where it can't go.
         """
 
+    def terrain(self) -> NDArray[numpy.int16]:
+        """
+        AWBW terrain ids [height, width] at game start, as register_map took them.
+        """
+
     def tile(self, x: int, y: int) -> int: ...
 
 def register_map(map_id: int, terrain: Annotated[NDArray[numpy.int16], dict(shape=(None, None), order='C', device='cpu', writable=False)]) -> MapData:
@@ -836,6 +841,24 @@ class GameRecord:
 
     @property
     def final_state(self) -> GameState: ...
+
+    @property
+    def start_state(self) -> GameState:
+        """
+        the first state, its luck seeded: taking `steps` from it gives final_state
+        """
+
+    @property
+    def steps(self) -> NDArray[numpy.uint16]:
+        """every micro-step taken, forced ones included [n] uint16"""
+
+    @property
+    def searched(self) -> dict:
+        """
+        each searched decision as arrays: step (its index in steps; len(steps) where the
+        mover resigned), value and net_value (the searched and the network's, from the
+        mover's side), sims (0: played unsearched, skip_prior), mover and full (a sample)
+        """
 
 class BatchedSearch:
     """

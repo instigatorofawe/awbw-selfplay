@@ -8,6 +8,8 @@ from awbw import _core
 from awbw.cli import main
 from awbw.data.loader import in_validation
 from awbw.data.shards import Dataset
+from awbw.games import read as read_games
+from awbw.games import replay
 from awbw.ladder import elo
 from awbw.nn.model import PolicyValueNet
 from awbw.nn.policy import load_policy, policy_ids, save_policy
@@ -195,6 +197,10 @@ def test_selfplay_trains_and_resumes(cache, tmp_path):  # noqa: F811
     assert 0 <= metrics[-1]["resign_wrong"] <= metrics[-1]["resign_checked"]
     assert sum(m["train"]["steps"] + m["human"]["steps"] for m in metrics) == 6
     assert sum(m["human"]["steps"] for m in metrics) > 0
+    # Every finished game is recorded, those without a full search too, and replays.
+    logs = list(read_games(out / "games.jsonl"))
+    assert len(logs) >= metrics[-1]["games"] and all(replay(log).matches for log in logs)
+    assert all(log.source == "self-play" and "step" in log.info for log in logs)
     for p in [out / "last.pt", *out.glob("net-*.pt")]:  # they load: no numpy scalars in their info
         load_policy(p)
     more = dataclasses.replace(cfg, max_steps=8)

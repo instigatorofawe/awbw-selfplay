@@ -20,8 +20,10 @@ search always uses the network being trained, which is the same module.
 
 Self-play tells the network no ratings, at the leaves and in training; human
 batches keep theirs, hidden at random. The run directory holds
-``metrics.jsonl``, ``net-NNNNNN.pt`` every ``checkpoint_every`` steps and
-``last.pt`` + ``optimizer.pt`` for ``resume`` (the window starts empty again).
+``metrics.jsonl``, ``net-NNNNNN.pt`` every ``checkpoint_every`` steps,
+``last.pt`` + ``optimizer.pt`` for ``resume`` (the window starts empty again)
+and with ``record_games`` every finished game in ``games.jsonl`` (``games``:
+``awbw view-game`` shows them).
 
 Cheaper search: a fast search whose root the network is sure of (``skip_prior``)
 plays without simulating, and with a fast network (``train``'s ``fast``) the
@@ -47,6 +49,7 @@ import torch
 import torch.nn.functional as F
 
 from .. import _core
+from .. import games as records
 from ..data.loader import BUCKETS, DecisionBatch, bucket_for, decision_batches, encode_decisions, in_validation
 from ..data.shards import Dataset
 from ..search import NetEvaluator, SearchSettings
@@ -76,6 +79,7 @@ class SelfPlayConfig:
     resign_turns: int = 2  # 0: never
     resign_off: float = 0.1
     parallel: int = 512  # games at once
+    record_games: bool = True  # every finished game to games.jsonl (games.py), 15-20 KB each
     fast_train: bool = True  # train the fast network (train's `fast`) on the main one's batches
     # Window and training
     window: int = 300_000  # self-play samples kept
@@ -218,7 +222,9 @@ class Games:
     """Self-play games, ``parallel`` at once, one ``BatchedSearch`` per board bucket.
 
     ``round`` walks every search to its next leaves, has ``evaluator`` score
-    them and hands back the games that ended.
+    them and hands back the games that ended; with ``keep_records`` every
+    finished game's record also waits in ``records`` (some end without a
+    full search, so without samples).
     """
 
     def __init__(
@@ -228,6 +234,7 @@ class Games:
         config: _core.SearchConfig,
         parallel: int,
         fast_evaluator: NetEvaluator | None = None,
+        keep_records: bool = False,
     ):
         self.evaluator = evaluator
         self.fast_evaluator = fast_evaluator  # scores the fast searches' leaves, if given
@@ -239,6 +246,8 @@ class Games:
         self.first: dict[tuple[int, int], int] = {}
         self.evals = 0
         self.fast_evals = 0  # of those, by fast_evaluator
+        self.keep_records = keep_records
+        self.records: list[_core.GameRecord] = []
 
     @property
     def active(self) -> int:
@@ -283,6 +292,8 @@ class Games:
                 for g, part in _split_by_game(samples):
                     self.pending[size, g].append(part)
             for rec in bs.take_records():
+                if self.keep_records:
+                    self.records.append(rec)
                 parts = self.pending.pop((size, rec.game), [])
                 first = self.first.pop((size, rec.game))
                 if parts:
@@ -477,7 +488,7 @@ def train(
     )
     rng = np.random.default_rng([cfg.seed, step])
     starts = human_starts(ds)
-    games = Games(evaluator, cycle(starts, rng), search_cfg, cfg.parallel, fast_evaluator)
+    games = Games(evaluator, cycle(starts, rng), search_cfg, cfg.parallel, fast_evaluator, cfg.record_games)
     window = Window(cfg.window)
     human = prefetch(_human_stream(ds, cfg, movement)) if cfg.human_fraction > 0 else None
     setup = {"selfplay": asdict(cfg), "init": str(init), "dataset": str(data)}
@@ -670,6 +681,11 @@ def train(
                 f_n=n,
             )
             window.add(g.samples)
+        if games.records:
+            name = f"self-play step {step}"
+            logs = [records.from_record(rec, (name, name), step=step) for rec in games.records]
+            records.append(out / "games.jsonl", logs)
+            games.records.clear()
         if window.count >= cfg.min_window:
             while trained < window.added * cfg.train_ratio and (not cfg.max_steps or step < cfg.max_steps):
                 if human is not None and rng.random() < cfg.human_fraction:

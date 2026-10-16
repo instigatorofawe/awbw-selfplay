@@ -1542,6 +1542,33 @@ the search always uses the network being trained, the same module.
   human losses.
   `net-NNNNNN.pt` every 2,000 steps; `last.pt` + `optimizer.pt` for
   `--resume`, after which the window starts empty.
+- **Game records** (`games.py`): every finished game goes to the run's
+  `games.jsonl` (`--no-record-games` turns it off), and `awbw arena
+  --record FILE` does the same for arena games.
+  - A record is the game's first state, its luck seeded, and every
+    micro-step taken, forced ones included. The luck lives in the state,
+    so the steps replay the game exactly. It also keeps the map's terrain,
+    so one file is enough, and each searched decision's value, the
+    network's value and the simulations run.
+  - About 15–20 KB a game, so roughly 20 MB an hour of self-play at 1,000
+    games an hour.
+  - A record keeps a hash of the final state. A replay that doesn't reach
+    it, or a step the engine refuses, means the game was recorded under
+    other rules (such as before ae055b9's transport change).
+  - `awbw view-game FILE [--game N | --list]` writes one self-contained
+    HTML page that steps through a game action by action. It shows the
+    board, funds, power bars, each action in words, the turn's actions,
+    and a chart of the value for player 1 that jumps to any point;
+    `page.html#N` opens at action N.
+  - First look, an arena game between the two v1-64x6 networks on Amber
+    Valley: Hawke's SCOP took P1's army from 122k to 69k on day 15, and
+    both networks put P1 near −1 from then on. P1 won on day 18 with an
+    infantry capture of the HQ that neither network saw coming, even
+    while the capture was under way.
+  - **Later:** export to AWBW's replay format, so AWBW's own and the
+    community's replay viewers open the games. The record has everything
+    that needs: the map id, the start and every action, with paths the
+    engine chooses as it does now.
 - **Ladder** (`awbw ladder RUN --baseline PATH`): each checkpoint plays the
   baseline from the first 100 validation starts, each played twice with
   seats swapped. It plays the priors, or with `--sims` both sides search.

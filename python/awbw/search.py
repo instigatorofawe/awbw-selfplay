@@ -17,7 +17,7 @@ import numpy as np
 import torch
 
 from . import _core
-from .agents import Decision
+from .agents import Decision, Note
 from .data.loader import bucket_for
 from .nn.model import PolicyValueNet, flat_policy, value_of
 from .nn.policy import Policy
@@ -145,7 +145,7 @@ class SearchSettings:
 class SearchAgent:
     """Searches each decision it is asked for with a network and plays the step
     the search chooses (an ``agents.Agent``). ``last`` keeps the latest call's
-    ``_core.SearchResult`` per decision."""
+    ``_core.SearchResult`` per decision, and ``notes`` their values."""
 
     def __init__(self, evaluator: NetEvaluator, settings: SearchSettings | None = None, seed: int = 0):
         self.evaluator = evaluator
@@ -154,6 +154,7 @@ class SearchAgent:
         self.calls = 0
         self.decisions = 0  # asked for, over every call
         self.last: list[_core.SearchResult] = []
+        self.notes: list[Note] = []
 
     def choose(self, decisions: list[Decision]) -> list[int]:
         self.calls += 1
@@ -175,6 +176,7 @@ class SearchAgent:
             for i, slot in zip(rows, slots, strict=True):
                 results[i] = search.result(slot)
         self.last = [r for r in results if r is not None]
+        self.notes = [Note(r.value, r.net_value, r.sims) for r in self.last]
         return [r.id for r in self.last]
 
 

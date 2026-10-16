@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <map>
 #include <numeric>
 #include <random>
@@ -504,6 +505,69 @@ TEST(Search, FastSearchesArePlayedButNotKept) {
   const Played all_fast = self_play(m, cfg, 2, false);
   EXPECT_TRUE(all_fast.samples.empty());
   EXPECT_EQ(all_fast.fast, all_fast.evals);
+}
+
+TEST(Search, AGameRecordReplaysToItsEnd) {
+  const MapData m = make_map(kArena);
+  SearchConfig cfg;
+  cfg.sims = 8;
+  cfg.fast_sims = 2;
+  cfg.full_fraction = 0.25f;
+  cfg.considered = 4;
+  cfg.max_days = 3;
+  cfg.seed = 9;
+  const Played p = self_play(m, cfg, 3, false);
+  ASSERT_EQ(p.records.size(), 3u);
+  std::map<uint64_t, int> samples;
+  for (const SearchSample& smp : p.samples) ++samples[smp.game];
+  std::vector<uint16_t> ids;
+  for (const GameRecord& r : p.records) {
+    ASSERT_EQ(static_cast<int>(r.searched.size()), r.decisions);
+    int full = 0, last = -1;
+    for (const GameDecision& d : r.searched) {
+      EXPECT_GT(d.step, last);  // one searched step at a time
+      EXPECT_LT(d.step, static_cast<int>(r.steps.size()));
+      EXPECT_EQ(d.sims, d.full ? cfg.sims : cfg.fast_sims);
+      EXPECT_LE(std::abs(d.value), 1.0f);
+      last = d.step;
+      full += d.full;
+    }
+    EXPECT_EQ(full, samples[r.game]);
+    // Every step is legal where it was taken, the searched ones where a
+    // choice was, and they end at the final state.
+    GameState s = r.start_state;
+    Selection sel;
+    size_t next = 0;
+    int actions = 0;
+    for (size_t i = 0; i < r.steps.size(); ++i) {
+      legal_ids(m, s, sel, ids);
+      ASSERT_TRUE(std::binary_search(ids.begin(), ids.end(), r.steps[i])) << "step " << i;
+      const bool searched =
+          next < r.searched.size() && r.searched[next].step == static_cast<int>(i);
+      EXPECT_EQ(searched, ids.size() > 1) << "step " << i;
+      if (searched) EXPECT_EQ(r.searched[next++].mover, s.active);
+      Action a;
+      actions += step_action(m, s, sel, r.steps[i], a);
+      ASSERT_TRUE(applied(step(m, s, sel, r.steps[i]))) << "step " << i;
+    }
+    EXPECT_EQ(next, r.searched.size());
+    EXPECT_EQ(actions, r.actions);
+    EXPECT_EQ(std::memcmp(&s, &r.final_state, sizeof(GameState)), 0);
+  }
+
+  // A resignation is the record's last searched decision, with no step.
+  cfg = SearchConfig{};
+  cfg.sims = 4;
+  cfg.considered = 4;
+  cfg.max_days = 6;
+  cfg.resign_turns = 2;
+  cfg.resign_off = 0;
+  for (const GameRecord& r : self_play(m, cfg, 2, false, 1.0f).records) {
+    ASSERT_TRUE(r.resigned);
+    ASSERT_FALSE(r.searched.empty());
+    EXPECT_EQ(r.searched.back().step, static_cast<int>(r.steps.size()));
+    EXPECT_EQ(r.searched.back().mover, 0);
+  }
 }
 
 TEST(Search, ConfidentFastSearchesEndAtTheRoot) {

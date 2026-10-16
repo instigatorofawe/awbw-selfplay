@@ -206,6 +206,13 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--resign-turns", type=int, help="such turns in a row before a player resigns; 0: never (2)")
     sp.add_argument("--resign-off", type=float, help="share of games that play on, to check the rule (0.1)")
     sp.add_argument("--parallel", type=int, help="games at once (default 512)")
+    sp.add_argument(
+        "--no-record-games",
+        dest="record_games",
+        action="store_false",
+        default=None,
+        help="don't keep the finished games in the run's games.jsonl",
+    )
     sp.add_argument("--window", type=int, help="self-play samples kept (default 300,000)")
     sp.add_argument("--min-window", type=int, help="samples before training starts (default 20,000)")
     sp.add_argument("--train-ratio", type=float, help="samples trained on per sample added (default 4)")
@@ -261,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     ar.add_argument("--ratings", type=int, nargs=2, metavar=("MOVER", "OPPONENT"), help="ratings the nets are told")
     ar.add_argument("--data", type=Path, help="v1 dataset whose validation games give the starts (default: v1)")
+    ar.add_argument("--record", type=Path, help="add the games to this record file (view-game shows them)")
     ar.add_argument("--device", default="auto")
     ar.add_argument("--seed", type=int, default=0)
 
@@ -296,6 +304,13 @@ def main(argv: list[str] | None = None) -> int:
     lv.add_argument("--ratings", type=int, nargs=2, metavar=("P1", "P2"), help="the players' ratings (default unknown)")
     lv.add_argument("--device", default="auto")
 
+    vg = sub.add_parser("view-game", help="a recorded game (arena --record, self-play) as an HTML page")
+    vg.add_argument("record", type=Path, help="a record file, such as a self-play run's games.jsonl")
+    vg.add_argument("--game", type=int, default=-1, help="which game, from 0; negative counts from the end (-1)")
+    vg.add_argument("--list", action="store_true", help="list the file's games instead")
+    vg.add_argument("--out", type=Path, help="the page to write (default: game-N.html next to the record file)")
+    vg.add_argument("--open", action="store_true", help="open the page in the browser")
+
     args = p.parse_args(argv)
     http = Http(min_interval=args.rate)
     commands = {
@@ -319,6 +334,7 @@ def main(argv: list[str] | None = None) -> int:
         "ladder": _ladder,
         "value": _value,
         "live": _live,
+        "view-game": _view_game,
     }
     return commands[args.cmd](args, http)
 
@@ -832,6 +848,16 @@ def _arena(args, http: Http) -> int:
         "random" if args.opponent == "random" else name(args.opponent, args.opponent_sims, args.opponent_skip_prior)
     )
     print(f"{me_name} vs {them_name}: {r.won}-{r.lost}-{r.drawn} of {r.games} games")
+    if args.record:
+        from . import games
+
+        names = (str(me_name), str(them_name))
+        logs = [
+            games.from_result(g, names if seat == 0 else names[::-1], "arena", seed=args.seed)
+            for seat, results in enumerate(r.by_seat)
+            for g in results
+        ]
+        print(f"{games.append(args.record, logs)} games recorded in {args.record}")
     evals = sum(a.evaluator.evals for a in (me, them) if isinstance(a, SearchAgent))
     print(f"{elapsed:.0f}s" + (f", {evals / elapsed:,.0f} network evaluations/s in search" if evals else ""))
     for who, agent in ((me_name, me), (them_name, them)):
@@ -984,4 +1010,42 @@ def _live(args, http: Http) -> int:
         print(f"  note: the site hides {owner}'s {u.name} from spectators; put back {where}")
     for (pid, name), n in now.unplaced.items():
         print(f"  note: {n} {name} of {who[pid]}'s missing from the page and left out")
+    return 0
+
+
+def _view_game(args, http: Http) -> int:
+    import json
+
+    from . import games
+    from .viewer import game_view, write_page
+
+    with args.record.open() as f:
+        lines = [line for line in f if line.strip()]
+    if not lines:
+        print(f"{args.record} has no games")
+        return 1
+    if args.list:
+        for i, line in enumerate(lines):
+            d = json.loads(line)
+            winner = "draw" if d["winner"] == 2 else f"P{d['winner'] + 1} won"
+            who = " vs ".join(d.get("players") or []) or d.get("source", "")
+            ended = f"day {d['days']:2d} ({d['decided']}), {d['actions']} actions"
+            print(f"{i:5d}  map {d['map']:6d}  {winner:7s} {ended}  {who}")
+        return 0
+    n = args.game if args.game >= 0 else len(lines) + args.game
+    if not 0 <= n < len(lines):
+        print(f"{args.record} has {len(lines)} games")
+        return 1
+    log = games.from_json(json.loads(lines[n]))
+    view = game_view(log, title=f"{args.record.name} #{n}")
+    out = args.out or args.record.with_name(f"{args.record.stem}-{n}.html")
+    write_page(view, out)
+    print(
+        f"{out}: {len(view['frames']) - 1} actions"
+        + ("" if view["matches"] else "; the replay didn't end where it did")
+    )
+    if args.open:
+        import webbrowser
+
+        webbrowser.open(out.resolve().as_uri())
     return 0

@@ -6,6 +6,8 @@ call (one network batch for a ``PolicyAgent``), and takes the chosen steps.
 A step with a single legal id is taken without asking. A game still going
 after ``max_days`` is decided as AWBW decides a day limit: more properties
 (comtowers and labs included) wins; then the larger army value; then a draw.
+Each result keeps the game's first state and every step taken, and what the
+agents made of their decisions (``Note``), for ``games``' records.
 """
 
 from __future__ import annotations
@@ -29,7 +31,20 @@ class Decision:
     legal: np.ndarray  # legal ids, ascending
 
 
+@dataclass(slots=True)
+class Note:
+    """What an agent made of a decision: the value for the player deciding
+    (searched, if it searched) and the network's, and the simulations run."""
+
+    value: float
+    net_value: float
+    sims: int = 0
+
+
 class Agent(Protocol):
+    """An agent may also keep ``notes``, a ``Note`` per decision of its last
+    ``choose`` call, which ``play`` records."""
+
     def choose(self, decisions: list[Decision]) -> list[int]:
         """A legal id for each decision."""
         ...
@@ -66,6 +81,7 @@ class PolicyAgent:
         self.temperature = temperature
         self.ratings = ratings
         self.rng = np.random.default_rng(seed)
+        self.notes: list[Note] = []
 
     def choose(self, decisions: list[Decision]) -> list[int]:
         if not decisions:
@@ -76,7 +92,9 @@ class PolicyAgent:
             picks[i, : len(d.picks)] = d.picks
         n_picks = np.array([len(d.picks) for d in decisions], np.uint8)
         out = []
-        for sc in self.policy.score(states, picks, n_picks, ratings=self.ratings):
+        scored = self.policy.score(states, picks, n_picks, ratings=self.ratings)
+        self.notes = [Note(sc.value, sc.value) for sc in scored]
+        for sc in scored:
             if self.temperature <= 0:
                 out.append(int(sc.ids[np.argmax(sc.prior)]))
             else:
@@ -92,6 +110,9 @@ class GameResult:
     decided: str  # "game over" or "day limit"
     actions: int
     final: _core.GameState = field(repr=False)
+    start: _core.GameState = field(repr=False)
+    steps: list[int] = field(repr=False)  # every micro-step, forced ones included
+    notes: list[tuple[int, Note]] = field(repr=False)  # (index in steps, note) of the decisions noted
 
 
 def property_counts(md: _core.MapData, s: _core.GameState) -> list[int]:
@@ -134,6 +155,8 @@ def play(
     states = [s.copy() for s in starts]
     sels = [_core.Selection() for _ in states]
     picks: list[list[int]] = [[] for _ in states]
+    steps: list[list[int]] = [[] for _ in states]
+    notes: list[list[tuple[int, Note]]] = [[] for _ in states]
     actions = [0] * len(states)
     results: list[GameResult | None] = [None] * len(states)
     maps = {s.map_id: _core.find_map(s.map_id) for s in states}
@@ -155,6 +178,9 @@ def play(
                         decided="game over" if over else "day limit",
                         actions=actions[g],
                         final=s,
+                        start=starts[g].copy(),
+                        steps=steps[g],
+                        notes=notes[g],
                     )
                     live.discard(g)
                     break
@@ -163,14 +189,29 @@ def play(
                     pending[s.active].append(g)
                     asked[s.active].append(Decision(s, list(picks[g]), legal))
                     break
-                _take(s, sel, picks[g], int(legal[0]), actions, g)
+                _take(s, sel, picks[g], int(legal[0]), actions, g, steps[g])
         for player in (0, 1):
-            for g, step_id in zip(pending[player], agents[player].choose(asked[player]), strict=True):
-                _take(states[g], sels[g], picks[g], step_id, actions, g)
+            agent = agents[player]
+            chosen = agent.choose(asked[player])
+            noted = getattr(agent, "notes", None)
+            if noted is not None and len(noted) == len(chosen):
+                for g, note in zip(pending[player], noted, strict=True):
+                    notes[g].append((len(steps[g]), note))
+            for g, step_id in zip(pending[player], chosen, strict=True):
+                _take(states[g], sels[g], picks[g], step_id, actions, g, steps[g])
     return [r for r in results if r is not None]
 
 
-def _take(s: _core.GameState, sel: _core.Selection, picks: list[int], step_id: int, actions: list[int], g: int) -> None:
+def _take(
+    s: _core.GameState,
+    sel: _core.Selection,
+    picks: list[int],
+    step_id: int,
+    actions: list[int],
+    g: int,
+    steps: list[int],
+) -> None:
+    steps.append(step_id)
     completes = _core.step_action(s, sel, step_id) is not None
     st = _core.step(s, sel, step_id)
     if st not in (_core.OK, _core.TRAPPED):

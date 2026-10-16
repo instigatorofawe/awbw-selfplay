@@ -640,6 +640,16 @@ NB_MODULE(_core, m) {
           "Turns a unit of `unit_type` needs from factory `prop` (an index into props()) to\n"
           "each tile [height, width], on the starting terrain in clear weather without CO\n"
           "bonuses; 255 where it can't go.")
+      .def(
+          "terrain",
+          [](const awbw::MapData& md) {
+            int16_t* data;
+            auto a = new_array<int16_t>(
+                {static_cast<size_t>(md.height), static_cast<size_t>(md.width)}, data);
+            for (int i = 0; i < md.n_tiles; ++i) data[i] = static_cast<int16_t>(md.terrain_id[i]);
+            return a;
+          },
+          "AWBW terrain ids [height, width] at game start, as register_map took them.")
       .def("tile", &awbw::MapData::tile, "x"_a, "y"_a);
 
   m.def(
@@ -1291,7 +1301,41 @@ NB_MODULE(_core, m) {
               "a game that played on (resign_off): the player the rule would first have had "
               "resign, else -1")
       .def_ro("would_resign_day", &awbw::GameRecord::would_resign_day, "and the day, else -1")
-      .def_ro("final_state", &awbw::GameRecord::final_state);
+      .def_ro("final_state", &awbw::GameRecord::final_state)
+      .def_ro("start_state", &awbw::GameRecord::start_state,
+              "the first state, its luck seeded: taking `steps` from it gives final_state")
+      .def_prop_ro(
+          "steps", [](const awbw::GameRecord& r) { return array_of<uint16_t>(r.steps); },
+          nb::rv_policy::move, "every micro-step taken, forced ones included [n] uint16")
+      .def_prop_ro(
+          "searched",
+          [](const awbw::GameRecord& r) {
+            const size_t n = r.searched.size();
+            int32_t *step, *sims;
+            float *value, *net_value;
+            uint8_t *mover, *full;
+            nb::dict d;
+            d["step"] = new_array<int32_t>({n}, step);
+            d["value"] = new_array<float>({n}, value);
+            d["net_value"] = new_array<float>({n}, net_value);
+            d["sims"] = new_array<int32_t>({n}, sims);
+            d["mover"] = new_array<uint8_t>({n}, mover);
+            d["full"] = new_array<uint8_t>({n}, full);
+            for (size_t i = 0; i < n; ++i) {
+              const awbw::GameDecision& g = r.searched[i];
+              step[i] = g.step;
+              value[i] = g.value;
+              net_value[i] = g.net_value;
+              sims[i] = g.sims;
+              mover[i] = g.mover;
+              full[i] = g.full;
+            }
+            return d;
+          },
+          nb::rv_policy::move,
+          "each searched decision as arrays: step (its index in steps; len(steps) where the\n"
+          "mover resigned), value and net_value (the searched and the network's, from the\n"
+          "mover's side), sims (0: played unsearched, skip_prior), mover and full (a sample)");
 
   nb::class_<awbw::BatchedSearch>(
       m, "BatchedSearch",

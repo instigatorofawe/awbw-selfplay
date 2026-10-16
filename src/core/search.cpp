@@ -142,6 +142,9 @@ uint64_t BatchedSearch::add_game(const MapData& m, const GameState& s) {
   sl.actions = sl.decisions = sl.skipped = 0;
   rng_seed(sl.rng, cfg_.seed ^ (0xD1B54A32D192ED03ull * (sl.game_no + 1)));
   rng_seed(sl.game.rng, rng_next(sl.rng));  // games from one start draw their own luck
+  sl.start = sl.game;
+  sl.steps.clear();
+  sl.searched.clear();
   sl.can_resign = cfg_.resign_turns > 0 && !(uniform(sl.rng) < cfg_.resign_off);
   sl.turn = -1;
   sl.low[0] = sl.low[1] = 0;
@@ -164,6 +167,7 @@ void BatchedSearch::begin_decision(Slot& sl) {
     if (sl.ids.size() != 1) break;
     const bool completes = step_action(m, g, sl.sel, sl.ids[0], a);
     if (!applied(step(m, g, sl.sel, sl.ids[0]))) throw std::logic_error("a legal step was refused");
+    sl.steps.push_back(sl.ids[0]);
     sl.actions += completes;
   }
   if (sl.ids.empty()) return finish_game(sl, true);  // can't happen: no step only once it's over
@@ -524,7 +528,10 @@ void BatchedSearch::finish_game(Slot& sl, bool capped, int resigner) {
   rec.would_resign = sl.would_resign;
   rec.would_resign_day = sl.would_resign_day;
   rec.final_state = sl.game;
-  records_.push_back(rec);
+  rec.start_state = sl.start;
+  rec.steps = std::exchange(sl.steps, {});
+  rec.searched = std::exchange(sl.searched, {});
+  records_.push_back(std::move(rec));
   sl.mode = kFree;
   sl.nodes.clear();
 }
@@ -550,6 +557,9 @@ int BatchedSearch::collect() {
           smp.result = sl.result;
           samples_.push_back(std::move(smp));
         }
+        const SearchResult& r = sl.result;
+        sl.searched.push_back({static_cast<int32_t>(sl.steps.size()), r.value, r.net_value, r.sims,
+                               static_cast<uint8_t>(r.mover), sl.full});
         ++sl.decisions;
         if (resigns(sl)) {
           finish_game(sl, false, sl.result.mover);
@@ -560,6 +570,7 @@ int BatchedSearch::collect() {
         const bool completes = step_action(m, sl.game, sl.sel, sl.result.id, a);
         if (!applied(step(m, sl.game, sl.sel, sl.result.id)))
           throw std::logic_error("the searched step was refused");
+        sl.steps.push_back(static_cast<uint16_t>(sl.result.id));
         sl.actions += completes;
         begin_decision(sl);
         continue;

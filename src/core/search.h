@@ -117,7 +117,17 @@ struct SearchSample {
   SearchResult result;
 };
 
-// How a self-play game ended.
+// A searched decision of a self-play game, as its record keeps it.
+struct GameDecision {
+  int32_t step = 0;  // its place in GameRecord::steps (steps.size() if the mover resigned there)
+  float value = 0;   // the root's searched value, from the mover's side
+  float net_value = 0;
+  int32_t sims = 0;  // 0: a fast search that ended at the root (skip_prior)
+  uint8_t mover = 0;
+  bool full = false;  // a full search, kept as a sample
+};
+
+// How a self-play game ended, and how it went.
 struct GameRecord {
   uint64_t game = 0;
   int winner = kDraw;  // player index, or kDraw
@@ -132,6 +142,11 @@ struct GameRecord {
   int would_resign = -1;
   int would_resign_day = -1;
   GameState final_state;
+  // The first state, its luck seeded, and every micro-step taken, forced ones
+  // included: taking `steps` from start_state gives final_state.
+  GameState start_state;
+  std::vector<uint16_t> steps;
+  std::vector<GameDecision> searched;
 };
 
 // The search tree of one slot. Node 0 is the root.
@@ -244,6 +259,9 @@ class BatchedSearch {
     std::vector<uint32_t> path;  // root to the current leaf
     uint32_t leaf = 0;
     SearchResult result;
+    GameState start;  // a game's record (GameRecord)
+    std::vector<uint16_t> steps;
+    std::vector<GameDecision> searched;
     std::vector<uint16_t> ids;  // scratch
     std::vector<SeenOutcome> outs;
   };
