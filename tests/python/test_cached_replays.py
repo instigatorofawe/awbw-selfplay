@@ -231,7 +231,6 @@ def test_snapshots_export_as_awbw_writes_them(path):
 
 
 A = _core.ACTIONS
-EXPORTED = {A[k] for k in A if k != "Power"}
 # Dates, AWBW's timers, and messages naming its users can't match.
 LOG_UNCHECKED = {"nextTurnStart", "gameEndDate", "nextTimer", "message"}
 LOG_IDS = {"0", "units_id", "units_cargo1_units_id", "units_cargo2_units_id", "transportID", "global"}
@@ -322,6 +321,23 @@ def _mover_view(entry: dict, mover: str) -> dict:
     return move if entry["action"] == "Move" else {**entry, "Move": move}
 
 
+def _power_order(entry: dict, ids: dict[int, int]) -> dict:
+    """A Power with its unit lists in id order: AWBW lists the units by position
+    or by id, whichever it loaded them by."""
+    if entry["action"] != "Power":
+        return entry
+    out = dict(entry)
+    for key in ("unitReplace", "hiddenReplace"):
+        if key in entry:
+            out[key] = {
+                view: {"units": sorted(v["units"], key=lambda u: ids.get(u["units_id"], u["units_id"]))}
+                if isinstance(v.get("units"), list)
+                else v
+                for view, v in entry[key].items()
+            }
+    return out
+
+
 def _log_diffs(ours, theirs, where: str, ids: dict[int, int], key: str = "") -> list[str]:
     if key in LOG_IDS and isinstance(ours, int):
         ours = ids.get(ours, ours)
@@ -360,8 +376,6 @@ def test_actions_export_as_awbw_logs_them(path):
         log.dives = {u.id: u.sub_dive for u in turn.units if u.sub_dive in ("D", "R")}
         ids: dict[int, int] = {}  # engine id -> AWBW id of the units built this turn
         for theirs, before, after, action, status in _logged_actions(r, md, k):
-            if action[0] not in EXPORTED:
-                continue
             move = theirs[0] if theirs[0]["action"] == "Move" else theirs[0].get("Move")
             path_taken = None
             mover = str(meta.players[before.active])
@@ -369,18 +383,22 @@ def test_actions_export_as_awbw_logs_them(path):
                 paths = move["paths"]
                 path_taken = [(p["x"], p["y"]) for p in paths.get(mover) or paths["global"]]
                 status = _core.TRAPPED if move["trapped"] else _core.OK  # where the path taken stops
-            ours = log.entries(before, after, action, status, path_taken)
+            # Where the missiles landed: the engine aims most where AWBW did, not all.
+            missiles = [(int(c["x"]), int(c["y"])) for c in theirs[-1].get("missileCoords", [])]
+            ours = log.entries(before, after, action, status, path_taken, missiles or None)
             ours, theirs = [_mover_view(e, mover) for e in ours], [_mover_view(e, mover) for e in theirs]
             where = f"day {turn.day} {theirs[-1]['action']}"
             if f"{r.game.id} {where}" in LOG_ODDITIES:
                 continue
+            if "global" not in theirs[-1].get("unitReplace", {"global": None}):
+                continue  # a list for one player, null for the other (0.7% of Rachel's SCOPs, 0.5% of Urban Blights)
             if action[0] == A["Build"]:
                 ids[ours[0]["newUnit"]["global"]["units_id"]] = theirs[0]["newUnit"]["global"]["units_id"]
             if len(ours) != len(theirs):
                 diffs.append(f"{where}: {len(ours)} entries vs {len(theirs)}")
                 continue
             for o, t in zip(ours, theirs, strict=True):
-                diffs += _log_diffs(o, t, where, ids)
+                diffs += _log_diffs(_power_order(o, ids), _power_order(t, {}), where, ids)
     assert not diffs, diffs[:5]
 
 

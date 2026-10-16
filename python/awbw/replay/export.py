@@ -43,6 +43,14 @@ logs showed:
 * ``sub_dive`` is "D" for a unit that hid in its owner's last turn and "R"
   for one that surfaced, until the owner's next turn starts. A unit stopped by
   a hidden enemy is logged moving alone, spent.
+* A power logs what it changes as AWBW does for its CO: a movement and vision
+  bonus for all units ("global"), HP for all of a player's units
+  ("hpChange"), or unit by unit ("unitReplace"): new range or movement, Jess's
+  resupply, Lightning Strike's refresh, the HP missiles and Urban Blight
+  leave. A carried footsoldier is listed as its transport (base movement plus
+  the bonus) and other cargo not at all. A missile's area runs past the map's
+  left or right edge into the next row, and AWBW lists the units there
+  undamaged.
 
 Exported games get ids no real game has (1,000,000,000 and up), and players
 get user id -1, which the Replay Player doesn't look up on AWBW.
@@ -74,10 +82,32 @@ WEATHER_CODES = ("C", "R", "S")
 # export doesn't.
 PAYING = frozenset(["city", "base", "airport", "port", "hq"])  # properties that pay income
 BUILDING_KINDS = frozenset(["city", "base", "airport", "port", "hq", "lab", "comtower", "seam", "silo", "silo_empty"])
+URBAN = frozenset(["city", "base", "airport", "port", "hq", "lab", "comtower"])  # what Urban Blight hits
 SECOND_WEAPON = frozenset(["Tank", "Md.Tank", "Neotank", "Mega Tank", "Mech", "B-Copter", "Piperunner"])
 SYMBOLS = {"foot": "G", "vehicle": "G", "copter": "M", "plane": "M", "naval": "S"}
 RUBBLE = {113: 115, 114: 116}  # pipe seam -> its rubble
 MOVE_TYPES = "FBTWASLP"  # AWBW's movement types, in the order it lists costs
+WEATHER_NAMES = {"C": "Clear", "R": "Rain", "S": "Snow"}
+MISSILE_RADIUS = 2
+# Powers AWBW logs as a movement and vision bonus for all units ("global"):
+# (movement, vision) for the COP, then the SCOP.
+GLOBAL_BONUS = {
+    "Andy": ((0, 0), (1, 0)),
+    "Adder": ((1, 0), (2, 0)),
+    "Koal": ((1, 0), (2, 0)),
+    "Sonja": ((0, 1), (0, 1)),
+}
+# Powers AWBW logs as an HP change for all of a player's units ("hpChange"):
+# (shown HP the user's units gain, the enemy's lose) for the COP, then the SCOP.
+HP_CHANGE = {
+    "Andy": ((2, 0), (5, 0)),
+    "Hawke": ((1, 1), (2, 2)),
+    "Drake": ((0, 1), (0, 2)),
+    "Olaf": ((0, 0), (0, 2)),
+}
+POWER_WEATHER = {("Olaf", 1): "S", ("Olaf", 2): "S", ("Drake", 2): "R"}
+# The order of a unit's fields in a power's unit list.
+REPLACED = ("units_hit_points", "units_long_range", "units_movement_points", "units_ammo", "units_fuel", "units_moved")
 # What the opponent's view of a hidden unit's move has when it doesn't see where the unit stopped.
 HIDDEN_FIELDS = (
     "units_id",
@@ -459,10 +489,13 @@ class ActionLog:
         action: Action,
         status: int,
         path: Sequence[tuple[int, int]] | None = None,
+        missiles: Sequence[tuple[int, int]] | None = None,
     ) -> list[Json]:
         """The log entries of one action: most are one, an Unload after moving is
         the transport's Move and then the Unload. ``path``: the path the unit
-        moved along, if not the one the engine takes (``move_path``)."""
+        moved along, if not the one the engine takes (``move_path``); ``missiles``:
+        where a power's missiles landed, if not where the engine aims them
+        (``missile_targets``)."""
         kind, slot, to, target, arg = action
         self._path = path
         self._trapped = status == _core.TRAPPED
@@ -478,6 +511,8 @@ class ActionLog:
             if self._ended(after):
                 delete["eliminated"] = self._rout(after)
             return [{"action": "Delete", "Delete": delete}]
+        if kind == A["Power"]:
+            return [self._power(before, after, arg, missiles)]
         assert to is not None
         trapped = status == _core.TRAPPED  # stopped by a hidden enemy: AWBW logs the move alone
         move = self._move(before, after, slot, to, alone=kind == A["Wait"] or trapped, fires=kind == A["Fire"])
@@ -1033,6 +1068,161 @@ class ActionLog:
                 "nextTurnStart": _date(when),
             },
         }
+
+    def _power(
+        self,
+        before: _core.GameState,
+        after: _core.GameState,
+        level: int,
+        missiles: Sequence[tuple[int, int]] | None,
+    ) -> Json:
+        """A CO power: the meter it leaves, then what it changes, as AWBW logs it."""
+        r = rules.load()
+        me = int(before.active)
+        p = after.players[me]
+        co = r.cos[p.co]
+        name = co.name
+        out: Json = {
+            "action": "Power",
+            "playerID": self._pid(me),
+            "coName": name,
+            "coPower": POWER_ON[level],
+            "powerName": co.notes["scop" if level == 2 else "cop"].split(" -- ")[0],
+            "playersCOP": int(p.power),
+        }
+        if name in GLOBAL_BONUS:
+            move, vision = GLOBAL_BONUS[name][level - 1]
+            out["global"] = {"units_movement_points": move, "units_vision": vision}
+        gain, loss = HP_CHANGE.get(name, ((0, 0), (0, 0)))[level - 1]
+        if gain or loss:
+            fuel = 0.5 if name == "Drake" else 1  # Drake's powers halve the enemy's fuel
+            out["hpChange"] = {
+                "hpGain": {"players": [self._pid(me)], "hp": gain, "units_fuel": 1} if gain else "",
+                "hpLoss": {"players": [self._pid(1 - me)], "hp": -loss, "units_fuel": fuel} if loss else "",
+            }
+        if missiles is None:
+            missiles = [c for c in _core.missile_targets(before, level) if c is not None]
+        centres = list(missiles)
+        units = self._power_units(before, after, name, level, centres)
+        if units:
+            shown = [u for u, hidden in units if not hidden]
+            out["unitReplace"] = {"global": {"units": shown}}
+            if any(hidden for _, hidden in units) or self._any_hidden(after):
+                listed = [u for u, hidden in units if hidden] or None
+                out["hiddenReplace"] = {str(self._pid(q)): {"units": listed} for q in self._by_pid()}
+        if name == "Sasha" and level == 1:  # Market Crash drains the enemy's meter
+            foe = 1 - me
+            out["playerReplace"] = {
+                "global": {str(self._pid(foe)): {"players_co_power": int(after.players[foe].power)}}
+            }
+        # No cached replay has Colin's or Sensei's powers: these are what the Replay Player reads.
+        if name == "Colin" and level == 1:  # Gold Rush
+            out["playerReplace"] = {"global": {str(self._pid(me)): {"players_funds": int(p.funds)}}}
+        if name == "Sensei":  # footsoldiers on the user's empty cities
+            old = {row[0] for row in before.unit_rows()}
+            new = [row for row in after.unit_rows() if row[0] not in old]
+            out["unitAdd"] = {
+                "global": {
+                    "playerId": self._pid(me),
+                    "unitName": "Mech" if level == 2 else "Infantry",
+                    "units": [{"units_id": row[0], "units_x": row[3], "units_y": row[4]} for row in new],
+                }
+            }
+        if centres:
+            out["missileCoords"] = [{"x": str(x), "y": str(y)} for x, y in centres]
+        weather = POWER_WEATHER.get((name, level))
+        if weather:
+            out["weather"] = {"weatherCode": weather, "weatherName": WEATHER_NAMES[weather]}
+        return out
+
+    def _power_units(
+        self,
+        before: _core.GameState,
+        after: _core.GameState,
+        name: str,
+        level: int,
+        centres: Sequence[tuple[int, int]],
+    ) -> list[tuple[Json, bool]]:
+        """The units a power changes one by one, each with whether it is hidden:
+        the units its missiles hit (with their HP), the enemy's on urban terrain
+        for Urban Blight, and the user's whose range or movement changes (unless
+        logged for all units), all of them resupplied for Jess and spent
+        non-footsoldiers refreshed for Lightning Strike."""
+        me = int(before.active)
+        r = rules.load()
+        rows = sorted(after.unit_rows(), key=lambda u: (u[3], u[4], bool(u[8] & _core.UNIT_CARRIED), u[0]))
+        was = {row[0]: row for row in before.unit_rows()}
+        changes: dict[int, Json] = {}
+        top = {(row[3], row[4]): row for row in rows if not row[8] & _core.UNIT_CARRIED}  # by tile, uncarried
+        if centres:  # by missile, each unit once with the HP the last left it
+            for xy in (t for c in centres for t in self._missile_tiles(c)):
+                if xy in top:
+                    row = top[xy]
+                    f = changes.setdefault(row[0], {"units_hit_points": shown_hp(row[5])})
+                    if name == "Von Bolt":  # stunned, or as it was for a unit off the edge
+                        f["units_moved"] = -1 if row[8] & _core.UNIT_STUNNED else int(bool(row[8] & _core.UNIT_MOVED))
+        for row in rows:  # a transport before its cargo
+            uid, typ, owner, x, y = row[:5]
+            if uid not in was:
+                continue  # Sensei's, logged as added
+            f: Json = {}
+            if name == "Kindle" and level == 1:
+                if owner != me and not row[8] & _core.UNIT_CARRIED and self._kinds[y][x] in URBAN:
+                    f["units_hit_points"] = shown_hp(row[5])
+            elif owner == me:
+                if self._long_range(after, row) != self._long_range(before, was[uid]):
+                    f["units_long_range"] = self._long_range(after, row)
+                slot = after.find_unit(uid)
+                moves = _core.move_points(after, slot)
+                bonus = moves - _core.move_points(before, before.find_unit(uid))
+                if name not in GLOBAL_BONUS and bonus:
+                    f["units_movement_points"] = moves
+                if name == "Jess":
+                    f["units_ammo"], f["units_fuel"] = row[7], row[6]
+                if name == "Eagle" and level == 2 and r.units[typ].cls != "foot":
+                    f["units_moved"] = 0
+                if f and row[8] & _core.UNIT_CARRIED:
+                    # AWBW lists the unit on a footsoldier's tile instead: its transport,
+                    # unless listed already, with its own base movement and the cargo's
+                    # bonus. Other cargo it leaves out.
+                    carrier = top[(x, y)]
+                    if carrier[0] in changes or r.units[typ].cls != "foot":
+                        continue
+                    uid, f = carrier[0], {}
+                    if bonus and name not in GLOBAL_BONUS:
+                        f["units_movement_points"] = r.units[carrier[1]].move + bonus
+            if f:
+                changes.setdefault(uid, {}).update(f)
+        hidden = {row[0] for row in rows if row[8] & _core.UNIT_HIDDEN}
+        return [
+            ({"units_id": uid} | {k: f[k] for k in REPLACED if k in f}, uid in hidden) for uid, f in changes.items()
+        ]
+
+    def _missile_tiles(self, centre: tuple[int, int]) -> list[tuple[int, int]]:
+        """The tiles AWBW lists a missile reaching. Past the map's left or right
+        edge they run on into the row before or after, as a row-by-row tile index
+        does: AWBW lists the units there as they are, undamaged (4 of 465 missile
+        powers)."""
+        w, h = self.md.width, self.md.height
+        cx, cy = centre
+        out = []
+        for dy in range(-MISSILE_RADIUS, MISSILE_RADIUS + 1):
+            reach = MISSILE_RADIUS - abs(dy)
+            for dx in range(-reach, reach + 1):
+                i = (cy + dy) * w + cx + dx
+                if 0 <= i < w * h:
+                    out.append((i % w, i // w))
+        return out
+
+    def _long_range(self, s: _core.GameState, row: tuple) -> int:
+        t = rules.load().units[row[1]]
+        if not t.indirect:
+            return 0
+        p = s.players[row[2]]
+        return t.max_range + rules.load().cos[p.co].state(p.power_on).range[row[1]]
+
+    def _any_hidden(self, s: _core.GameState) -> bool:
+        return any(row[8] & _core.UNIT_HIDDEN for row in s.unit_rows())
 
     def _resign(self, before: _core.GameState) -> Json:
         mover = int(before.active)

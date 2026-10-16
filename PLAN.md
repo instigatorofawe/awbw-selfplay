@@ -1652,16 +1652,19 @@ upload replays, so the viewer is the community
     spent (the planner `apply` uses).
   - **Missiles** (Von Bolt, Rachel, Sturm): `missileCoords` are the
     centres the engine aimed at. Aiming is deterministic, so
-    `missile_targets` on the state before the power returns them.
+    `missile_targets` on the state before the power returns them. The check
+    passes a real replay's logged centres (`entries(missiles=...)`): the
+    engine aims about 96% of them where AWBW did.
   - **Fights:** displayed HP and ammo after, power meters after
     (`copValues`) and Sasha's `gainedFunds`, all from the state after.
   - **End's `updatedInfo`:** the next player, their funds, weather, units
     repaired and supplied, and the day, from the states before and after
     EndTurn.
   - **Powers:** AWBW's payload for each CO, from the states before and
-    after in the shapes AWBW uses for that CO: `unitReplace` (changed
-    units), `unitAdd`, `playerReplace` (the opponent's meter), `hpChange`,
-    `missileCoords` and `weather`.
+    after in the shapes AWBW uses for that CO: `global` (a bonus for all
+    units), `hpChange`, `unitReplace` (changed units), `hiddenReplace`,
+    `playerReplace` (a meter or funds), `unitAdd`, `missileCoords` and
+    `weather`.
   - **Game end:** a `GameOver` inside the action that ended the game (Capt
     for an HQ or the capture limit, Fire for a rout, Resign). A game stopped
     at the day limit has none, like an unfinished AWBW game.
@@ -1732,6 +1735,40 @@ upload replays, so the viewer is the community
     unit twice.
   - Sasha's `gainedFunds` gives 0, not null, for an opponent whose War Bonds
     is on but gains nothing.
+- **Powers, done** (step 5's second half). The check covers every power in
+  the cached sample (620 in the 200 newest, about 3,000 in the 1,000 before
+  them), and a power-only run over the 4,000 newest games matches 9,728 of
+  9,729. Unit lists are compared in id order: AWBW lists units by position
+  or by id, as it loaded them. Exported games where 20 COs use all their
+  powers step exactly (`test_exported_powers_step_as_the_game`). No cached
+  replay has Colin, Hachi, Sensei, Kanbei, Nell, Flak or Jugger use a power
+  (none in 216k games), so Colin's funds and Sensei's new units follow the
+  Replay Player's parser, with a synthetic test. What the logs showed:
+  - Every power logs the meter it leaves (`playersCOP`) and its name.
+    Andy, Adder, Koal and Sonja log a bonus for all units (`global`:
+    movement, vision), Andy's COP as 0 and 0. Andy, Hawke, Drake and Olaf's
+    SCOP log `hpChange` (shown HP gained or lost by all of a player's
+    units; Drake's halves fuel). Olaf's powers and Typhoon log the weather.
+    Market Crash logs the opponent's meter after.
+  - The rest go unit by unit: the user's units whose range or movement the
+    power changes, with the new value (Max, Sami, Jake, Jess, Grit), all of
+    Jess's units resupplied, Lightning Strike's non-footsoldiers refreshed,
+    the HP Urban Blight leaves the enemy's units on urban terrain, and the
+    units missiles hit (each once, however many missiles hit it; Ex Machina
+    adds `units_moved` -1). A carried footsoldier is listed as its transport,
+    with the transport's base movement plus the bonus (Sami); other cargo,
+    and a transport listed already, aren't.
+  - A missile's area past the map's left or right edge runs into the next or
+    previous row, as a row-by-row tile index does: AWBW lists the units
+    there as they are, undamaged (4 of 465 missile powers).
+  - With any hidden unit on the map, a power that lists units adds
+    `hiddenReplace`, per player: the hidden units it changes, or null.
+  - AWBW one-offs the check skips: a list for one player and null for the
+    other, often with 0 HP (0.7% of Rachel's SCOPs, 0.5% of Urban Blights).
+    A Lander carrying a Tank is left out under Max Blast but listed by id
+    alone under Block Rock (one of each; the export leaves it out).
+  - The step check can't rebuild Colin's Power of Money: a snapshot doesn't
+    hold its attack bonus.
 - **Validation:**
   1. **Serializer:** `phpser.dumps(loads(x)) == x` byte for byte on real
      snapshot and log files (floats as `d:10;` and `d:9.5;`, strings
@@ -1763,7 +1800,7 @@ upload replays, so the viewer is the community
   4. The common actions (Move, Fire, Capt, Build, End, Load, Unload, Join,
      Resign) through the round trip (done, with Delete and the game-ending
      entries).
-  5. The rarer actions (done), then powers CO by CO.
+  5. The rarer actions, then powers CO by CO (done).
   6. The command, tests, and the check in the Replay Player.
 
 ### Local play against the network (planned, `awbw play`)
