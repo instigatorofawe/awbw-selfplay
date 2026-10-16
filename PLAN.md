@@ -1572,7 +1572,7 @@ the search always uses the network being trained, the same module.
   The score gives an Elo difference with its standard error, appended to
   `RUN/ladder.jsonl`; `--watch` keeps rating new checkpoints.
 
-### Replay export (planned, `awbw export-replay`)
+### Replay export (done, `awbw export-replay`)
 
 A recorded game (`games.py`) as an AWBW replay zip. The AWBW site can't
 upload replays, so the viewer is the community
@@ -1786,7 +1786,12 @@ upload replays, so the viewer is the community
      self-play games in the tests.
   4. **By hand:** open a few exports in the Replay Player and look for
      parse errors in its log, especially powers, a resignation and a
-     day-limit game.
+     day-limit game. Done on 16 self-play and arena games on real maps
+     (v0.13.1): resignations, games stopped at the day cap, and both
+     powers of Rachel, Von Bolt, Sturm, Kindle, Sami, Jess, Olaf and Drake
+     (missiles, stuns, meteor, weather) load and play. AWBW's own day-limit
+     GameOver has no sample, since no start uses the setting; a test
+     covers it.
 - **Command:** `awbw export-replay FILE [--game N | --all] [--out PATH]`
   writes `<stem>-N.zip` (done, `replay_file` and `game_meta`).
   - The game id is 1,000,000,000 plus a hash of the record's start and
@@ -1819,7 +1824,7 @@ upload replays, so the viewer is the community
      Resign) through the round trip (done, with Delete and the game-ending
      entries).
   5. The rarer actions, then powers CO by CO (done).
-  6. The command, tests (done), and the check in the Replay Player.
+  6. The command, tests, and the check in the Replay Player (done).
 
 ### Local play against the network (planned, `awbw play`)
 
