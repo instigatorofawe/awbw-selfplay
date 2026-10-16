@@ -335,9 +335,9 @@ Status load(const MapData& m, GameState& s, const Action& a, const MovePlan& mp)
   const int ti = s.unit_at[mp.dest()];
   if (ti == kNoUnit || ti == a.unit) return kErrCannotLoad;
   const Unit& t = s.units[ti];
-  // A transport carrying a unit can't board another (no logged load does).
+  // A loaded transport can board another too (AWBW: a loaded APC onto a Lander).
   if (t.owner != u.owner || !((kUnits[t.type].carry_mask >> u.type) & 1) ||
-      cargo_count(t) >= kUnits[t.type].carry_slots || cargo_count(u) > 0)
+      cargo_count(t) >= kUnits[t.type].carry_slots)
     return kErrCannotLoad;
   execute_move(m, s, a.unit, mp, false);
   load_unit(s, a.unit, ti);

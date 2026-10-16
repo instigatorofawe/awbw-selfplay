@@ -278,7 +278,8 @@ TEST(Legal, AMovedTransportCanOnlyUnloadWhereItStands) {
   expect_steps_match_actions(m, s);
 }
 
-TEST(Legal, ALoadedTransportCannotBoardAnother) {
+// AWBW lets a loaded APC board a Lander (52 games of the archive).
+TEST(Legal, ALoadedTransportCanBoardAnother) {
   const MapData m = make_map({"~~~~", "_..."});
   GameState s = make_state(m);
   const int lander = put(s, m, kLander, 0, 0, 1);
@@ -286,9 +287,11 @@ TEST(Legal, ALoadedTransportCannotBoardAnother) {
   const int inf = put(s, m, kInfantry, 0, 2, 1);
   put(s, m, kInfantry, 1, 3, 1);
   ASSERT_EQ(apply(m, s, make(kActLoad, inf, m.tile(1, 1))), kOk);
-  EXPECT_EQ(apply(m, s, make(kActLoad, apc, m.tile(0, 1))), kErrCannotLoad);
   expect_matches_apply(m, s);
-  (void)lander;
+  ASSERT_EQ(apply(m, s, make(kActLoad, apc, m.tile(0, 1))), kOk);
+  EXPECT_EQ(s.units[lander].cargo[0], apc);
+  EXPECT_EQ(s.units[inf].tile, m.tile(0, 1));
+  EXPECT_EQ(check_state(m, s), "");
 }
 
 TEST(Legal, MovingIntoAnUnseenEnemyIsLegalAndTraps) {

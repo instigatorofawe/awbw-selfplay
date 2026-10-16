@@ -297,7 +297,10 @@ tile by tile:
     - Cargo comes off only onto terrain it could move on, from a transport
       standing on such terrain, so a Lander or Black Boat unloads from a
       shoal or a port, never open sea or reef.
-    - A transport carrying a unit can't board another.
+    - A loaded transport may board another, its cargo riding along: an
+      APC onto a Lander (57 logged loads in 52 of the 216,598 cached
+      replays), a T-Copter onto a Cruiser (2) or a Carrier. A loaded
+      transport can't join another (none logged).
   - **Delete:** only a unit that hasn't moved this turn.
   - These three hold for every logged action in the 38,936 cached replays
     (`check-turns`).

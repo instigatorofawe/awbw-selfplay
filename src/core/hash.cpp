@@ -60,6 +60,18 @@ uint64_t unit_hash(const GameState& s, int slot, uint64_t place, bool hidden_hp,
   return absorb(h, rest, hidden);
 }
 
+// `slot`'s cargo at `place` + its cargo slot, each followed by its own cargo a
+// level deeper (AWBW lets a loaded APC board a Lander).
+uint64_t cargo_hash(const GameState& s, int slot, const bool* hides, uint64_t place, uint64_t h) {
+  for (int k = 0; k < 2; ++k) {
+    const int c = s.units[slot].cargo[k];
+    if (c == kNoUnit) continue;
+    h = unit_hash(s, c, place + k, hides[s.units[c].owner], h);
+    h = cargo_hash(s, c, hides, place + 2, h);
+  }
+  return h;
+}
+
 }  // namespace
 
 uint64_t state_hash(const GameState& s) {
@@ -70,12 +82,7 @@ uint64_t state_hash(const GameState& s) {
   for (int i = 0; i < kMaxUnits; ++i) {
     const Unit& u = s.units[i];
     if (!u.alive() || u.has(kCarried)) continue;
-    uint64_t h = unit_hash(s, i, u.tile, hides[u.owner], kP3);
-    for (int k = 0; k < 2; ++k) {
-      const int c = u.cargo[k];
-      if (c != kNoUnit) h = unit_hash(s, c, kCargo + k, hides[s.units[c].owner], h);
-    }
-    units += h;
+    units += cargo_hash(s, i, hides, kCargo, unit_hash(s, i, u.tile, hides[u.owner], kP3));
   }
 
   const Settings& st = s.settings;

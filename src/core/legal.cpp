@@ -13,9 +13,10 @@ namespace {
 bool is_indirect(int type) { return kUnits[type].max_range > 1; }
 int cargo_count(const Unit& t) { return (t.cargo[0] != kNoUnit) + (t.cargo[1] != kNoUnit); }
 
+// A loaded transport can board another too (AWBW: a loaded APC onto a Lander).
 bool can_load(const Unit& u, const Unit& t) {
   return t.owner == u.owner && ((kUnits[t.type].carry_mask >> u.type) & 1) &&
-         cargo_count(t) < kUnits[t.type].carry_slots && cargo_count(u) == 0;
+         cargo_count(t) < kUnits[t.type].carry_slots;
 }
 
 bool can_join(const Unit& u, const Unit& t) {
