@@ -1565,15 +1565,112 @@ the search always uses the network being trained, the same module.
     both networks put P1 near −1 from then on. P1 won on day 18 with an
     infantry capture of the HQ that neither network saw coming, even
     while the capture was under way.
-  - **Later:** export to AWBW's replay format, so AWBW's own and the
-    community's replay viewers open the games. The record has everything
-    that needs: the map id, the start and every action, with paths the
-    engine chooses as it does now.
+  - Next: export to AWBW's replay format (below).
 - **Ladder** (`awbw ladder RUN --baseline PATH`): each checkpoint plays the
   baseline from the first 100 validation starts, each played twice with
   seats swapped. It plays the priors, or with `--sims` both sides search.
   The score gives an Elo difference with its standard error, appended to
   `RUN/ladder.jsonl`; `--watch` keeps rating new checkpoints.
+
+### Replay export (planned, `awbw export-replay`)
+
+A recorded game (`games.py`) as an AWBW replay zip. The AWBW site can't
+upload replays, so the viewer is the community
+[AWBW Replay Player](https://github.com/DeamonHunter/AWBW-Replay-Player)
+(v0.13.1, with a macOS app), which imports local zips. Our own
+`load_replay` and step_check must accept the export too.
+
+- **What the Replay Player needs** (from `AWBWJsonReplayParser.cs` and
+  `ReplayManager.cs`):
+  - A zip of two gzipped entries, snapshots `<id>` and the log `a<id>`,
+    told apart by content.
+  - Its snapshot parser is hand-written and strict: an unknown field
+    throws, and so does a game, player or building field that changes
+    between turns where it expects a constant. Snapshots therefore copy
+    AWBW's field set and order exactly. In the newest 300 replays that is
+    `awbwGame` 36 fields, `awbwPlayer` 30, `awbwBuilding` 8 and `awbwUnit`
+    25, then `timers_initial`, `timers_increment` and `timers_max_turn`.
+  - It files imported replays by game id, so exported ids must not collide
+    with real games (about 1.75M now): use 1,000,000,000 and up.
+  - It looks up each player's username on AWBW by `users_id`, except −1.
+    Exported players get −1 (they show as an unknown user), and the game's
+    name says who played, such as "self-play 120k: tf128 (Hawke) vs tf128
+    (Grit)".
+  - It downloads the map from AWBW by `maps_id`. Our maps are AWBW's, so
+    this needs nothing; a map edited on AWBW since we cached it would show
+    the new terrain.
+- **Snapshots**, one per turn start: the record's start, then the state
+  after each EndTurn (AWBW's snapshot already has the turn's income and
+  repairs).
+  - The inverse of `state_from_turn`. Players: CO, country, funds, power
+    meter (already in AWBW's units), power costs, power on, eliminated.
+    Buildings: terrain id from kind and owner's country, capture points.
+    Units: type, owner, tile, internal HP with one decimal, fuel, ammo,
+    moved/capture/fired, dive, cargo and carried.
+  - Per-type unit constants (movement points, vision, fuel per turn,
+    ranges, second weapon, symbol, cost, movement type) come from a table
+    learned from recent replays, checked constant per unit name.
+  - Units keep the engine's ids. Building, player and game ids are
+    synthetic and stable. Dates are synthetic (a minute a turn from the
+    record's time) and timers are AWBW's defaults.
+- **Action log**, a line per turn: `p:<pid>;d:<day>;a:` and the PHP array
+  `[pid, day, [json, ...]]` (the middle entry is the day in all 17,412
+  lines checked).
+  - Each action `games.replay` yields becomes AWBW's JSON, built from the
+    states before and after it: Move (path, dist, trapped, the unit after),
+    Fire, Capt, Build, Load, Unload, Join, Supply, Repair, Hide, Unhide,
+    Delete, AttackSeam, Power, End and Resign. Explode and Launch appear in
+    none of the 6,000 newest replays (Black Bomb is banned, silos are rare),
+    so their shapes come from older ones.
+  - No fog, so every view is "global", except a hidden Sub or Stealth:
+    AWBW logs it per viewer even without fog, with the opponent's copy
+    empty. The export does the same.
+  - **Paths:** AWBW logs the path taken. The engine moves along the
+    cheapest path its owner can see, and fuel follows it, so the export
+    needs a binding that returns that path (`movegen` keeps `prev`).
+  - **Missiles** (Von Bolt, Rachel, Sturm): `missileCoords` needs the
+    centres the engine aimed at, so a binding must return them (`step`
+    already takes forced ones).
+  - **Fights:** displayed HP and ammo after, power meters after
+    (`copValues`) and Sasha's `gainedFunds`, all from the state after.
+  - **End's `updatedInfo`:** the next player, their funds, weather, units
+    repaired and supplied, and the day, from the states before and after
+    EndTurn.
+  - **Powers:** AWBW's payload for each CO, from the states before and
+    after in the shapes AWBW uses for that CO: `unitReplace` (changed
+    units), `unitAdd`, `playerReplace` (the opponent's meter), `hpChange`,
+    `missileCoords` and `weather`.
+  - **Game end:** a `GameOver` inside the action that ended the game (Capt
+    for an HQ or the capture limit, Fire for a rout, Resign). A game stopped
+    at the day limit has none, like an unfinished AWBW game.
+- **Validation:**
+  1. **Serializer:** `phpser.dumps(loads(x)) == x` byte for byte on real
+     snapshot and log files (floats as `d:10;` and `d:9.5;`, strings
+     counted in bytes, lists against dicts).
+  2. **Real-replay round trip** (the main test): for recent std replays,
+     take each turn step_check matches. Rebuild every snapshot with
+     `state_from_turn`, and every action's JSON from `step_turn`'s trace
+     (the state before each action, and the next snapshot after End). Diff
+     them against the originals once what can't match is normalized
+     (dates, timers, row ids, users), and count mismatches by field and
+     action kind. The target is none on the fields we model. This tests
+     the exporter against AWBW's own output, not against itself.
+  3. **Exported games:** export, then `load_replay` and step_check match
+     every turn and end at the record's final hash, for arena and
+     self-play games in the tests.
+  4. **By hand:** open a few exports in the Replay Player and look for
+     parse errors in its log, especially powers, a resignation and a
+     day-limit game.
+- **Command:** `awbw export-replay FILE [--game N | --all] [--out PATH]`
+  writes `<stem>-N.zip`.
+- **Order:**
+  1. `phpser.dumps` and the byte round trip.
+  2. Snapshots, the unit-constant table, and the round trip on snapshots.
+  3. The path and missile bindings.
+  4. The common actions (Move, Fire, Capt, Build, End, Load, Unload, Join,
+     Resign) through the round trip.
+  5. The rarer actions, then powers CO by CO.
+  6. The command, tests, and the check in the Replay Player.
 
 ## 9. Bindings (nanobind)
 
