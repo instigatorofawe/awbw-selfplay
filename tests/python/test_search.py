@@ -86,7 +86,7 @@ def test_leaves_are_encoded_as_the_policy_reads_them(md):
 
 DEVICES = [
     "cpu",
-    # GitHub's macOS runners report MPS but are virtual machines that can't run it
+    # GitHub's macOS runners report MPS, but their virtual GPU's scores differ from the CPU's (logits by up to 0.57)
     pytest.param(
         "mps", marks=pytest.mark.skipif(not torch.backends.mps.is_available() or "CI" in os.environ, reason="no MPS")
     ),
