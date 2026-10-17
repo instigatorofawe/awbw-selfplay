@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import numpy as np
 
 from awbw import _core, engine, games, rules
@@ -8,10 +11,13 @@ from awbw.nn.train_selfplay import Games, cycle
 from awbw.replay import load_replay
 from awbw.replay.export import (
     FIRST_GAME_ID,
+    NO_USER,
     ActionLog,
     GameMeta,
     action_lines,
     game_meta,
+    made_up_user,
+    player_storage,
     replay_file,
     snapshots,
 )
@@ -286,3 +292,42 @@ def test_export_replay_writes_a_zip_per_game(md, tmp_path, capsys):  # noqa: F81
     assert main(["export-replay", str(record), "--game", "0", "--out", str(tmp_path / "first.zip")]) == 0
     assert (tmp_path / "first.zip").read_bytes() == (out / "games-0.zip").read_bytes()
     assert "games-0.zip: game 1" in capsys.readouterr().out
+
+
+def test_export_replay_names_the_players(md, tmp_path, capsys):  # noqa: F811
+    """An AWBW user goes in by their user id, which the Replay Player looks up;
+    anyone else by an id made up from their name, which goes into the Player's
+    list of usernames."""
+    record = tmp_path / "games.jsonl"
+    games.append(record, _arena_logs(md, 1))
+    data = tmp_path / "player"
+    zip_ = tmp_path / "named.zip"
+    args = ["export-replay", str(record), "--out", str(zip_), "--player-data", str(data)]
+    assert main([*args, "--players", "Absox=361968", "tf128-s1"]) == 0
+    bot = made_up_user("tf128-s1")
+    assert bot < -1 and made_up_user("tf128-s1") == bot != made_up_user("tf128-s2")
+    assert json.loads((data / "UsernameStorage.json").read_text()) == {str(bot): "tf128-s1"}
+    r = load_replay(zip_.read_bytes())
+    assert r.game.name == "Absox (Andy) vs tf128-s1 (Max)"
+    assert [p.users_id for p in r.turns[0].players] == [361968, bot]
+    assert not _bad_turns(r, md)
+    (data / "UsernameStorage.json").write_text(json.dumps({"7": "someone"}))
+    assert main([*args, "--players", "-", "tf128-s1"]) == 0  # adds to the list, keeps the record's label
+    assert json.loads((data / "UsernameStorage.json").read_text()) == {"7": "someone", str(bot): "tf128-s1"}
+    r = load_replay(zip_.read_bytes())
+    assert r.game.name == "search (Andy) vs tf128-s1 (Max)"
+    assert [p.users_id for p in r.turns[0].players] == [NO_USER, bot]
+    assert main([*args, "--players", "Absox=x", "-"]) == 1
+    assert "NAME=ID" in capsys.readouterr().out
+
+
+def test_the_replay_players_data_is_where_its_storage_ini_says(tmp_path, monkeypatch):
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    data = tmp_path / "AWBWReplayPlayer"
+    assert player_storage() == data / "ReplayData" / "Replays"
+    data.mkdir()
+    (data / "storage.ini").write_text("FullPath = \n")  # as it writes it by default
+    assert player_storage() == data / "ReplayData" / "Replays"
+    (data / "storage.ini").write_text("FullPath = /elsewhere/awbw data\n")
+    assert player_storage() == Path("/elsewhere/awbw data/ReplayData/Replays")

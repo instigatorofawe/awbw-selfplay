@@ -113,6 +113,11 @@ and attack ranges, paths, damage previews and any unit's range
 (right-click), and allows undo. Finished games go to
 `cache/games/local.jsonl`, for `view-game` and `export-replay`.
 
+`export-replay --players NAME=ID NAME` names the players, player 1 first:
+an AWBW user by their user id (the Replay Player shows their AWBW
+username), anyone else by name alone (added to the Replay Player's list of
+usernames, so close it first), `-` for the record's label.
+
 The art is Nintendo's, so none is in the repo. With a copy of the AWBW
 Replay Player's resources in `cache/sprites/` (its `Textures/` and `Json/`
 folders, extracted from `AWBWApp.Resources.dll`), the play page and the

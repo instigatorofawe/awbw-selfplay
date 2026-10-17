@@ -347,6 +347,19 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="the zip to write, or with --all a directory (default: <stem>-N.zip next to the record)",
     )
+    er.add_argument(
+        "--players",
+        nargs=2,
+        metavar=("P1", "P2"),
+        help="the players' names, player 1's (who moved first) then player 2's: NAME=ID for an AWBW user "
+        "(the Replay Player shows their AWBW username), NAME for anyone else (an id made up from the name, "
+        "added to the Replay Player's usernames), - for the record's label",
+    )
+    er.add_argument(
+        "--player-data",
+        type=Path,
+        help="the Replay Player's folder of replays and usernames (default: where it keeps them on this system)",
+    )
 
     args = p.parse_args(argv)
     http = Http(min_interval=args.rate)
@@ -1056,7 +1069,27 @@ def _export_replay(args, http: Http) -> int:
     import json
 
     from . import games
-    from .replay.export import game_meta, replay_file
+    from .replay.export import add_usernames, game_meta, made_up_user, player_running, player_storage, replay_file
+
+    users: list[tuple[str, int] | None] = [None, None]
+    for i, text in enumerate(args.players or ()):
+        name, _, uid = text.rpartition("=") if "=" in text else (text, "", "")
+        if uid and not uid.isdigit():
+            print(f"{text!r}: give a player as NAME or NAME=ID, an AWBW user id")
+            return 1
+        if name != "-":
+            users[i] = (name, int(uid) if uid else made_up_user(name))
+    made_up = {u[1]: u[0] for u in users if u and u[1] < -1}
+    if made_up:
+        data = args.player_data or player_storage()
+        if not args.player_data and player_running():
+            print("close the AWBW Replay Player first: it rewrites its usernames from memory")
+            return 1
+        if data.exists() or args.player_data:
+            added = add_usernames(data, made_up)
+            print(f"{data / 'UsernameStorage.json'}: {', '.join(made_up[u] for u in added) or 'nothing'} added")
+        else:
+            print(f"no AWBW Replay Player data at {data}: {', '.join(made_up.values())} will show by id")
 
     with args.record.open() as f:
         lines = [line for line in f if line.strip()]
@@ -1076,7 +1109,7 @@ def _export_replay(args, http: Http) -> int:
         folder.mkdir(parents=True, exist_ok=True)
     for n in picked:
         log = games.from_json(json.loads(lines[n]))
-        meta = game_meta(log)
+        meta = game_meta(log, users=users)
         out = args.out if args.out and not args.all else folder / f"{args.record.stem}-{n}.zip"
         out.write_bytes(replay_file(log, meta))
         print(f"{out}: game {meta.id}, {meta.name}, day {log.days} ({log.decided})")

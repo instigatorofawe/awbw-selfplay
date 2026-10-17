@@ -1596,6 +1596,11 @@ upload replays, so the viewer is the community
     Exported players get −1 (they show as an unknown user), and the game's
     name says who played, such as "self-play 120k: tf128 (Hawke) vs tf128
     (Grit)".
+  - It first looks in its own list of usernames by id
+    (`ReplayData/Replays/UsernameStorage.json`, read at start and rewritten
+    from memory). `export-replay --players` (done) gives an AWBW user their
+    id and anyone else a negative id made up from their name, added to that
+    list: "Absox (Sami) vs tf128-s1 (Max)".
   - It downloads the map from AWBW by `maps_id`. Our maps are AWBW's, so
     this needs nothing; a map edited on AWBW since we cached it would show
     the new terrain.

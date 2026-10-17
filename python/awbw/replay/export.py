@@ -53,19 +53,29 @@ logs showed:
   undamaged.
 
 Exported games get ids no real game has (1,000,000,000 and up, from a hash
-of the record, so a game exported again keeps its id), and players get user
-id -1, which the Replay Player doesn't look up on AWBW. A game AWBW's day limit
-decides logs a GameOver at its last End, and no snapshot follows.
+of the record, so a game exported again keeps its id). The Replay Player
+shows a player by looking up their user id: on AWBW, unless its own list of
+usernames (``add_usernames``) has it. Players get user id -1 by default, which
+it looks up nowhere ("[Unknown Username:-1]"); an AWBW user can be given
+their id, and anyone else an id made up from their name (``made_up_user``)
+added to that list. A game AWBW's day limit decides logs a GameOver at its
+last End, and no snapshot follows.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import re
-from collections.abc import Sequence
+import subprocess
+import sys
+import zlib
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from functools import cache
+from pathlib import Path
 from typing import Any
 
 from .. import _core, rules
@@ -459,18 +469,72 @@ def game_id(log: GameLog) -> int:
     return FIRST_GAME_ID + int.from_bytes(h.digest(), "little") % FIRST_GAME_ID
 
 
-def game_meta(log: GameLog, name: str = "") -> GameMeta:
-    """A recorded game's id and names. The default name says who played which
-    CO: "self-play step 120000: Hawke vs Grit" (one network on both sides), or
-    "a.pt (64 sims) (Hawke) vs random (Grit)"."""
+def game_meta(log: GameLog, name: str = "", users: Sequence[tuple[str, int] | None] = (None, None)) -> GameMeta:
+    """A recorded game's id and names. ``users``: a player's (username, user
+    id), player 1's then player 2's (None: the record's label, user id -1).
+    The default name says who played which CO: "self-play step 120000: Hawke
+    vs Grit" (one network on both sides), "a.pt (64 sims) (Hawke) vs random
+    (Grit)", or with users "Absox (Sami) vs tf128-s1 (Max)"."""
     r = rules.load()
     cos = [r.cos[int(p.co)].name for p in log.start.players[:2]]
-    same = log.players[0] == log.players[1]
-    labels = ("Player 1", "Player 2") if same else log.players
+    same = log.players[0] == log.players[1] and not any(users)
+    labels = [
+        u[0] if u else label for u, label in zip(users, ("Player 1", "Player 2") if same else log.players, strict=True)
+    ]
     names = (f"{labels[0]} ({cos[0]})", f"{labels[1]} ({cos[1]})")
     if not name:
         name = f"{log.players[0] or log.source or 'game'}: {cos[0]} vs {cos[1]}" if same else " vs ".join(names)
-    return GameMeta(id=game_id(log), name=name, names=names)
+    if any(users):  # usernames, as AWBW words its messages ("Absox has resigned!")
+        names = (labels[0], labels[1])
+    ids = (users[0][1] if users[0] else NO_USER, users[1][1] if users[1] else NO_USER)
+    return GameMeta(id=game_id(log), name=name, users=ids, names=names)
+
+
+def made_up_user(name: str) -> int:
+    """A user id for a player with no AWBW account, the same for a name each
+    time: negative, as AWBW's are positive (and below -1, which the Replay
+    Player looks up nowhere)."""
+    return -2 - zlib.crc32(name.encode()) % FIRST_GAME_ID
+
+
+def player_storage() -> Path:
+    """Where the AWBW Replay Player keeps its replays and its list of
+    usernames on this system (it may not be installed)."""
+    if sys.platform == "darwin":
+        root = Path.home() / "Library" / "Application Support"
+    elif sys.platform == "win32":
+        root = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+    else:
+        root = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    data = root / "AWBWReplayPlayer"
+    ini = data / "storage.ini"  # its setting for keeping its data elsewhere
+    moved = re.search(r"^FullPath[ \t]*=[ \t]*(\S.*?)[ \t]*$", ini.read_text(), re.M) if ini.is_file() else None
+    return (Path(moved.group(1)) if moved else data) / "ReplayData" / "Replays"
+
+
+def player_running() -> bool:
+    """Whether the AWBW Replay Player is running (checked on macOS and Linux only)."""
+    if sys.platform == "win32":
+        return False
+    try:
+        return subprocess.run(["pgrep", "-f", "AWBW Replay Player"], capture_output=True).returncode == 0
+    except OSError:
+        return False
+
+
+def add_usernames(folder: Path, names: Mapping[int, str]) -> list[int]:
+    """Add usernames by user id to the Replay Player's list in ``folder``
+    (``player_storage``), returning the ids added or renamed. It reads the
+    list when it starts and writes it back from memory, so it must not be
+    running."""
+    path = folder / "UsernameStorage.json"
+    known = json.loads(path.read_text() or "{}") if path.is_file() else {}
+    changed = [uid for uid, name in names.items() if known.get(str(uid)) != name]
+    if changed:
+        known.update({str(uid): names[uid] for uid in changed})
+        folder.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(known, indent=2))
+    return changed
 
 
 def replay_file(log: GameLog, meta: GameMeta | None = None) -> bytes:
