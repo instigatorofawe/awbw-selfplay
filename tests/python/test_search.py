@@ -1,4 +1,5 @@
 import json
+import os
 
 import numpy as np
 import pytest
@@ -83,7 +84,14 @@ def test_leaves_are_encoded_as_the_policy_reads_them(md):
     assert search.active == 3
 
 
-DEVICES = ["cpu"] + ["mps"] * torch.backends.mps.is_available() + ["cuda"] * torch.cuda.is_available()
+DEVICES = [
+    "cpu",
+    # GitHub's macOS runners report MPS but are virtual machines that can't run it
+    pytest.param(
+        "mps", marks=pytest.mark.skipif(not torch.backends.mps.is_available() or "CI" in os.environ, reason="no MPS")
+    ),
+    pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")),
+]
 
 
 @pytest.mark.parametrize("device", DEVICES)
