@@ -35,13 +35,16 @@ class ReplayUnavailable(RuntimeError):
     pass
 
 
-def replay_path(game_id: int) -> Path:
-    return cache_dir() / "replays" / f"{game_id}.zip"
+def replay_path(game_id: int, root: Path | None = None) -> Path:
+    """Where a replay is cached: in ``root``, by default the cache's ``replays``."""
+    return (root or cache_dir() / "replays") / f"{game_id}.zip"
 
 
-def fetch_replay(game_id: int, http: Http, source: str = "mooo", session: AwbwSession | None = None) -> Path:
-    """Download a replay zip into the cache unless it is already there."""
-    path = replay_path(game_id)
+def fetch_replay(
+    game_id: int, http: Http, source: str = "mooo", session: AwbwSession | None = None, root: Path | None = None
+) -> Path:
+    """Download a replay zip into the cache (``root``) unless it is already there."""
+    path = replay_path(game_id, root)
     if path.exists():
         return path
     if source == "mooo":
@@ -62,7 +65,7 @@ def fetch_replay(game_id: int, http: Http, source: str = "mooo", session: AwbwSe
 
 
 def fetch_replays(
-    game_ids: Iterable[int], http: Http, parallel: int = 1
+    game_ids: Iterable[int], http: Http, parallel: int = 1, root: Path | None = None
 ) -> Iterator[tuple[int, Path | ReplayUnavailable]]:
     """Download mooo replays with up to ``parallel`` in flight (``http``'s rate
     limit still spaces their starts), yielding each game's path, or why it is
@@ -70,7 +73,7 @@ def fetch_replays(
 
     def one(game_id: int) -> tuple[int, Path | ReplayUnavailable]:
         try:
-            return game_id, fetch_replay(game_id, http)
+            return game_id, fetch_replay(game_id, http, root=root)
         except ReplayUnavailable as e:
             return game_id, e
 

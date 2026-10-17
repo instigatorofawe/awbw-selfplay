@@ -214,3 +214,15 @@ def test_fetch_replays_keeps_n_in_flight(monkeypatch, tmp_path):
         break
     started = {int(p.stem) for p in (tmp_path / "replays").glob("*.zip")} - set(got)
     assert len(seen) == 1 and seen[0] in started and started <= {6, 7}  # stopping waits only for those in flight
+
+
+def test_fetch_replays_into_another_directory(monkeypatch, tmp_path):
+    monkeypatch.setenv("AWBW_CACHE", str(tmp_path / "cache"))
+
+    class FakeHttp(Http):
+        def get(self, url: str) -> bytes:
+            return b"PK" + bytes([int(url.rsplit("/", 1)[1].removesuffix(".zip"))])
+
+    got = dict(sources.fetch_replays([1, 2], FakeHttp(min_interval=0.0), root=tmp_path / "live"))
+    assert got == {1: tmp_path / "live" / "1.zip", 2: tmp_path / "live" / "2.zip"}
+    assert (tmp_path / "live" / "2.zip").read_bytes() == b"PK\x02" and not (tmp_path / "cache" / "replays").exists()

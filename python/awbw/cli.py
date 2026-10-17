@@ -58,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     cr = sub.add_parser("crawl", help="index and fetch a mooo search back in time, slice by slice, up to a size cap")
     cr.add_argument("query", help='mooo search without a date, e.g. "2p global league std"')
     cr.add_argument("--before", required=True, help="start from games strictly before this date (YYYY-MM-DD)")
-    cr.add_argument("--max-gb", type=float, required=True, help="stop once the replay cache holds this many GB")
+    cr.add_argument("--max-gb", type=float, required=True, help="stop once the replay directory holds this many GB")
     cr.add_argument(
         "--parallel",
         type=int,
@@ -66,6 +66,11 @@ def main(argv: list[str] | None = None) -> int:
         default=1,
         metavar="N",
         help="replay downloads in flight at once, 1-4 (default 1); --rate still spaces their starts",
+    )
+    cr.add_argument(
+        "--dir",
+        type=Path,
+        help="replays here instead of the cache's replays, and the slices' indexes in DIR/index, apart from the rest",
     )
 
     m = sub.add_parser("fetch-map", help="download maps into the cache")
@@ -438,7 +443,8 @@ def _crawl(args, http: Http) -> int:
     Each slice's index is saved as it is searched, so a rerun resumes without
     searching again, and cached replays are never fetched twice.
     """
-    replays = cache_dir() / "replays"
+    replays = args.dir or cache_dir() / "replays"
+    indexes = replays / "index" if args.dir else cache_dir() / "index"
     cap = int(args.max_gb * 1e9)
     used = sum(p.stat().st_size for p in replays.glob("*.zip"))
     slug = re.sub(r"[^A-Za-z0-9]+", "_", args.query).strip("_").lower()
@@ -446,7 +452,7 @@ def _crawl(args, http: Http) -> int:
     fetched = failed = 0
     start = time.monotonic()
     while before is not None and used < cap:
-        out = cache_dir() / "index" / f"{slug}_before_{before.replace('-', '')}.jsonl"
+        out = indexes / f"{slug}_before_{before.replace('-', '')}.jsonl"
         if out.exists():
             entries = read_index(out)
         else:
@@ -459,8 +465,8 @@ def _crawl(args, http: Http) -> int:
                 fetch_map(map_id, http)
             except (HttpError, ValueError) as e:
                 print(f"map {map_id}: {e}", file=sys.stderr)
-        todo = [e.game_id for e in entries if not replay_path(e.game_id).exists()]
-        for _, got in fetch_replays(todo, http, args.parallel):
+        todo = [e.game_id for e in entries if not replay_path(e.game_id, replays).exists()]
+        for _, got in fetch_replays(todo, http, args.parallel, replays):
             if isinstance(got, ReplayUnavailable):
                 failed += 1
                 print(got, file=sys.stderr)
