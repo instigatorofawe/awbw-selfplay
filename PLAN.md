@@ -1229,8 +1229,10 @@ decisions per epoch) for 8 epochs, 1.54B decisions: 75 times the grid's
 length. `bigrun.sh` on the box, started 2026-10-15 after grid4; the log
 is `cache/logs/bigrun.log`, the runs `cache/runs/tf128-full` and
 `cache/runs/tf128-full-mid`. Its value learned each group of shards'
-results, so it stopped after epoch 1 and goes on mixed, as `tf128-mix`
-(`bigrun2.sh`, below).
+results, so it stopped after epoch 1 and went on mixed, as `tf128-mix`
+(`bigrun2.sh`, below). That run's new value head read the trunk's memory
+of epoch 1, so the run restarted from scratch as `tf128-mix2`
+(`bigrun3.sh`, below), two epochs at most before self-play.
 
 - **Restart:** training began at 15:10 and stopped three times, at step
   13,400 each time, on a stored state that fails the engine's check: a
@@ -1258,7 +1260,8 @@ results, so it stopped after epoch 1 and goes on mixed, as `tf128-mix`
   - played against `tf128-s1` with 64 simulations each side, 100 games.
 
   Results land in `cache/runs/eval-*.txt` and `arena-*.txt`.
-- **Likely stop at epoch 4** (decided 2026-10-16). The grid's runs were
+- **Likely stop at epoch 4** (decided 2026-10-16; replaced on 2026-10-17
+  by two epochs at most, `tf128-mix2` below). The grid's runs were
   80k steps of 5.1M decisions an epoch (`--fraction 0.0772`); this one
   uses every decision, 750k steps an epoch, and by step 200k its training
   batches (unseen games, peak rate) were as low as `tf128-s1`'s at its
@@ -1322,6 +1325,44 @@ results, so it stopped after epoch 1 and goes on mixed, as `tf128-mix`
   - Speed: 1,790 decisions/s, as before, so the read-ahead keeps up. The
     box uses 26 of its 46 GB RAM and 11.2 GB of the GPU at 98%. Epoch 4
     should land late on 2026-10-20, with the midway results on 2026-10-21.
+  - **It failed the check.** At step 875k (2026-10-17 05:15):
+
+    | step | policy | value | ECE | tilt |
+    |---|---|---|---|---|
+    | 875k | 1.0794 | 0.7107 | 0.153 | +0.14 |
+
+    The tilt is the side to move's mean predicted win chance at the
+    validation turn starts (0.64) minus how often it won (0.50).
+    `tf128-full` had -0.014 at 250k and +0.077 at its epoch-1
+    checkpoint. A third of the turn starts (88k) were valued at 0.97, and
+    those sides won 76%; `tf128-full` at 250k put 33k there, which won
+    92%. Over the 125k steps the training value loss fell smoothly from
+    0.64 to 0.556, with no sawtooth, so the mixing worked. The head
+    instead read the trunk's features, which had learned every training
+    game's result in epoch 1 and so keep fitting them. The policy was the
+    best yet (1.0794). The run was stopped by hand on 2026-10-17 at 07:28,
+    at step ~897k.
+- **From scratch: `tf128-mix2`** (`bigrun3.sh`, from 2026-10-17 07:29):
+  the same reading (`--passes 16 --value-fraction 0.01`, validation
+  every 125k steps) from a new network. **Two epochs at most before
+  self-play** (decided 2026-10-17).
+  - `--epochs 2 --schedule wsd --decay-epochs 0.3`: the peak rate until
+    epoch 1.7, then linear to 0.
+  - It pauses at epoch 1. A copy (`tf128-mix2-e1`) decays over 0.2 epochs
+    (about 6 h) and is checked as the midway copy would have been:
+    - scored on the validation games;
+    - played greedy against `tf128-s1` and `v1-64x6-5070`, 200 games each;
+    - played against `tf128-s1` with 64 simulations each side, 100 games.
+  - The run then goes on to epoch 2. The final net plays the epoch-1 copy
+    and `tf128-s1` the same way.
+  - Self-play starts from the better of the two. If the epoch-1 copy
+    clearly beats `tf128-s1` and a second epoch looks worth little, self-play
+    can start from it at once, and the run stops.
+  - The value check: by step 250k, the value under about 0.60, ECE under
+    about 0.06 and a tilt within about 0.03. The head learns slowly at 1%,
+    so the 125k validation is only a first look.
+  - Epoch 1 should land around 13:30 on 2026-10-18, its copy's results
+    late that day, and epoch 2 around 2026-10-20.
 
 ### Later
 
