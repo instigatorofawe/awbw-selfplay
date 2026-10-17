@@ -2,7 +2,9 @@
 with steps of training.
 
 Games start from human games' first states (the v1 dataset's training split,
-so the arena's validation starts stay unseen) and are played with
+so the arena's validation starts stay unseen), changed to the Global League's
+standard rules (``league.std_rules``: Black Bomb and Stealth banned, 50 units a
+player), and are played with
 ``BatchedSearch.add_game`` (``Games``: a fixed number per board bucket, in
 groups, the GPU scoring one group's leaves while the next is walked). When a
 game ends its full searches become
@@ -53,6 +55,7 @@ from .. import _core
 from .. import games as records
 from ..data.loader import BUCKETS, DecisionBatch, bucket_for, decision_batches, encode_decisions, in_validation
 from ..data.shards import Dataset
+from ..league import std_rules_rows
 from ..search import NetEvaluator, SearchSettings
 from .model import PolicyValueNet
 from .policy import load_policy, save_policy
@@ -574,7 +577,7 @@ def train(
         resign_off=cfg.resign_off,
     )
     rng = np.random.default_rng([cfg.seed, step])
-    starts = human_starts(ds)
+    starts = std_rules_rows(human_starts(ds))
     games = Games(evaluator, starts, rng, search_cfg, cfg.parallel, fast_evaluator, cfg.record_games, cfg.group_size)
     window = Window(cfg.window)
     human = prefetch(_human_stream(ds, cfg, movement)) if cfg.human_fraction > 0 else None

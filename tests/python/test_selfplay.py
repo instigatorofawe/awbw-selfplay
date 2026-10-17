@@ -209,6 +209,7 @@ def test_selfplay_trains_and_resumes(cache, tmp_path):  # noqa: F811
     logs = list(read_games(out / "games.jsonl"))
     assert len(logs) >= metrics[-1]["games"] and all(replay(log).matches for log in logs)
     assert all(log.source == "self-play" and "step" in log.info for log in logs)
+    assert all(log.start.settings.unit_limit == 50 and log.start.settings.banned_units for log in logs)  # league rules
     for p in [out / "last.pt", *out.glob("net-*.pt")]:  # they load: no numpy scalars in their info
         load_policy(p)
     more = dataclasses.replace(cfg, max_steps=8)

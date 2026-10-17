@@ -453,6 +453,36 @@ tile by tile:
     maps. As of 2026-10-12, std has 14 maps, all banning Black Bomb and
     Stealth, with a unit limit of 50. Capture limits matched `capture_win` in
     all 172 cached replays on those maps.
+  - The bans have changed over time and by map. In 150–300 sampled GL std
+    replays a quarter (2022-08 to 2026-10), Stealths were built in 1–5% of
+    games every quarter, the latest on 2026-10-12; Black Bombs in none.
+    Under 1% of games reach 50 units for a player.
+  - Self-play, the arena, the ladder and `awbw play` start under today's std
+    rules (`league.std_rules`: Black Bomb and Stealth banned, 50 units, no day
+    limit). States from replays have no bans or limits. Human batches keep
+    theirs: a banned unit there is only a legal step no one takes.
+- **Live League** (`2p live league std` on mooo): about 65,000 games since
+  2024-01-22 (when mooo's live league starts), 50–80 a day, about 100 KB
+  each. Played live on a 5 min + 2 min/turn clock. The map pool is far wider:
+  284 maps in one week of 2026-10, against 26 a week, 43 a year and 104 ever
+  in the GL. Median 13 days. Crawled with
+  `awbw crawl "2p live league std" --dir cache/replays-live` (2026-10-17), so
+  its replays and index stay apart from the GL's: their ratings are the live
+  league's own and must not join the GL rating history.
+  - **Day limit, unit limit and bans aren't in the replay**, and they vary
+    from game to game: 1402777 (2025-04-11) had 30 days and 50 units, 1405164
+    (2025-04-14) neither; today's games have 30 days, 50 units and Black Bomb
+    and Stealth banned. Only `game.php` shows them. A sample of three games
+    a week (`cache/league/live-settings-sample.jsonl`) is read to date the
+    changes; the user says tiers don't differ.
+  - On 20 sampled replays, 472 of 509 checkable turns matched the engine. The
+    rest were a game on a map republished since (1405164, rejected by
+    `engine.map_edit`) and a game the day limit ended (the engine had no
+    limit to apply). That one went to the side with more properties (26 to
+    24), as `end_turn` decides it.
+  - The network has no input for a day limit, which matters to the value
+    near the end. Training on these games needs one: a new dataset version
+    and network.
 - **Reference implementation:**
   [DeamonHunter/AWBW-Replay-Player](https://github.com/DeamonHunter/AWBW-Replay-Player)
   (C#, MIT). It also has an XML parser for an older replay format, which we
@@ -1546,7 +1576,8 @@ One process alternates rounds of search with steps of training
 the search always uses the network being trained, the same module.
 
 - **Starts:** the first states of the v1 dataset's training games (33,860),
-  in random order. Validation games stay unseen for the arena and ladder.
+  in random order, under the GL's std rules (`league.std_rules`, §5).
+  Validation games stay unseen for the arena and ladder.
   Each game's luck is seeded on its own, so two games from one start differ.
 - **Games:** `parallel` (512) at once. A game that ends gives its slot to
   a new one at once.

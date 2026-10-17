@@ -23,17 +23,19 @@ from . import _core
 from .agents import DRAW, Agent, GameResult, play
 from .data.loader import in_validation
 from .data.shards import Dataset
+from .league import std_rules
 
 
 def validation_starts(ds: Dataset, n: int) -> list[_core.GameState]:
-    """The first states of the dataset's first ``n`` validation games."""
+    """The first states of the dataset's first ``n`` validation games, under the
+    Global League's standard rules (``std_rules``)."""
     starts: list[_core.GameState] = []
     for i in range(len(ds.shards)):
         if len(starts) >= n:
             break
         sh = ds.load(i)
         for g in np.flatnonzero(in_validation(sh.g_id))[: n - len(starts)]:
-            starts.append(_core.GameState.from_bytes(sh.state[sh.g_start[g]].tobytes()))
+            starts.append(std_rules(_core.GameState.from_bytes(sh.state[sh.g_start[g]].tobytes())))
     return starts
 
 

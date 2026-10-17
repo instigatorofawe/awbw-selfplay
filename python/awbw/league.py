@@ -2,7 +2,8 @@
 
 Replays don't record unit bans or the unit limit, so for league games these
 settings come from here. The rotation changes over time, so each fetch is
-kept as a dated snapshot under ``cache/league/``.
+kept as a dated snapshot under ``cache/league/``. Self-play and the arena play
+under today's standard rules (``std_rules``).
 """
 
 from __future__ import annotations
@@ -12,9 +13,32 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
+from . import _core, rules
 from .net import Http, cache_dir, write_atomic
 
 LEAGUE_MAPS_URL = "https://awbw.amarriner.com/api/league/maps.php"
+STD_BANS = ("Black Bomb", "Stealth")  # on every std map of the 2026-10-12 rotation
+STD_UNIT_LIMIT = 50  # likewise
+
+
+def std_rules(state: _core.GameState) -> _core.GameState:
+    """``state``, changed to the Global League's standard rules of the 2026-10-12
+    rotation: Black Bomb and Stealth banned, 50 units a player, no day limit.
+    A state from a replay has none of these, which the replay doesn't record."""
+    st = state.settings
+    st.banned_units = sum(1 << rules.load().unit(name).index for name in STD_BANS)
+    st.unit_limit = STD_UNIT_LIMIT
+    st.day_limit = 0
+    return state
+
+
+def std_rules_rows(states: np.ndarray) -> np.ndarray:
+    """``std_rules`` on each row of packed states [N, STATE_BYTES], in place."""
+    for row in states:
+        row[:] = np.frombuffer(std_rules(_core.GameState.from_bytes(row.tobytes())).to_bytes(), np.uint8)
+    return states
 
 
 @dataclass(slots=True, frozen=True)
