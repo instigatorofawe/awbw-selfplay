@@ -1416,6 +1416,18 @@ of epoch 1, so the run restarted from scratch as `tf128-mix2`
     attacks, but is scored at turn starts; by 125k it had seen about a
     tenth of the valued decisions `tf128-full` had by 250k. Left running
     to the 250k check.
+  - **In play, the step-199k copy's value rises within its own turns.** The
+    user beat it twice on Last Vigil (32 and 128 simulations, both
+    resigned by day 12). Its value climbed +0.46 and +0.48 on average
+    from the first decision of each of its turns to the last, then fell
+    0.58 and 0.62 over each of the user's turns: about 0 to +0.5 at the
+    end of its turns, -0.1 to -0.9 at their starts. `tf128-full-e0.92`,
+    in four games against the user, moved -0.01 to -0.15 within its
+    turns and +0.13 to -0.04 over the user's. The search sees only its
+    own turn, so it took single attacks the user answered two on one
+    (an infantry a turn lost on one flank from day 5), and it never
+    used Max's CO Power, charged for the last two days of the
+    128-simulation game.
   - Epoch 1 should land around 13:30 on 2026-10-18, its copy's results
     late that day, and epoch 2 around 2026-10-20.
 
