@@ -1401,6 +1401,21 @@ of epoch 1, so the run restarted from scratch as `tf128-mix2`
   - The value check: by step 250k, the value under about 0.60, ECE under
     about 0.06 and a tilt within about 0.03. The head learns slowly at 1%,
     so the 125k validation is only a first look.
+  - **Step 125k (2026-10-17 12:25), the first look, failed the flags:**
+
+    | step | policy | value | ECE | tilt |
+    |---|---|---|---|---|
+    | 125k | 1.1061 | 0.6509 | 0.137 | +0.11 |
+
+    The side to move was valued at 0.61 on average and won 0.50. 71k of
+    the 257k turn starts were valued at 0.97, and those sides won 81%.
+    Both runs at `--value-fraction 0.01` tilted toward the side to move
+    (`tf128-mix` +0.14), this one from a new network, so memorized results
+    can't be the whole story. A guess: the value trains on random
+    decisions, mostly mid-turn, where the side to move is ahead after its
+    attacks, but is scored at turn starts; by 125k it had seen about a
+    tenth of the valued decisions `tf128-full` had by 250k. Left running
+    to the 250k check.
   - Epoch 1 should land around 13:30 on 2026-10-18, its copy's results
     late that day, and epoch 2 around 2026-10-20.
 
