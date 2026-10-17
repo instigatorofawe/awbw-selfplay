@@ -469,12 +469,22 @@ tile by tile:
   `awbw crawl "2p live league std" --dir cache/replays-live` (2026-10-17), so
   its replays and index stay apart from the GL's: their ratings are the live
   league's own and must not join the GL rating history.
-  - **Day limit, unit limit and bans aren't in the replay**, and they vary
-    from game to game: 1402777 (2025-04-11) had 30 days and 50 units, 1405164
-    (2025-04-14) neither; today's games have 30 days, 50 units and Black Bomb
-    and Stealth banned. Only `game.php` shows them. A sample of three games
-    a week (`cache/league/live-settings-sample.jsonl`) is read to date the
-    changes; the user says tiers don't differ.
+  - **Day limit, unit limit and bans aren't in the replay**; only `game.php`
+    shows them. Read for three games a week from 2024-01 to 2026-10 and 40
+    more in 2026-10 (466 games, `cache/league/live-settings-sample.jsonl`),
+    they come in three periods (dates are mooo's end dates; a live game is
+    played in one sitting, so they are also its start):
+    - **To 2025-06:** by map. About 60% of games had 30 days and 50 units,
+      the rest neither; no bans. All 42 pairs of one map's games within 60
+      days agreed, but a map can change (85639: 30 days in 2024-01, none in
+      2024-10). The day limit and unit limit always came together.
+    - **2025-07 to 2026-10-09:** no day limit, no unit limit, no bans (190 of
+      191 sampled; the other ended 2025-07-0x with 30 days).
+    - **From 2026-10-10:** 30 days, 50 units, Black Bomb and Stealth banned
+      (24 of 25 sampled; the other ended on the 10th with none).
+    - Every game: funds 1000, no fog, no tags, clear weather, powers on, a
+      5 min + 2 min/turn clock, 7 days at most a turn. Tiers don't differ
+      (the user, and the sample).
   - On 20 sampled replays, 472 of 509 checkable turns matched the engine. The
     rest were a game on a map republished since (1405164, rejected by
     `engine.map_edit`) and a game the day limit ended (the engine had no
