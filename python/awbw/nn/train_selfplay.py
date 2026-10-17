@@ -3,8 +3,9 @@ with steps of training.
 
 Games start from human games' first states (the v1 dataset's training split,
 so the arena's validation starts stay unseen) and are played with
-``BatchedSearch.add_game``, one search per board bucket, the network scoring
-every round's leaves on the GPU. When a game ends its full searches become
+``BatchedSearch.add_game`` (``Games``: a fixed number per board bucket, in
+groups, the GPU scoring one group's leaves while the next is walked). When a
+game ends its full searches become
 samples, each labelled with the result for the player deciding there, and go
 into a sliding window of the latest ``window`` samples. Before they do, the
 network's losses on them are logged as "fresh": a game it hasn't trained on.
@@ -78,7 +79,8 @@ class SelfPlayConfig:
     resign_value: float = -0.9
     resign_turns: int = 2  # 0: never
     resign_off: float = 0.1
-    parallel: int = 512  # games at once
+    parallel: int = 512  # games at once, shared among the buckets by their share of the starts
+    group_size: int = 256  # games searched together; the device scores one group while the next is walked
     record_games: bool = True  # every finished game to games.jsonl (games.py), 15-20 KB each
     fast_train: bool = True  # train the fast network (train's `fast`) on the main one's batches
     # Window and training
@@ -218,86 +220,170 @@ class FinishedGame:
     first: int  # the player who moved first
 
 
-class Games:
-    """Self-play games, ``parallel`` at once, one ``BatchedSearch`` per board bucket.
+class _Done:
+    """A batch an evaluator without ``launch`` scored at once."""
 
-    ``round`` walks every search to its next leaves, has ``evaluator`` score
-    them and hands back the games that ended; with ``keep_records`` every
-    finished game's record also waits in ``records`` (some end without a
-    full search, so without samples).
+    def __init__(self, result: tuple[np.ndarray, np.ndarray]):
+        self.value, self.waited = result, 0.0
+
+    def result(self) -> tuple[np.ndarray, np.ndarray]:
+        return self.value
+
+
+def _launch(evaluator: Any, planes, globals_, legal, movers, pad_to: int) -> Any:
+    """``evaluator.launch`` if it has one (``NetEvaluator``), else its answer at once."""
+    if hasattr(evaluator, "launch"):
+        return evaluator.launch(planes, globals_, legal, movers, pad_to=pad_to)
+    return _Done(evaluator(planes, globals_, legal, movers))
+
+
+def start_buckets(states: np.ndarray) -> np.ndarray:
+    """The board bucket of each start [N, STATE_BYTES] (its maps registered)."""
+    sizes: dict[int, int] = {}
+    out = np.empty(len(states), np.int64)
+    for i, s in enumerate(states):
+        map_id = _core.GameState.from_bytes(s.tobytes()).map_id
+        if map_id not in sizes:
+            md = _core.find_map(map_id)
+            if md is None:
+                raise ValueError(f"map {map_id} is not registered")
+            sizes[map_id] = bucket_for(md.height, md.width)
+        out[i] = sizes[map_id]
+    return out
+
+
+def bucket_slots(buckets: np.ndarray, parallel: int) -> dict[int, int]:
+    """``parallel`` game slots shared among the buckets by their share of the
+    starts, rounded by the largest remainders; a bucket whose share rounds to
+    no slot gets none."""
+    sizes, counts = np.unique(buckets, return_counts=True)
+    exact = parallel * counts / counts.sum()
+    slots = np.floor(exact).astype(np.int64)
+    for i in np.argsort(slots - exact, kind="stable")[: parallel - int(slots.sum())]:
+        slots[i] += 1
+    return {int(s): int(k) for s, k in zip(sizes, slots, strict=True) if k}
+
+
+@dataclass(slots=True)
+class _Group:
+    """Some of a bucket's games, searched together."""
+
+    size: int  # the bucket
+    slots: int  # games kept going
+    search: _core.BatchedSearch
+    starts: Iterator[_core.GameState]
+    queued: list[tuple[np.ndarray | None, Any]] | None = None  # (rows, Pending) of the leaves collected
+    shape: tuple[int, ...] = ()  # of their logits
+
+
+class Games:
+    """Self-play games, ``parallel`` at once from ``starts`` in random order.
+
+    The games are shared among the board buckets by their share of the starts
+    (``bucket_slots``), so that each bucket always has the same number going and
+    the network's batches keep one shape, which ``NetEvaluator`` with
+    ``compile`` pads to (``launch``'s ``pad_to``) instead of a power of two.
+    A bucket's games are searched in groups of about ``group_size``, one
+    ``BatchedSearch`` each.
+
+    ``round`` goes once round the groups. Each hands ``evaluator`` its answers
+    to the leaves the group queued the time before, gives up its finished
+    games, starts new ones in their slots, walks its searches to their next
+    leaves and queues those on the network without waiting (``launch``), so
+    the device scores the groups queued before it while the next is walked.
+    The games that ended come back; with ``keep_records`` every finished game's
+    record also waits in ``records`` (some end without a full search, so
+    without samples). ``waited`` counts the seconds spent waiting for the
+    network: near all of ``round``'s time when the device is the bottleneck.
     """
 
     def __init__(
         self,
         evaluator: NetEvaluator,
-        starts: Iterator[_core.GameState],
+        starts: np.ndarray,
+        rng: np.random.Generator,
         config: _core.SearchConfig,
         parallel: int,
         fast_evaluator: NetEvaluator | None = None,
         keep_records: bool = False,
+        group_size: int = 256,
     ):
         self.evaluator = evaluator
         self.fast_evaluator = fast_evaluator  # scores the fast searches' leaves, if given
-        self.starts = starts
         self.config = config
         self.parallel = parallel
-        self.searches: dict[int, _core.BatchedSearch] = {}
+        buckets = start_buckets(starts)
+        self.slots = bucket_slots(buckets, parallel)
+        groups = []
+        for size, slots in self.slots.items():
+            stream = cycle(starts, rng, np.flatnonzero(buckets == size))
+            k = max(1, round(slots / group_size))
+            for i in range(k):
+                cfg = _core.SearchConfig(**{key: getattr(config, key) for key in _SEARCH_FIELDS})
+                cfg.seed = config.seed * 31 + size + 1009 * i
+                n = slots // k + (i < slots % k)
+                groups.append((i, size, _Group(size, n, _core.BatchedSearch(cfg, size), stream)))
+        self.groups = [g for _, _, g in sorted(groups, key=lambda t: t[:2])]  # the buckets' groups interleaved
         self.pending: dict[tuple[int, int], list[dict[str, np.ndarray]]] = defaultdict(list)
         self.first: dict[tuple[int, int], int] = {}
         self.evals = 0
         self.fast_evals = 0  # of those, by fast_evaluator
+        self.waited = 0.0
         self.keep_records = keep_records
         self.records: list[_core.GameRecord] = []
 
     @property
     def active(self) -> int:
-        return sum(bs.active for bs in self.searches.values())
+        return sum(g.search.active for g in self.groups)
 
-    def _search(self, size: int) -> _core.BatchedSearch:
-        if size not in self.searches:
-            cfg = _core.SearchConfig(**{k: getattr(self.config, k) for k in _SEARCH_FIELDS})
-            cfg.seed = self.config.seed * 31 + size
-            self.searches[size] = _core.BatchedSearch(cfg, size)
-        return self.searches[size]
-
-    def _evaluate(self, bs: _core.BatchedSearch) -> tuple[np.ndarray, np.ndarray]:
-        planes, globals_, legal, movers = bs.batch()
+    def _queue(self, g: _Group) -> None:
+        planes, globals_, legal, movers = g.search.batch()
+        g.shape = legal.shape
         if self.fast_evaluator is None:
-            return self.evaluator(planes, globals_, legal, movers)
-        fast = bs.fast_leaves().astype(bool)
-        logits = np.empty(legal.shape, np.float32)
-        values = np.empty(len(planes), np.float32)
+            g.queued = [(None, _launch(self.evaluator, planes, globals_, legal, movers, g.slots))]
+            return
+        fast = g.search.fast_leaves().astype(bool)
+        g.queued = []
         for evaluator, rows in ((self.evaluator, ~fast), (self.fast_evaluator, fast)):
             if rows.any():
-                logits[rows], values[rows] = evaluator(planes[rows], globals_[rows], legal[rows], movers[rows])
+                g.queued.append((rows, _launch(evaluator, planes[rows], globals_[rows], legal[rows], movers[rows], 0)))
         self.fast_evals += int(fast.sum())
-        return logits, values
+
+    def _submit(self, g: _Group) -> None:
+        assert g.queued is not None
+        if g.queued[0][0] is None:
+            logits, values = g.queued[0][1].result()
+        else:
+            logits, values = np.empty(g.shape, np.float32), np.empty(g.shape[0], np.float32)
+            for rows, pending in g.queued:
+                logits[rows], values[rows] = pending.result()
+        self.waited += sum(pending.waited for _, pending in g.queued)
+        g.queued = None
+        g.search.submit(logits, values)
 
     def round(self) -> list[FinishedGame]:
-        while self.active < self.parallel:
-            start = next(self.starts)
-            md = _core.find_map(start.map_id)
-            assert md is not None
-            size = bucket_for(md.height, md.width)
-            self.first[size, self._search(size).add_game(start)] = start.active
         done = []
-        for size, bs in self.searches.items():
-            n = bs.collect()
-            if n:
-                logits, values = self._evaluate(bs)
-                bs.submit(logits, values)
-                self.evals += n
-            samples = bs.take_samples()
+        for gi, g in enumerate(self.groups):
+            if g.queued is not None:
+                self._submit(g)
+            samples = g.search.take_samples()
             if len(samples["game"]):
-                for g, part in _split_by_game(samples):
-                    self.pending[size, g].append(part)
-            for rec in bs.take_records():
+                for game, part in _split_by_game(samples):
+                    self.pending[gi, game].append(part)
+            for rec in g.search.take_records():
                 if self.keep_records:
                     self.records.append(rec)
-                parts = self.pending.pop((size, rec.game), [])
-                first = self.first.pop((size, rec.game))
+                parts = self.pending.pop((gi, rec.game), [])
+                first = self.first.pop((gi, rec.game))
                 if parts:
-                    done.append(FinishedGame(game_samples(parts, rec.winner, size), rec, size, first))
+                    done.append(FinishedGame(game_samples(parts, rec.winner, g.size), rec, g.size, first))
+            while g.search.active < g.slots:
+                start = next(g.starts)
+                self.first[gi, g.search.add_game(start)] = start.active
+            n = g.search.collect()
+            if n:
+                self._queue(g)
+                self.evals += n
         return done
 
 
@@ -334,10 +420,11 @@ def human_starts(ds: Dataset, val_fraction: float = 0.05) -> np.ndarray:
     return np.concatenate(starts)
 
 
-def cycle(states: np.ndarray, rng: np.random.Generator) -> Iterator[_core.GameState]:
-    """The states in random order, round and round."""
+def cycle(states: np.ndarray, rng: np.random.Generator, rows: np.ndarray | None = None) -> Iterator[_core.GameState]:
+    """The states (those at ``rows``) in random order, round and round."""
+    rows = np.arange(len(states)) if rows is None else rows
     while True:
-        for i in rng.permutation(len(states)):
+        for i in rng.permutation(rows):
             yield _core.GameState.from_bytes(states[i].tobytes())
 
 
@@ -488,7 +575,7 @@ def train(
     )
     rng = np.random.default_rng([cfg.seed, step])
     starts = human_starts(ds)
-    games = Games(evaluator, cycle(starts, rng), search_cfg, cfg.parallel, fast_evaluator, cfg.record_games)
+    games = Games(evaluator, starts, rng, search_cfg, cfg.parallel, fast_evaluator, cfg.record_games, cfg.group_size)
     window = Window(cfg.window)
     human = prefetch(_human_stream(ds, cfg, movement)) if cfg.human_fraction > 0 else None
     setup = {"selfplay": asdict(cfg), "init": str(init), "dataset": str(data)}
@@ -496,7 +583,8 @@ def train(
         setup["fast"] = str(fast)
     params = sum(p.numel() for p in net.parameters())
     log(
-        f"{params / 1e6:.2f}M parameters on {device}; {len(starts):,} starts, {cfg.parallel} games at once, "
+        f"{params / 1e6:.2f}M parameters on {device}; {len(starts):,} starts, {cfg.parallel} games at once "
+        f"({', '.join(f'{n} on {b}x{b}' for b, n in games.slots.items())}; {len(games.groups)} groups), "
         f"{cfg.sims} sims ({cfg.full_fraction:.0%} of searches, else {cfg.fast_sims}"
         + (f", unsearched from a prior of {cfg.skip_prior:g}" if cfg.skip_prior > 0 else "")
         + "); "
@@ -511,6 +599,8 @@ def train(
     stats, totals = Stats(), Stats()
     t0 = t_log = time.monotonic()
     evals_log = fast_evals_log = 0
+    evaluators = [e for e in (evaluator, fast_evaluator) if e is not None]
+    rows_log = busy_log = waited_log = 0.0
 
     def batch_loss(fwd: Any, t: dict[str, torch.Tensor], rating, k: int, human_batch: bool, valued, prefix: str):
         """The batch's loss for one network, its parts added to the stats under ``prefix``."""
@@ -574,10 +664,12 @@ def train(
             save_policy(out / "fast-last.pt", fast_net, progress=progress, **setup)
 
     def report() -> dict[str, Any]:
-        nonlocal t_log, evals_log, fast_evals_log
+        nonlocal t_log, evals_log, fast_evals_log, rows_log, busy_log, waited_log
         now = time.monotonic()
         dt = now - t_log
         v = stats.v
+        rows = sum(e.rows for e in evaluators)
+        busy = sum(e.busy for e in evaluators)
         m: dict[str, Any] = {
             "step": step,
             "time": time.time(),
@@ -587,6 +679,14 @@ def train(
             "window": window.count,
             "evals_per_s": (games.evals - evals_log) / dt,
             "fast_evals_per_s": (games.fast_evals - fast_evals_log) / dt,  # of those, by the fast network
+            # Where the time went: the share of rows run through the networks that were
+            # padding; the shares of the time spent in search rounds, waiting there for
+            # the networks, and training; on CUDA the device's share busy with search.
+            "padded": 1 - (games.evals - evals_log) / (rows - rows_log) if rows > rows_log else math.nan,
+            "search_time": v["search_s"] / dt,
+            "search_waited": (games.waited - waited_log) / dt,
+            "train_time": v["train_s"] / dt,
+            "search_busy": (busy - busy_log) / dt if device.type == "cuda" else math.nan,
             "skipped": stats.mean("skipped", "decisions"),  # share of searches that ended at the root
             "games_per_h": v["games"] * 3600 / dt,
             "samples_per_h": v["samples"] * 3600 / dt,
@@ -638,6 +738,9 @@ def train(
             f"(+{m['samples_per_h']:,.0f}/h) | {m['evals_per_s']:,.0f} evals/s"
             + (f" ({m['fast_evals_per_s']:,.0f} fast)" if fast_net is not None else "")
             + (f", {m['skipped']:.0%} unsearched" if cfg.skip_prior > 0 else "")
+            + f", {m['padded']:.0%} padding | time: search {m['search_time']:.0%} (waiting {m['search_waited']:.0%})"
+            + f", training {m['train_time']:.0%}"
+            + (f", device busy with search {m['search_busy']:.0%}" if device.type == "cuda" else "")
             + " | "
             f"train ce {tr['policy_ce']:.3f} kl {tr['policy_kl']:.3f} v {tr['value_ce']:.3f} | "
             f"fresh ce {fr['policy_ce']:.3f} kl {fr['policy_kl']:.3f} v {fr['value_ce']:.3f} | "
@@ -652,11 +755,15 @@ def train(
             f.write(json.dumps(m) + "\n")
         stats.clear()
         t_log, evals_log, fast_evals_log = now, games.evals, games.fast_evals
+        rows_log, busy_log, waited_log = rows, busy, games.waited
         return m
 
     last: dict[str, Any] = {}
     while not cfg.max_steps or step < cfg.max_steps:
-        for g in games.round():
+        t_round = time.monotonic()
+        finished = games.round()
+        stats.add(search_s=time.monotonic() - t_round)
+        for g in finished:
             n = len(g.samples["z"])
             ce, kl, vce = fresh_losses(net, g, movement, device)
             rec = g.record
@@ -687,6 +794,7 @@ def train(
             records.append(out / "games.jsonl", logs)
             games.records.clear()
         if window.count >= cfg.min_window:
+            t_train = time.monotonic()
             while trained < window.added * cfg.train_ratio and (not cfg.max_steps or step < cfg.max_steps):
                 if human is not None and rng.random() < cfg.human_fraction:
                     train_step(True)
@@ -695,6 +803,7 @@ def train(
                     trained += cfg.batch_size
                 if step % cfg.checkpoint_every == 0:
                     checkpoint(f"net-{step:06d}.pt", last)
+            stats.add(train_s=time.monotonic() - t_train)
         else:
             trained = window.added * cfg.train_ratio  # training starts from here, not to catch up
         if time.monotonic() - t_log >= cfg.log_every:

@@ -210,6 +210,9 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--resign-off", type=float, help="share of games that play on, to check the rule (0.1)")
     sp.add_argument("--parallel", type=int, help="games at once (default 512)")
     sp.add_argument(
+        "--group-size", type=int, help="games searched together; the device scores a group as the next is walked (256)"
+    )
+    sp.add_argument(
         "--no-record-games",
         dest="record_games",
         action="store_false",

@@ -148,6 +148,6 @@ python/awbw/     Python package: replay parsing, sources, maps, engine glue, dat
 python/awbw/rules/  rules tables (JSON): units, terrain, damage, COs
 tools/           gen_tables.py: rules JSON -> src/core/tables.h
 tests/cpp/       googletest unit tests for the engine core
-bench/           Google Benchmark micro-benchmarks
+bench/           Google Benchmark micro-benchmarks; selfplay.py: self-play throughput
 tests/python/    pytest; tests over real replays run on whatever is cached
 ```

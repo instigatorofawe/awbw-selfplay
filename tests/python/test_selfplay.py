@@ -18,7 +18,7 @@ from awbw.nn.train_selfplay import (
     Games,
     SelfPlayConfig,
     Window,
-    cycle,
+    bucket_slots,
     game_samples,
     human_starts,
     train,
@@ -67,6 +67,12 @@ def test_window_keeps_the_latest_samples_by_bucket():
     assert sorted(w.picks[:, 0].tolist()) == [9, 10, 11, 12, 13]
 
 
+def test_bucket_slots_share_the_games_by_the_starts():
+    assert bucket_slots(np.array([24] * 89 + [32] * 11), 512) == {24: 456, 32: 56}
+    assert bucket_slots(np.array([16, 24, 32]), 10) == {16: 4, 24: 3, 32: 3}
+    assert bucket_slots(np.array([24] * 999 + [32]), 100) == {24: 100}  # 0.1 of a game: none
+
+
 def test_game_samples_label_results_and_keep_the_likeliest_steps():
     n_steps = [3, MAX_ENTRIES + 8]
     p0 = np.array([0.5, 0.3, 0.2], np.float32)
@@ -94,8 +100,9 @@ def test_game_samples_label_results_and_keep_the_likeliest_steps():
 def test_games_give_sound_samples(cache, tmp_path):  # noqa: F811
     s = start(cache)
     cfg = _core.SearchConfig(sims=4, considered=4, fast_sims=2, full_fraction=0.5, max_days=2, seed=1)
-    starts = cycle(np.frombuffer(s.to_bytes(), np.uint8)[None], np.random.default_rng(0))
-    games = Games(NetEvaluator(_net()), starts, cfg, 3)
+    starts = np.frombuffer(s.to_bytes(), np.uint8)[None]
+    games = Games(NetEvaluator(_net()), starts, np.random.default_rng(0), cfg, 3, group_size=2)
+    assert [g.slots for g in games.groups] == [2, 1] and games.slots == {16: 3}
     done = []
     while len(done) < 4:
         done += games.round()
@@ -120,12 +127,12 @@ def test_games_give_sound_samples(cache, tmp_path):  # noqa: F811
 def test_games_resign_when_lost(cache, tmp_path):  # noqa: F811
     s = start(cache)
     cfg = _core.SearchConfig(sims=4, considered=4, max_days=6, resign_turns=2, resign_off=0, seed=1)
-    starts = cycle(np.frombuffer(s.to_bytes(), np.uint8)[None], np.random.default_rng(0))
+    starts = np.frombuffer(s.to_bytes(), np.uint8)[None]
 
     def lost(planes, globals_, legal, movers):  # player 0 sees every position as lost
         return np.zeros(legal.shape, np.float32), np.where(movers == 0, -1.0, 1.0).astype(np.float32)
 
-    games = Games(lost, starts, cfg, 2)  # type: ignore[arg-type]
+    games = Games(lost, starts, np.random.default_rng(0), cfg, 2)  # type: ignore[arg-type]
     done = []
     while len(done) < 2:
         done += games.round()
@@ -150,8 +157,9 @@ def test_games_score_fast_searches_with_the_fast_network(cache, tmp_path):  # no
         return evaluate
 
     for fast_is_sure in (True, False):
-        starts = cycle(np.frombuffer(s.to_bytes(), np.uint8)[None], np.random.default_rng(0))
-        games = Games(net(not fast_is_sure), starts, cfg, 3, net(fast_is_sure))  # type: ignore[arg-type]
+        starts = np.frombuffer(s.to_bytes(), np.uint8)[None]
+        rng = np.random.default_rng(0)
+        games = Games(net(not fast_is_sure), starts, rng, cfg, 3, net(fast_is_sure))  # type: ignore[arg-type]
         done = []
         while len(done) < 3:
             done += games.round()

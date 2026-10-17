@@ -2,6 +2,7 @@ import json
 
 import numpy as np
 import pytest
+import torch
 
 from awbw import _core, engine
 from awbw.agents import DRAW, RandomAgent, play
@@ -80,6 +81,31 @@ def test_leaves_are_encoded_as_the_policy_reads_them(md):
     np.testing.assert_allclose(values2, values, rtol=1e-5, atol=1e-6)
     search.submit(logits, values)
     assert search.active == 3
+
+
+DEVICES = ["cpu"] + ["mps"] * torch.backends.mps.is_available() + ["cuda"] * torch.cuda.is_available()
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_queued_batches_score_as_one_at_a_time(md, device):
+    s = start(md)
+    search = _core.BatchedSearch(_core.SearchConfig(sims=4), 16)
+    for state, picks in _decisions(s):
+        search.add_root(state, selection_of(state, picks))
+    search.collect()
+    planes, globals_, legal, movers = search.batch()
+    net = _net()
+    want = NetEvaluator(net)(planes, globals_, legal, movers)
+    evaluator = NetEvaluator(net, device, bf16=False)
+    evaluator.pad = True  # as compiled: to pad_to, or else a power of two
+    # Several batches queued before any is read, each in two parts (2 leaves and 1).
+    evaluator.batch_size = 2
+    queued = [evaluator.launch(planes, globals_, legal, movers, pad_to=pad) for pad in (0, 3, 5)]
+    assert evaluator.evals == 9 and evaluator.rows == (16 + 16) + (3 + 3) + (5 + 5)
+    for pending in reversed(queued):
+        logits, values = pending.result()
+        np.testing.assert_allclose(logits, want[0], rtol=1e-3, atol=1e-4)
+        np.testing.assert_allclose(values, want[1], rtol=1e-3, atol=1e-4)
 
 
 def test_search_results_and_the_agent(md):

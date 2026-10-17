@@ -1548,9 +1548,45 @@ the search always uses the network being trained, the same module.
 - **Starts:** the first states of the v1 dataset's training games (33,860),
   in random order. Validation games stay unseen for the arena and ladder.
   Each game's luck is seeded on its own, so two games from one start differ.
-- **Games:** `parallel` (512) at once, in one `BatchedSearch` per board
-  bucket. Each round, every search collects its leaves and the network
-  scores them on the GPU.
+- **Games:** `parallel` (512) at once. A game that ends gives its slot to
+  a new one at once.
+  - **Fixed slots per bucket** (`bucket_slots`): the games are shared
+    among the board buckets by their share of the starts, so each bucket
+    always has the same number going. Over v1-full that is 456 on 24×24
+    boards and 56 on 32×32. Every game has a leaf each round, so the
+    network's batches keep one shape, and a compiled evaluator pads to
+    the slots (`launch`'s `pad_to`) instead of the next power of two.
+    Before this, 456 leaves ran as 512 rows and 56 as 64: 12–14% of the
+    network's work was padding. Random refills also let the bucket counts
+    drift, and 65 leaves on 32×32 boards would have run as 128. With a
+    fast network each network's share of a group's leaves varies, so
+    those batches still pad to a power of two.
+  - **Groups, queued** (`--group-size`, 256): a bucket's games are
+    searched in groups of about 256, one `BatchedSearch` each, the
+    buckets' groups interleaved (228, 56, 228). A round goes once round
+    them. Each group submits the answers to the leaves it queued the time
+    before, gives up its finished games, refills its slots, collects and
+    queues its new leaves (`NetEvaluator.launch`) without waiting. So the
+    GPU scores the groups before it while the CPU walks the next one.
+    Copies go through pinned memory on CUDA, which don't wait for the
+    queued work. Calling a `NetEvaluator` still waits, as the arena and
+    `SearchAgent` want.
+  - **Measured on the M4 Pro** (2026-10-17, `bench/selfplay.py`: 512
+    games from turn starts spread over v1-full, 64 / 16 simulations,
+    `NetEvaluator` with `compile` on MPS, no training). With the
+    64×6 ResNet, whose 124 µs a leaf on MPS is near what tf128 should
+    cost on the 5070, it was 6,540 evaluations/s before, 7,240 with fixed
+    slots alone (+11%) and 7,720 queued as well (+18%). Group size 128,
+    256 or one group per bucket made no difference, nor did 1,024 games.
+    The search then waits for the network 86–90% of its time, and 130 µs
+    a leaf is what the network alone runs at: the GPU is the limit. tf128
+    on MPS runs 2.4 ms a leaf (MPS attention is slow), so only the padding
+    counts there: 347 → 389 (+12%).
+  - **To measure on the box:** the same with tf128 on the 5070; the CUDA
+    path (pinned copies, timed events) has not run yet. Then
+    `parallel` 512 / 1024 / 2048 (more games in flight make each game
+    span more network updates, so the smallest that keeps the GPU busy),
+    and CUDA graphs, which the fixed shapes now allow.
   - Searches use playout caps: 25% are full (64 simulations) and become
     samples; the rest use 16 and only choose the step.
   - **Cheaper search** (both off by default; to be measured on the box
@@ -1627,7 +1663,11 @@ the search always uses the network being trained, the same module.
     training; human batches keep theirs, hidden at random.
 - **Output:** `metrics.jsonl` every minute, with games/h, game length, the
   shares capped and resigned, the first player's wins, and train, fresh and
-  human losses.
+  human losses. Where the time went: the share of the network's rows that
+  were padding, the shares of the time in search rounds, waiting there for
+  the network, and in training, and on CUDA the GPU's share busy with
+  search (timed events around each queued batch). The waiting share
+  misleads on MPS, which blocks while queueing once the GPU is far behind.
   `net-NNNNNN.pt` every 2,000 steps; `last.pt` + `optimizer.pt` for
   `--resume`, after which the window starts empty.
 - **Game records** (`games.py`): every finished game goes to the run's

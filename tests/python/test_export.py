@@ -7,7 +7,7 @@ from awbw import _core, engine, games, rules
 from awbw.agents import RandomAgent, play
 from awbw.cli import main
 from awbw.games import replay
-from awbw.nn.train_selfplay import Games, cycle
+from awbw.nn.train_selfplay import Games
 from awbw.replay import load_replay
 from awbw.replay.export import (
     FIRST_GAME_ID,
@@ -223,7 +223,7 @@ def test_self_play_games_export_and_step_as_played(md):  # noqa: F811
     """Self-play records, stopped at the day cap or resigned, export under a
     stable id and name, read back and step exactly every turn."""
     s = start(md)
-    starts = cycle(np.frombuffer(s.to_bytes(), np.uint8)[None], np.random.default_rng(0))
+    starts = np.frombuffer(s.to_bytes(), np.uint8)[None]
     capped = _core.SearchConfig(sims=4, considered=4, max_days=3, seed=1)
     resigning = _core.SearchConfig(sims=4, considered=4, max_days=6, resign_turns=2, resign_off=0, seed=1)
 
@@ -232,7 +232,7 @@ def test_self_play_games_export_and_step_as_played(md):  # noqa: F811
 
     logs = []
     for evaluate, cfg in ((NetEvaluator(_net()), capped), (lost, resigning)):
-        played = Games(evaluate, starts, cfg, 2)  # type: ignore[arg-type]
+        played = Games(evaluate, starts, np.random.default_rng(0), cfg, 2)  # type: ignore[arg-type]
         done = []
         while len(done) < 2:
             done += played.round()

@@ -10,8 +10,10 @@ samples and the finished games as they come.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import torch
@@ -26,6 +28,35 @@ from .nn.policy import Policy
 Evaluate = Callable[[np.ndarray, np.ndarray, np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]
 
 
+class Pending:
+    """Leaves ``NetEvaluator.launch`` queued on the device; ``result`` waits for
+    their logits and values."""
+
+    def __init__(self, owner: NetEvaluator, shape: tuple[int, ...], parts: list, start: Any, end: Any):
+        self.owner = owner
+        self.shape = shape
+        self.parts = parts  # (rows, logits, values) on the host, filled once the device gets there,
+        # and the host tensors copied to it, kept until then (MPS may copy straight from them)
+        self.start, self.end = start, end  # events around the work on CUDA (timed), else end alone
+        self.waited = 0.0  # seconds result() waited for the device
+
+    def result(self) -> tuple[np.ndarray, np.ndarray]:
+        t = time.perf_counter()
+        if self.end is not None:
+            self.end.synchronize()
+        self.waited = time.perf_counter() - t
+        if self.start is not None:
+            self.owner.busy += self.start.elapsed_time(self.end) / 1000
+            self.start = None
+        if len(self.parts) == 1:
+            _, logits, values, _ = self.parts[0]
+            return logits.numpy(), values.numpy()
+        out = np.empty(self.shape, np.float32), np.empty(self.shape[0], np.float32)
+        for rows, logits, values, _ in self.parts:
+            out[0][rows], out[1][rows] = logits.numpy(), values.numpy()
+        return out
+
+
 class NetEvaluator:
     """Scores search leaves with a policy-value network: the logits of each
     leaf's legal steps and P(win) - P(loss) for the player deciding there.
@@ -34,7 +65,13 @@ class NetEvaluator:
     leaf, e.g. one strong player's for both; None leaves them unknown. On CUDA
     the forward pass runs in bfloat16 unless ``bf16`` is False. ``compile``
     runs it through torch.compile (3x the evaluations on the RTX 5070), with
-    batches padded to a power of two so that few shapes get compiled.
+    batches padded to a power of two so that few shapes get compiled, or to
+    ``launch``'s ``pad_to``.
+
+    ``launch`` queues a batch on the device and returns at once, so the caller
+    can walk other searches meanwhile; calling the evaluator waits for it.
+    ``evals`` counts the leaves scored, ``rows`` those and the padding, and on
+    CUDA ``busy`` the device's seconds on them.
     """
 
     def __init__(
@@ -55,40 +92,70 @@ class NetEvaluator:
         self.forward = torch.compile(self.net) if compile else self.net
         self.pad = compile
         self.ratings = ratings
+        self._ratings = None if ratings is None else torch.tensor([ratings], dtype=torch.int32, device=self.device)
         self.bf16 = bf16 and self.device.type == "cuda"
         self.batch_size = batch_size
+        self.pin = self.device.type == "cuda"  # pinned host memory: copies that don't wait for the device
         self.evals = 0
+        self.rows = 0
+        self.busy = 0.0
 
     @property
     def movement(self) -> bool:
         return self.cfg.movement
 
-    @torch.no_grad()
     def __call__(
         self, planes: np.ndarray, globals_: np.ndarray, legal: np.ndarray, movers: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray]:
+        return self.launch(planes, globals_, legal, movers).result()
+
+    def padded(self, m: int, pad_to: int = 0) -> int:
+        """The rows a batch of ``m`` leaves runs as."""
+        if not self.pad:
+            return m
+        return pad_to if m <= pad_to else max(16, 1 << (m - 1).bit_length())
+
+    def _host(self, a: np.ndarray, rows: int) -> torch.Tensor:
+        """``a`` in host memory ``rows`` long, padded with zeros."""
+        t = torch.empty((rows, *a.shape[1:]), dtype=torch.from_numpy(a[:0]).dtype, pin_memory=self.pin)
+        t[: len(a)] = torch.from_numpy(a)
+        t[len(a) :] = 0
+        return t
+
+    @torch.no_grad()
+    def launch(
+        self, planes: np.ndarray, globals_: np.ndarray, legal: np.ndarray, movers: np.ndarray, pad_to: int = 0
+    ) -> Pending:
+        """Queue the leaves on the device without waiting for them. ``pad_to``: with
+        ``compile``, a batch of at most this many leaves runs as this many rows."""
         n = len(planes)
-        logits = np.empty(legal.shape, np.float32)
-        values = np.empty(n, np.float32)
+        start = end = None
+        if self.device.type == "cuda":
+            start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            start.record()
+        elif self.device.type != "cpu":
+            end = torch.Event(self.device)  # timed events hang on MPS (torch 2.14)
+        parts = []
         for b in range(0, n, self.batch_size):
             rows = slice(b, min(n, b + self.batch_size))
             m = rows.stop - rows.start
-            size = max(16, 1 << (m - 1).bit_length()) if self.pad else m
-            p = torch.zeros((size, *planes.shape[1:]), dtype=torch.uint8)
-            g = torch.zeros((size, globals_.shape[1]), dtype=torch.float32)
-            p[:m], g[:m] = torch.from_numpy(planes[rows]), torch.from_numpy(globals_[rows])
-            p, g = p.to(self.device), g.to(self.device)
-            idx = torch.from_numpy(legal[rows]).to(self.device)
-            r = None
-            if self.ratings is not None:
-                r = torch.tensor(self.ratings, dtype=torch.int32, device=self.device).expand(size, 2)
+            size = self.padded(m, pad_to)
+            host = self._host(planes[rows], size), self._host(globals_[rows], size), self._host(legal[rows], m)
+            p, g, idx = (t.to(self.device, non_blocking=True) for t in host)
+            r = None if self._ratings is None else self._ratings.expand(size, 2)
             with torch.autocast(self.device.type, torch.bfloat16, enabled=self.bf16):
                 spatial, nonspatial, value = self.forward(p, g, r)
             flat = flat_policy(spatial[:m], nonspatial[:m]).float()
-            logits[rows] = flat.gather(1, idx.clamp(min=0)).cpu().numpy()
-            values[rows] = value_of(value[:m]).cpu().numpy()
+            logits = torch.empty((m, legal.shape[1]), dtype=torch.float32, pin_memory=self.pin)
+            values = torch.empty(m, dtype=torch.float32, pin_memory=self.pin)
+            logits.copy_(flat.gather(1, idx.clamp(min=0)), non_blocking=True)
+            values.copy_(value_of(value[:m]).float(), non_blocking=True)
+            parts.append((rows, logits, values, host))
+            self.rows += size
+        if end is not None:
+            end.record()
         self.evals += n
-        return logits, values
+        return Pending(self, legal.shape, parts, start, end)
 
 
 def run(search: _core.BatchedSearch, evaluate: Evaluate) -> int:
