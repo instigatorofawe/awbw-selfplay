@@ -1840,6 +1840,13 @@ rules exactly (two players, no fog, as everywhere in v1).
     picks decoded), `/api/unit?x&y` (any unit's ranges), and `POST`
     `/api/pick`, `cancel`, `undo`, `resign`, `think` (the network's next
     action, which the page animates) and `new`.
+  - New game opens a form (done): the map (the cached two-player maps by
+    name, any AWBW map id, fetched if new, or a real game's setup at
+    random), each player's CO (Sonja aside, as in training) and army, and
+    the person's side, filled in with the current game's setup
+    (`GET /api/setup`; `POST /api/new` takes the choices, `play.Setup`).
+    A CO left unchosen is the real game's or random; an army, the map's
+    (a player whose slot's country the other took gets the other slot's).
   - The viewer and the play page share `board.js`.
 - **Input follows the micro-steps (§3)**, which already match AWBW's
   clicks:

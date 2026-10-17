@@ -325,6 +325,16 @@ class Game:
         """The game's fixed data for board.js, and who plays which side."""
         return board_data(self.md, self.start, self.labels, moves=True) | {"human": self.human}
 
+    def setup(self) -> dict[str, Any]:
+        """The game's setup as the new-game form takes it (``Setup.parse``)."""
+        players = self.start.players[:2]
+        return {
+            "map": int(self.start.map_id),
+            "cos": [int(p.co) for p in players],
+            "countries": [int(p.country) for p in players],
+            "human": self.human,
+        }
+
     def view(self) -> dict[str, Any]:
         with self.lock:
             s = self.state
@@ -501,6 +511,11 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(game.board())
         elif url.path == "/api/view":
             self._json(game.view())
+        elif url.path == "/api/setup":
+            if self._server.new_game is None:
+                self._json({"error": "this server plays one game"}, 409)
+                return
+            self._json({"choices": choices(), "current": game.setup()})
         elif url.path == "/api/unit":
             q = parse_qs(url.query)
             try:
@@ -553,30 +568,108 @@ def serve(game: Game, port: int = 0, new_game: Callable[[dict[str, Any]], Game] 
     return Server(("127.0.0.1", port), game, new_game)
 
 
+Pair = tuple[int | str | None, int | str | None]  # player 1's, player 2's; None: not given
+
+
 def start_for(
     base: _core.GameState,
     rng: np.random.Generator,
     map_id: int | None = None,
-    cos: tuple[int | str, int | str] | None = None,
-    countries: tuple[int | str, int | str] | None = None,
+    cos: Pair | None = None,
+    countries: Pair | None = None,
 ) -> _core.GameState:
     """A first state (``engine.new_game``) from a real game's setup, ``base``:
     its map, COs, countries and settings, each replaced where given. On
     another map, COs not given are drawn at random (Sonja aside, as in
-    training) and countries default to the map's."""
+    training) and countries not given are the map's."""
     from .engine import new_game
 
     same_map = map_id is None or map_id == base.map_id
-    if cos is None:
-        if same_map:
-            cos = (int(base.players[0].co), int(base.players[1].co))
-        else:
-            pool = sorted(c.id for c in rules.load().cos.values() if c.name != "Sonja")
-            cos = (int(rng.choice(pool)), int(rng.choice(pool)))
-    if countries is None and same_map:
-        countries = (int(base.players[0].country), int(base.players[1].country))
+    pool = sorted(c.id for c in rules.load().cos.values() if c.name != "Sonja")
+    picked = [
+        c if c is not None else int(base.players[p].co) if same_map else int(rng.choice(pool))
+        for p, c in enumerate(cos or (None, None))
+    ]
+    armies = list(countries or (None, None))
+    if same_map:
+        armies = [c if c is not None else int(base.players[p].country) for p, c in enumerate(armies)]
     settings = base.settings if same_map else _core.Settings()
-    return new_game(base.map_id if map_id is None else map_id, cos, countries, settings, seed=int(rng.integers(2**31)))
+    seed = int(rng.integers(2**31))
+    return new_game(
+        base.map_id if map_id is None else map_id, (picked[0], picked[1]), (armies[0], armies[1]), settings, seed=seed
+    )
+
+
+@dataclass(frozen=True)
+class Setup:
+    """A new game as the page's form or the command line gives it: the map
+    (None: a real game's), each player's CO and country (None: as
+    ``start_for`` picks them) and the person's side (0 moves first)."""
+
+    map_id: int | None = None
+    cos: Pair = (None, None)
+    countries: Pair = (None, None)
+    human: int = 0
+
+    @classmethod
+    def parse(cls, body: dict[str, Any]) -> Setup:
+        """The form's request: {"map", "cos": [2], "countries": [2], "human"}, ids or null."""
+
+        def ids(key: str) -> Pair:
+            v = body.get(key) or [None, None]
+            if not isinstance(v, list) or len(v) != 2:
+                raise ValueError(f"{key} needs a value for each player")
+            return (_id(v[0], key), _id(v[1], key))
+
+        human = body.get("human", 0)
+        if human not in (0, 1):
+            raise ValueError("human is 0 or 1")
+        return cls(_id(body.get("map"), "map"), ids("cos"), ids("countries"), human)
+
+
+def _id(v: Any, what: str) -> int | None:
+    if v is None or v == "":
+        return None
+    try:
+        if isinstance(v, bool):
+            raise TypeError
+        n = int(v)
+    except (TypeError, ValueError):
+        raise ValueError(f"{what}: {v!r} isn't an id") from None
+    if n <= 0:
+        raise ValueError(f"{what}: {v!r} isn't an id")
+    return n
+
+
+_MAPS: dict[Path, tuple[float, dict[str, Any] | None]] = {}
+
+
+def choices() -> dict[str, Any]:
+    """What the new-game form offers: the cached two-player maps by name, the
+    COs (Sonja aside, as in training) and the countries."""
+    from .engine import map_countries
+    from .maps import load_map
+    from .net import cache_dir
+
+    r = rules.load()
+    maps = []
+    for path in sorted((cache_dir() / "maps").glob("*.json")):
+        mtime = path.stat().st_mtime
+        if path not in _MAPS or _MAPS[path][0] != mtime:
+            entry = None
+            try:
+                m = load_map(int(path.stem))
+                if len(map_countries(m)) == 2:
+                    entry = {"id": m.id, "name": m.name or f"Map {m.id}", "w": m.width, "h": m.height}
+            except (ValueError, KeyError, OSError):
+                pass
+            _MAPS[path] = (mtime, entry)
+        if (entry := _MAPS[path][1]) is not None:
+            maps.append(entry)
+    maps.sort(key=lambda m: (m["name"].lower(), m["id"]))
+    cos = sorted(({"id": c.id, "name": c.name} for c in r.cos.values() if c.name != "Sonja"), key=lambda c: c["name"])
+    countries = [{"id": c.id, "name": c.name, "code": c.code} for c in sorted(r.countries.values(), key=lambda c: c.id)]
+    return {"maps": maps, "cos": cos, "countries": countries}
 
 
 def record_to(path: Path) -> Callable[[GameLog], None]:

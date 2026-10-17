@@ -143,7 +143,7 @@ def _lookup(table: dict, key: int | str, what: str) -> int:
 def new_game(
     game_map: MapInfo | int,
     cos: tuple[int | str, int | str],
-    countries: tuple[int | str, int | str] | None = None,
+    countries: tuple[int | str | None, int | str | None] | None = None,
     settings: _core.Settings | None = None,
     starting_funds: int = 0,
     seed: int | None = None,
@@ -157,7 +157,8 @@ def new_game(
 
     ``cos`` and ``countries`` (AWBW ids, names or country codes) are player
     1's then player 2's; countries default to the map's slots (players may take
-    any). ``seed`` reseeds the luck.
+    any; a player's None is their slot's, or the other slot's when the other
+    player took theirs). ``seed`` reseeds the luck.
     """
     game_map = load_map(game_map) if isinstance(game_map, int) else game_map
     r = rules.load()
@@ -166,7 +167,10 @@ def new_game(
     if len(slots) != 2:
         raise ValueError(f"map {game_map.id} has {len(slots)} countries; only two-player maps are played")
     co_ids = [_lookup(r.cos, c, "CO") for c in cos]
-    country_ids = slots if countries is None else [_lookup(r.countries, c, "country") for c in countries]
+    given = [None if c is None else _lookup(r.countries, c, "country") for c in countries or (None, None)]
+    country_ids = [
+        c if c is not None else slots[p] if slots[p] != given[1 - p] else slots[1 - p] for p, c in enumerate(given)
+    ]
     if country_ids[0] == country_ids[1]:
         raise ValueError("the players need different countries")
     settings = settings if settings is not None else _core.Settings()

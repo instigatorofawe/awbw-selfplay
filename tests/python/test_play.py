@@ -207,6 +207,11 @@ def test_new_game_is_awbws_first_state(md, tmp_path):  # noqa: F811
         (U["Infantry"], 0, 3, 1, 100, 99, 0),
         (U["Tank"], 1, 4, 4, 90, tank.fuel, tank.ammo),
     ]
+    mixed = engine.new_game(md.id, ("Andy", "Max"), (None, "ge"))
+    assert [p.country for p in mixed.players[:2]] == [1, 3]
+    swapped = engine.new_game(md.id, ("Andy", "Max"), ("bm", None))  # player 2's slot taken: they get player 1's
+    assert [p.country for p in swapped.players[:2]] == [2, 1]
+    assert [swapped.prop_owner(i) for i in range(md.n_props)] == [s.prop_owner(i) for i in range(md.n_props)]
     with pytest.raises(ValueError, match="different countries"):
         engine.new_game(md.id, ("Andy", "Max"), ("os", "os"))
     with pytest.raises(ValueError, match="no CO"):
@@ -226,3 +231,79 @@ def test_starts_take_a_real_games_setup_with_what_is_given_instead(md, tmp_path)
     other = play.start_for(base, rng, map_id=_predeployed_map(tmp_path))
     assert other.map_id == 79 and [p.country for p in other.players[:2]] == [1, 2]
     assert "Sonja" not in [rules.load().cos[p.co].name for p in other.players[:2]] and other.settings.capture_win != 9
+    one = play.start_for(base, rng, cos=("Andy", None), countries=(None, "os"))
+    assert [rules.load().cos[p.co].name for p in one.players[:2]] == ["Andy", "Kindle"]
+    assert [p.country for p in one.players[:2]] == [5, 1]
+    away = play.start_for(base, rng, map_id=79, cos=(None, "Max"), countries=("ge", None))
+    names = [rules.load().cos[p.co].name for p in away.players[:2]]
+    assert names[1] == "Max" and names[0] != "Sonja" and [p.country for p in away.players[:2]] == [3, 2]
+
+
+def test_the_new_game_form_gives_ids_or_nulls():
+    form = {"map": "61748", "cos": [3, None], "countries": ["", "2"], "human": 1}
+    assert play.Setup.parse(form) == play.Setup(61748, (3, None), (None, 2), 1)
+    assert play.Setup.parse({}) == play.Setup()
+    for bad in ({"map": "abc"}, {"map": -4}, {"cos": [1]}, {"cos": [True, None]}, {"countries": "os"}, {"human": 2}):
+        with pytest.raises(ValueError):
+            play.Setup.parse(bad)
+
+
+def _one_army_map(tmp_path) -> None:
+    terrain = np.ones((3, 3), dtype=np.int16)
+    terrain[1, 1] = 38  # an Orange Star city, the only army
+    info = {"Name": "solo", "Size X": 3, "Size Y": 3, "Terrain Map": terrain.T.tolist(), "Predeployed Units": []}
+    (tmp_path / "maps" / "80.json").write_text(json.dumps(info))
+
+
+def test_the_form_offers_the_cached_two_player_maps_and_the_cos_but_sonja(md, tmp_path):  # noqa: F811
+    _predeployed_map(tmp_path)
+    _one_army_map(tmp_path)
+    (tmp_path / "maps" / "notes.json").write_text("{}")
+    c = play.choices()
+    assert [(m["id"], m["name"], m["w"], m["h"]) for m in c["maps"]] == [(79, "p", 7, 6), (78, "t", 7, 6)]
+    names = [co["name"] for co in c["cos"]]
+    assert "Sonja" not in names and "Andy" in names and names == sorted(names)
+    assert c["countries"][:2] == [
+        {"id": 1, "name": "Orange Star", "code": "os"},
+        {"id": 2, "name": "Blue Moon", "code": "bm"},
+    ]
+
+
+def _get(url: str) -> tuple[int, dict]:
+    try:
+        with urllib.request.urlopen(url) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+def test_the_server_starts_the_game_the_form_asks_for(md):  # noqa: F811
+    asked = []
+
+    def new_game(params: dict) -> Game:
+        asked.append(play.Setup.parse(params))
+        return _game(md)
+
+    servers = [serve(_game(md), new_game=new_game), serve(_game(md))]
+    for server in servers:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = servers[0].url
+        code, out = _get(url + "api/setup")
+        assert code == 200 and [m["id"] for m in out["choices"]["maps"]] == [md.id]
+        s = start(md)
+        assert out["current"] == {
+            "map": md.id,
+            "cos": [s.players[0].co, s.players[1].co],
+            "countries": [1, 2],
+            "human": 0,
+        }
+        form = {"map": md.id, "cos": [None, 7], "countries": [None, None], "human": 1}
+        assert _post(url + "api/new", form)[0] == 200 and asked == [play.Setup(md.id, (None, 7), (None, None), 1)]
+        code, out = _post(url + "api/new", {"map": "x"})
+        assert code == 409 and "isn't an id" in out["error"]
+        assert _get(servers[1].url + "api/setup")[0] == 409
+    finally:
+        for server in servers:
+            server.shutdown()
+            server.server_close()

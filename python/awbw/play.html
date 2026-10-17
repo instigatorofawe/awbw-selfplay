@@ -79,6 +79,19 @@ button.power { border-color: var(--accent2); }
 .tip .dmg { font-weight: 600; }
 .over { font-size: 16px; font-weight: 700; }
 .keys { color: var(--muted); font-size: 12px; margin-top: 8px; }
+dialog { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 10px;
+  padding: 16px; width: min(460px, calc(100vw - 32px)); box-shadow: 0 10px 30px rgba(0,0,0,.25); }
+dialog::backdrop { background: rgba(0,0,0,.35); }
+dialog h2 { font-size: 16px; margin: 0 0 12px; font-weight: 650; }
+.form { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr); gap: 8px 10px; align-items: center; }
+.form .lb { color: var(--muted); font-size: 13px; }
+.form .wide { grid-column: 2 / 4; }
+.form .head { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.form select, .form input[type=text] { font: inherit; width: 100%; min-width: 0; background: var(--chip); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 7px; padding: 5px 6px; }
+.form .sides { grid-column: 2 / 4; display: flex; gap: 14px; flex-wrap: wrap; }
+.form .note { grid-column: 1 / 4; color: var(--muted); font-size: 12.5px; }
+dialog .controls { justify-content: flex-end; margin-top: 14px; }
 </style>
 </head>
 <body>
@@ -120,6 +133,25 @@ button.power { border-color: var(--accent2); }
   </div>
 </div>
 <div class="tip" id="tip"></div>
+<dialog id="setup" aria-labelledby="setupTitle">
+  <h2 id="setupTitle">New game</h2>
+  <div class="form">
+    <span class="lb">Map</span><select id="sMap" class="wide"></select>
+    <span class="lb">or id</span><input type="text" id="sMapId" class="wide" inputmode="numeric" autocomplete="off"
+      placeholder="any AWBW map id (downloaded if new)">
+    <span></span><span class="head">CO</span><span class="head">Army</span>
+    <span class="lb">Player 1</span><select id="sCo0"></select><select id="sArmy0"></select>
+    <span class="lb">Player 2</span><select id="sCo1"></select><select id="sArmy1"></select>
+    <span class="lb">You play</span>
+    <div class="sides">
+      <label><input type="radio" name="sSide" value="0"> Player 1 (moves first)</label>
+      <label><input type="radio" name="sSide" value="1"> Player 2</label>
+    </div>
+    <div class="note" id="sNote"></div>
+  </div>
+  <div class="err" id="sErr"></div>
+  <div class="controls"><button id="sCancel">Cancel</button><button id="sStart" class="primary">Start</button></div>
+</dialog>
 <script>
 /*BOARD_JS*/
 const G = /*GAME_DATA*/null;
@@ -451,13 +483,68 @@ $("bDelete").onclick = async () => {
   pick(id);
 };
 $("bResign").onclick = () => { if (confirm("Resign this game?")) send("resign", {}); };
+
+// New game: a form with what the server offers, filled in with this game's setup
+const option = (value, text) => `<option value="${value}">${esc(text)}</option>`;
+const realGame = () => $("sMap").value === "" && !$("sMapId").value.trim();
+function choose(el, v) { el.value = v == null ? "" : String(v); if (el.selectedIndex < 0) el.value = ""; }
+function setupLabels() {  // what leaving a CO or an army unchosen means
+  const real = realGame();
+  for (const i of [0, 1]) {
+    $("sCo" + i).options[0].text = real ? "The game's" : "Random";
+    $("sArmy" + i).options[0].text = real ? "The game's" : "The map's";
+  }
+}
+function mapChanged() {  // another map: its own armies; a real game's: its COs too
+  for (const i of [0, 1]) { $("sArmy" + i).value = ""; if (realGame()) $("sCo" + i).value = ""; }
+  setupLabels();
+}
+$("sMap").onchange = () => { $("sMapId").value = ""; mapChanged(); };
+$("sMapId").oninput = mapChanged;
 $("bNew").onclick = async () => {
-  if (V && !V.over && !confirm("Leave this game and start a new one?")) return;
-  if (await send("new", {})) location.reload();
+  let out;
+  try { out = await api("setup"); } catch (e) { showError(e.message); return; }
+  const c = out.choices, cur = out.current;
+  const maps = c.maps.some((m) => m.id === cur.map) ? c.maps :
+    c.maps.concat([{ id: cur.map, name: M.name || "Map " + cur.map, w: M.width, h: M.height }]);
+  $("sMap").innerHTML = option("", "A real game's setup, at random") +
+    maps.map((m) => option(m.id, `${m.name} · ${m.w}×${m.h}`)).join("");
+  for (const i of [0, 1]) {
+    $("sCo" + i).innerHTML = option("", "") + c.cos.map((x) => option(x.id, x.name)).join("");
+    $("sArmy" + i).innerHTML = option("", "") + c.countries.map((x) => option(x.id, x.name)).join("");
+    choose($("sCo" + i), cur.cos[i]);
+    choose($("sArmy" + i), cur.countries[i]);
+  }
+  choose($("sMap"), cur.map);
+  $("sMapId").value = "";
+  document.querySelector(`input[name=sSide][value="${cur.human}"]`).checked = true;
+  setupLabels();
+  $("sNote").textContent = V && !V.over ? "This game will be left unfinished; unfinished games aren't recorded." : "";
+  $("sErr").textContent = "";
+  $("sStart").disabled = false; $("sStart").textContent = "Start";
+  $("setup").showModal();
+};
+$("sCancel").onclick = () => $("setup").close();
+$("sStart").onclick = async () => {
+  const body = {
+    map: $("sMapId").value.trim() || $("sMap").value || null,
+    cos: [0, 1].map((i) => $("sCo" + i).value || null),
+    countries: [0, 1].map((i) => $("sArmy" + i).value || null),
+    human: +document.querySelector("input[name=sSide]:checked").value,
+  };
+  $("sStart").disabled = true; $("sStart").textContent = "Starting…"; $("sErr").textContent = "";
+  try {
+    await api("new", body);
+    location.reload();
+  } catch (e) {
+    $("sErr").textContent = e.message;
+    $("sStart").disabled = false; $("sStart").textContent = "Start";
+  }
 };
 $("showValue").onchange = () => { try { localStorage.setItem("showValue", $("showValue").checked ? "1" : ""); } catch (e) { /* no storage */ } render(); };
 try { $("showValue").checked = localStorage.getItem("showValue") === "1"; } catch (e) { /* no storage */ }
 document.addEventListener("keydown", (e) => {
+  if ($("setup").open) return;  // the form's own keys
   if (e.key === "Escape") back();
   else if ((e.key === "u" || e.key === "U" || (e.key === "z" && (e.metaKey || e.ctrlKey))) && !$("bUndo").disabled) send("undo", {});
   else return;

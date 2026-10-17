@@ -1120,11 +1120,9 @@ def _play(args, http: Http) -> int:
     from .data.shards import Dataset
     from .ladder import validation_starts
     from .nn.policy import Policy
-    from .play import Game, record_to, serve, start_for
+    from .play import Game, Setup, record_to, serve, start_for
     from .search import NetEvaluator, SearchAgent, SearchSettings
 
-    if args.map is not None:
-        maps.fetch_map(args.map, http)
     bases = validation_starts(Dataset(args.data or cache_dir() / "datasets" / "v1"), 200)
     rng = np.random.default_rng(args.seed)
     policy = Policy.load(args.checkpoint, args.device)
@@ -1136,14 +1134,22 @@ def _play(args, http: Http) -> int:
     name = args.checkpoint.parent.name if args.checkpoint.stem in ("best", "last") else args.checkpoint.stem
     label = f"{name} ({args.sims} sims)" if args.sims > 0 else f"{name} (prior)"
     record = args.record or cache_dir() / "games" / "local.jsonl"
-    human = args.side - 1
-    labels = ("human", label) if human == 0 else (label, "human")
     info = {"checkpoint": str(args.checkpoint), "sims": args.sims}
+    pair = lambda v: (v[0], v[1]) if v else (None, None)  # noqa: E731
+    first = Setup(args.map, pair(args.cos), pair(args.countries), args.side - 1)
 
     def new_game(params: dict) -> Game:
+        """The first game from the command line's setup, the next ones from the page's form."""
+        setup = Setup.parse(params) if params else first
+        if setup.map_id is not None:
+            try:
+                maps.fetch_map(setup.map_id, http)
+            except (OSError, ValueError) as e:
+                raise ValueError(f"map {setup.map_id} couldn't be fetched ({e})") from e
         base = bases[int(rng.integers(len(bases)))]
-        start = start_for(base, rng, args.map, tuple(args.cos) if args.cos else None, args.countries)
-        return Game(start, human, agent, labels, on_over=record_to(record), info=info)
+        start = start_for(base, rng, setup.map_id, setup.cos, setup.countries)
+        labels = ("human", label) if setup.human == 0 else (label, "human")
+        return Game(start, setup.human, agent, labels, on_over=record_to(record), info=info)
 
     server = serve(new_game({}), args.port, new_game)
     print(f"playing {label} at {server.url} (finished games go to {record}); Ctrl-C stops")
