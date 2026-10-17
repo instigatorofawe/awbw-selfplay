@@ -17,6 +17,7 @@ from awbw.data.loader import (
     PHASE_IDLE,
     PHASE_MOVED,
     PHASE_SELECTED,
+    DecisionBatch,
     aux_targets,
     decision_batches,
     encode_decisions,
@@ -38,13 +39,14 @@ from awbw.nn.model import (
     rotate,
 )
 from awbw.nn.policy import Policy, load_policy, policy_ids, save_policy
-from awbw.nn.train_critic import dihedral
+from awbw.nn.train_critic import _optimizer, dihedral
 from awbw.nn.train_policy import (
     PolicyTrainConfig,
     count_decisions,
     games_keep,
     lr_at,
     policy_metrics,
+    reset_value_head,
     split_size,
     train,
     undihedral,
@@ -449,6 +451,69 @@ def test_a_pass_can_skip_its_first_groups(cache, tmp_path):
     assert all((a.row == b.row).all() and (a.target == b.target).all() for a, b in zip(rest, later, strict=True))
     with pytest.raises(ValueError, match="no groups skipped"):
         next(decision_batches(ds, 16, shuffle=False, memo=[], skip_groups=1))
+
+
+def test_passes_spread_each_shard_over_the_pass(cache, tmp_path):
+    ds = five_shards(cache, tmp_path)
+
+    def decisions(batches: list[DecisionBatch]) -> list[tuple[int, int]]:
+        return sorted((int(r), int(s)) for b in batches for r, s in zip(b.row, b.step, strict=True))
+
+    once = list(decision_batches(ds, 16, split="all", seed=3, shards_at_once=1))
+    kw = dict(split="all", seed=3, shards_at_once=1, passes=3)
+    spread = list(decision_batches(ds, 16, **kw))
+    assert decisions(spread) == decisions(once)  # every decision, once
+    assert sorted({b.group for b in spread}) == list(range(6))  # each round: groups of 3 shards and of 2
+    rows = {g: np.concatenate([b.row for b in spread if b.group == g]) for g in range(6)}
+    assert [len(np.unique(rows[g] >> 32)) for g in range(6)] == [3, 2] * 3
+    for r in range(3):  # each round reads a share of every shard
+        assert set((np.concatenate([rows[2 * r], rows[2 * r + 1]]) >> 32).tolist()) == set(range(5))
+    group_of: dict[int, int] = {}
+    for g, rs in rows.items():  # an action's decisions (one state) come in one group
+        assert all(group_of.setdefault(row, g) == g for row in rs.tolist())
+
+    later = [b for b in spread if b.group >= 4]
+    rest = list(decision_batches(ds, 16, skip_groups=4, **kw))
+    assert [b.group for b in rest] == [b.group for b in later]
+    assert all((a.row == b.row).all() and (a.target == b.target).all() for a, b in zip(rest, later, strict=True))
+    with pytest.raises(ValueError, match="1 pass"):
+        next(decision_batches(ds, 16, shuffle=False, memo=[], passes=2))
+
+
+def test_a_run_keeps_its_evaluations_and_can_reset_its_value_head(cache, tmp_path):
+    five_shards(cache, tmp_path)
+    cfg = PolicyTrainConfig(
+        epochs=1,
+        fraction=1.0,
+        batch_size=8,
+        warmup_steps=1,
+        val_fraction=0.5,
+        val_rows=1.0,
+        shards_at_once=1,
+        passes=2,
+        eval_every=10,
+    )
+    out = tmp_path / "run"
+    train(tmp_path / "ds", out, cfg, TINY, log=lambda line: None)
+    assert {p.name for p in out.iterdir()} >= {"best.pt", "best-value.pt", "policy-step0000010.pt", "policy-ep01.pt"}
+    before, info = load_policy(out / "last.pt")
+    assert np.isfinite(info["progress"]["best_value"])
+
+    reset_value_head(out)
+    after, reset = load_policy(out / "last.pt")
+    torch.manual_seed(0)
+    fresh = PolicyValueNet(TINY).state_dict()
+    for name, p in after.state_dict().items():
+        torch.testing.assert_close(p, (fresh if name.startswith("value.") else before.state_dict())[name])
+    assert "best_value" not in reset["progress"] and reset["progress"]["step"] == info["progress"]["step"]
+    opt = _optimizer(after, PolicyTrainConfig())  # type: ignore[arg-type]
+    opt.load_state_dict(torch.load(out / "optimizer.pt", weights_only=True))
+    assert not any(p in opt.state for p in after.value.parameters())
+    assert all(p in opt.state for p in after.policy.parameters())
+
+    lines: list[str] = []
+    train(tmp_path / "ds", out, dataclasses.replace(cfg, epochs=2), log=lines.append, resume=True)
+    assert any(line.startswith("resumed") for line in lines) and (out / "policy-ep02.pt").exists()
 
 
 def test_a_run_resumes_between_groups_of_shards(cache, tmp_path):

@@ -311,6 +311,7 @@ def decision_batches(
     shuffle: bool = True,
     seed: int = 0,
     shards_at_once: int = 8,
+    passes: int = 1,
     drop_last: bool = False,
     fraction: float = 1.0,
     row_fraction: float = 1.0,
@@ -331,6 +332,16 @@ def decision_batches(
     are as in ``batches``. Shuffling mixes ``shards_at_once`` shards at a
     time; only the states their chosen decisions need are kept. The next
     group of shards loads in a thread while this one's batches are used.
+
+    ``passes`` reads every shard that many times in the pass, each time
+    keeping a random 1/``passes`` of its actions (the same split on each
+    reading, so every decision comes once) and mixing ``shards_at_once *
+    passes`` shards at a time. A group then holds as many decisions as
+    before, from ``passes`` times as many games. Every decision of a game
+    shares its result, and a value head trained on a few thousand games'
+    decisions at a time learns those games' results rather than how to
+    judge a position.
+
     ``movement`` adds the movement planes, ``aux`` the auxiliary targets.
     Each batch knows its ``group``; ``skip_groups`` leaves out the first ones,
     as a resumed pass does, and the rest come as they would have.
@@ -344,21 +355,28 @@ def decision_batches(
         raise ValueError(f"{ds.root}: not a v1 dataset (no action labels)")
     if split not in ("train", "val", "all"):
         raise ValueError(f"unknown split {split!r}")
-    if memo is not None and (shuffle or fraction < 1 or skip_groups):
-        raise ValueError("a memo holds a fixed choice of decisions: no shuffle, fraction 1, no groups skipped")
+    if memo is not None and (shuffle or fraction < 1 or skip_groups or passes > 1):
+        raise ValueError("a memo holds a fixed choice of decisions: no shuffle, fraction 1, no groups skipped, 1 pass")
+    if passes < 1:
+        raise ValueError(f"passes must be at least 1, not {passes}")
     rng = np.random.default_rng(seed)
-    order = rng.permutation(len(ds.shards)) if shuffle else np.arange(len(ds.shards))
-    groups = [order[start : start + shards_at_once] for start in range(0, len(order), shards_at_once)]
+    groups: list[tuple[int, np.ndarray]] = []  # (round, its shards)
+    width = shards_at_once * passes
+    for r in range(passes):
+        order = rng.permutation(len(ds.shards)) if shuffle else np.arange(len(ds.shards))
+        groups += [(r, order[start : start + width]) for start in range(0, len(order), width)]
     # A generator per group, so loads can run ahead and skipped groups change nothing after them.
     jobs = list(zip(range(len(groups)), groups, rng.spawn(len(groups)), strict=True))[skip_groups:]
 
-    def load(job: tuple[int, np.ndarray, np.random.Generator]) -> tuple[np.ndarray, dict[str, np.ndarray]] | None:
-        _, shards, group_rng = job
+    def load(
+        job: tuple[int, tuple[int, np.ndarray], np.random.Generator],
+    ) -> tuple[np.ndarray, dict[str, np.ndarray]] | None:
+        _, (r, shards), group_rng = job
         parts = []
         for i in shards:
             sh = ds.load(int(i))
             args = (split, val_fraction, keep, fraction, row_fraction, forced, steps, aux, group_rng)
-            if (part := _decisions(sh, int(i), *args)) is not None:
+            if (part := _decisions(sh, int(i), *args, share=(r, passes, seed))) is not None:
                 parts.append(part)
         if not parts:
             return None
@@ -437,12 +455,17 @@ def _decisions(
     steps: tuple[int, ...],
     aux: bool,
     rng: np.random.Generator,
+    share: tuple[int, int, int] = (0, 1, 0),
 ) -> dict[str, np.ndarray] | None:
-    """A shard's chosen decisions, each with its state and labels."""
+    """A shard's chosen decisions, each with its state and labels; ``share``
+    (round, rounds, seed) keeps one round's share of its actions."""
     assert sh.steps is not None and sh.n_steps is not None and sh.n_legal is not None
     assert sh.kind is not None and sh.action is not None
     rows = _select(sh, split, val_fraction, keep)
     rows = rows[sh.n_steps[rows] > 0]
+    r, rounds, seed = share
+    if rounds > 1:  # by action, so a state is kept for one round only
+        rows = rows[np.random.default_rng((seed, shard)).integers(rounds, size=len(sh.state))[rows] == r]
     if row_fraction < 1:
         rows = rows[row_hash(sh, rows) < row_fraction]
     pairs = [

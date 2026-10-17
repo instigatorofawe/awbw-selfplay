@@ -163,6 +163,9 @@ def main(argv: list[str] | None = None) -> int:
     tp.add_argument("--rating-dropout", type=float, help="chance of hiding a sample's ratings (default 0.25)")
     tp.add_argument("--val-rows", type=float, help="share of validation actions scored (default 0.1)")
     tp.add_argument("--shards-at-once", type=int, help="shards whose decisions are shuffled together (default 8)")
+    tp.add_argument(
+        "--passes", type=int, help="read each shard this often an epoch, a share of its actions each time (default 1)"
+    )
     tp.add_argument("--eval-every", type=int, help="steps between evaluations (default: once per epoch)")
     tp.add_argument("--seed", type=int)
     tp.add_argument("--no-augment", dest="augment", action="store_false", default=None)

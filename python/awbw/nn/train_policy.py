@@ -7,7 +7,10 @@ loss is v0's cross-entropy over (loss, draw, win), on a random
 ``value_fraction`` of the decisions only: a game has about 1,100 decisions
 and they all share its result, so valuing every one would show each result
 some 40 times as often as the critic sees it in v0 (one sample per turn),
-and the critic already overfits v0 in its third epoch.
+and the critic already overfits v0 in its third epoch. Over a whole dataset
+a game's decisions must also be spread out (``passes``): read a group of
+shards at a time, the full-archive run's value learned each group's
+results and judged unseen games worse than a coin flip (PLAN.md §7).
 
 A network with ``PolicyConfig.aux`` also learns what happens next in the
 game (``loader.aux_targets``) on a random ``aux_fraction`` of the decisions:
@@ -27,10 +30,13 @@ validation games' actions (by phase, against a uniform choice among the
 legal steps, and whole actions), and values every validation turn start, as
 ``eval-critic`` does. Those decisions are read from the shards once and kept
 in memory (about 1.5 GiB for v1-70k). An output directory holds
-``metrics.jsonl``, ``policy-epNN.pt``, ``best.pt`` (lowest validation policy
-loss) and ``last.pt`` + ``optimizer.pt`` for ``resume``. ``last.pt`` is also
-saved between groups of shards every ``checkpoint_minutes``, so a resumed run
-redoes at most that much.
+``metrics.jsonl``, ``policy-epNN.pt``, ``policy-stepNNNNNNN.pt`` (each
+evaluation within an epoch), ``best.pt`` and ``best-value.pt`` (lowest
+validation policy and value loss) and ``last.pt`` + ``optimizer.pt`` for
+``resume``. ``last.pt`` is also saved between groups of shards every
+``checkpoint_minutes``, so a resumed run redoes at most that much.
+``reset_value_head`` gives a run's ``last.pt`` a new value head, to resume
+with.
 
 The learning rate warms up over ``warmup_steps``, then falls to zero along a
 cosine over the planned decisions, or (``schedule`` "wsd") stays flat until
@@ -101,6 +107,7 @@ class PolicyTrainConfig:
     val_fraction: float = 0.05
     val_rows: float = 0.1  # share of the validation games' actions whose decisions are scored
     shards_at_once: int = 8
+    passes: int = 1  # reads of each shard per epoch, a share of its actions each (``decision_batches``)
     eval_every: int = 0  # steps between evaluations; 0 = once per epoch
     checkpoint_minutes: float = 60.0  # between saves of last.pt within an epoch, at groups' ends; 0: each group
     pause_at: int = 0  # stop after this many epochs, the schedule still planning ``epochs``; 0: don't
@@ -436,12 +443,12 @@ def train(
     planned = cfg.epochs * per_epoch
 
     epoch = group = step = seen = 0  # group: the current epoch's groups of shards done
-    best = math.inf
+    best = best_value = math.inf  # the lowest validation policy and value losses
     if resume and (out / "last.pt").exists():
         net, info = load_policy(out / "last.pt", device)
         progress = info["progress"]
         epoch, step, seen, best = progress["epoch"], progress["step"], progress["seen"], progress["best"]
-        group = progress.get("group", 0)
+        group, best_value = progress.get("group", 0), progress.get("best_value", math.inf)
         opt = _optimizer(net, cfg)  # type: ignore[arg-type]
         opt.load_state_dict(torch.load(out / "optimizer.pt", map_location=device, weights_only=True))
         groups = f" and {group} groups of shards" if group else ""
@@ -469,6 +476,7 @@ def train(
     held: dict[str, list] = {"policy": [], "value": []}  # validation's decisions, read once
 
     def evaluate() -> dict[str, Any]:
+        nonlocal best, best_value
         t0 = time.perf_counter()
         pol = evaluate_policy(
             net,
@@ -507,13 +515,19 @@ def train(
         log(f"  (evaluated in {time.perf_counter() - t0:.0f}s)")
         with (out / "metrics.jsonl").open("a") as f:
             f.write(json.dumps(m) + "\n")
+        if pol["loss"] < best or not (out / "best.pt").exists():
+            best = pol["loss"]
+            save_policy(out / "best.pt", net, metrics=m, **setup)
+        if m["value"]["n"] and m["value"]["loss"] < best_value:
+            best_value = m["value"]["loss"]
+            save_policy(out / "best-value.pt", net, metrics=m, **setup)
         return m
 
     saved = time.monotonic()
 
     def checkpoint() -> None:
         nonlocal saved
-        progress = {"epoch": epoch, "group": group, "step": step, "seen": seen, "best": best}
+        progress = {"epoch": epoch, "group": group, "step": step, "seen": seen, "best": best, "best_value": best_value}
         torch.save(opt.state_dict(), out / "optimizer.tmp")
         (out / "optimizer.tmp").replace(out / "optimizer.pt")
         save_policy(out / "last.pt", net, metrics=last, progress=progress, **setup)
@@ -534,6 +548,7 @@ def train(
             keep=train_keep,
             seed=cfg.seed * 1000 + epoch,
             shards_at_once=cfg.shards_at_once,
+            passes=cfg.passes,
             fraction=cfg.fraction,
             drop_last=True,
             movement=net.cfg.movement,
@@ -599,15 +614,31 @@ def train(
                 t_log, n_log = time.perf_counter(), 0
             if cfg.eval_every and step % cfg.eval_every == 0:
                 last = evaluate()
+                save_policy(out / f"policy-step{step:07d}.pt", net, metrics=last, **setup)
         ended = part and seen >= planned  # else the epoch is whole
         if not ended:
             epoch, group = epoch + 1, 0
         name = f"{cfg.epochs:05.2f}" if ended else f"{epoch:02d}"
         log(f"epoch {name} done in {time.perf_counter() - t0:.0f}s")
         last = evaluate()
-        if last["policy"]["loss"] < best or not (out / "best.pt").exists():
-            best = last["policy"]["loss"]
-            save_policy(out / "best.pt", net, metrics=last, **setup)
         save_policy(out / f"policy-ep{name}.pt", net, metrics=last, **setup)
         checkpoint()
     return last
+
+
+def reset_value_head(run: Path, seed: int = 0) -> None:
+    """Give the run in ``run`` a new value head: its ``last.pt`` gets the head
+    a new network starts with, and ``optimizer.pt`` forgets the old head's
+    moments. Resumed, the run trains it on the trunk it has; its best value
+    so far is forgotten too."""
+    net, info = load_policy(run / "last.pt")
+    torch.manual_seed(seed)
+    net.value.load_state_dict(PolicyValueNet(net.cfg).value.state_dict())
+    opt = _optimizer(net, PolicyTrainConfig())  # type: ignore[arg-type]
+    opt.load_state_dict(torch.load(run / "optimizer.pt", map_location="cpu", weights_only=True))
+    for p in net.value.parameters():
+        opt.state.pop(p, None)
+    info["progress"].pop("best_value", None)
+    torch.save(opt.state_dict(), run / "optimizer.tmp")
+    (run / "optimizer.tmp").replace(run / "optimizer.pt")
+    save_policy(run / "last.pt", net, **info)
