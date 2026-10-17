@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from awbw import _core, engine, play, rules
-from awbw.agents import RandomAgent
+from awbw.agents import Note, RandomAgent
 from awbw.games import replay
 from awbw.play import Game, attack_range, serve, step_id
 from test_policy import U, start
@@ -135,6 +135,56 @@ def test_resigning_records_the_game_for_the_agent(md):  # noqa: F811
     assert g.over and g.winner == AGENT and g.view()["decided"] == "resigned" and not g.view()["can_undo"]
     (log,) = logs
     assert (log.decided, log.winner, len(log.steps)) == ("resigned", AGENT, 0)
+
+
+class _Valuing(RandomAgent):
+    """A random agent valuing its first decision of each turn at ``first[day]`` and the rest at -1."""
+
+    def __init__(self, first: dict[int, float]):
+        super().__init__(1)
+        self.first, self.turn, self.notes = first, (0, 0), []
+
+    def choose(self, decisions):
+        s = decisions[0].state
+        turn = (int(s.day), int(s.active))
+        v = self.first.get(turn[0], -1.0) if turn != self.turn else -1.0
+        self.turn, self.notes = turn, [Note(v, v)]
+        return super().choose(decisions)
+
+
+def test_the_agent_resigns_after_two_hopeless_turns_in_a_row(md):  # noqa: F811
+    logs = []
+    agent = _Valuing({1: 0.0, 2: -0.95, 3: 0.0, 4: -0.9, 5: -0.95})
+    g = Game(start(md), HUMAN, agent, ("human", "random"), on_over=logs.append)
+    done = None
+    while not g.over:
+        g.pick(_core.ID_END_TURN)
+        while not g.human_to_move and not g.over:
+            done = g.think()
+    assert done is not None and done == g.log[-1] and done["t"] == "resigns" and done["m"] == AGENT
+    assert int(g.state.day) == 5
+    assert g.winner == HUMAN and g.view()["decided"] == "resigned" and g.view()["value"] == 0.95
+    assert [v for _, v in g.turn_values] == [0.0, -0.95, 0.0, -0.9, -0.95]  # later decisions' -1 never counted
+    (log,) = logs
+    assert (log.decided, log.winner) == ("resigned", HUMAN)
+    assert log.searched is not None and log.searched["step"][-1] == len(log.steps)
+    r = replay(log)
+    assert r.matches and len(r.moves) == len(g.log) - 1  # the resignation isn't a step
+
+    never = Game(start(md), HUMAN, _Valuing({}), ("human", "random"), resign_turns=0)
+    for _ in range(4):
+        never.pick(_core.ID_END_TURN)
+        while not never.human_to_move:
+            entry = never.think()
+            assert entry is not None and entry["t"] != "resigns"
+    assert not never.over and never.turn_values == []
+
+    g = Game(start(md), HUMAN, _Valuing({1: -0.95}), ("human", "random"))
+    g.pick(_core.ID_END_TURN)
+    while not g.human_to_move:
+        g.think()
+    assert g.turn_values == [(3, -0.95)]
+    assert g.undo() and g.turn_values == []  # the agent's turn undone, its value too
 
 
 def _post(url: str, body: dict) -> tuple[int, dict]:

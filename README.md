@@ -104,7 +104,9 @@ uv run awbw play cache/policies/run1/best.pt                   # play it yoursel
 `awbw play` starts a local server and opens the page: a validation game's
 map, COs and countries (`--map`, `--cos`, `--countries` change them), you
 as player 1 (`--side 2` for the other), the network searching 32
-simulations a decision (`--sims`, 0 for its prior). The page's New game
+simulations a decision (`--sims`, 0 for its prior) and resigning as in
+self-play, when its value is -0.9 or less at the start of two of its turns
+in a row (`--resign-value`, `--resign-turns`, 0 for never). The page's New game
 picks the next game's map (any cached two-player map, any AWBW map id, or
 a real game's setup at random), COs, armies and side. The page shows move
 and attack ranges, paths, damage previews and any unit's range

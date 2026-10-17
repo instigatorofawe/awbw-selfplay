@@ -141,13 +141,17 @@ class _Before:
     steps: int
     notes: int
     log: int
+    turn_values: int
     mover: int
 
 
 class Game:
     """A game between a person (``human``: 0 moves first, 1 second) and an agent.
 
-    ``on_over`` gets the finished game's log once, when it ends.
+    ``on_over`` gets the finished game's log once, when it ends. The agent
+    resigns by self-play's rule (``SearchConfig``): at its first noted
+    decision of a turn, when its value there was at most ``resign_value`` in
+    each of its last ``resign_turns`` turns (0 turns: never).
     """
 
     def __init__(
@@ -158,6 +162,8 @@ class Game:
         labels: tuple[str, str],
         on_over: Callable[[GameLog], None] | None = None,
         info: dict[str, Any] | None = None,
+        resign_value: float = -0.9,
+        resign_turns: int = 2,
     ):
         md = _core.find_map(start.map_id)
         if md is None:
@@ -169,6 +175,8 @@ class Game:
         self.labels = labels
         self.on_over = on_over
         self.info = info or {}
+        self.resign_value = resign_value
+        self.resign_turns = resign_turns
         self.state = start.copy()
         self.sel = _core.Selection()
         self.picks: list[int] = []  # the person's picks in the action in progress, not yet in steps
@@ -177,6 +185,7 @@ class Game:
         self.history: list[_Before] = []
         self.log: list[dict[str, Any]] = []  # each action: mover, day, text, marks (viewer's), path, kind
         self.resigned = -1  # the player who resigned
+        self.turn_values: list[tuple[int, float]] = []  # the agent's value at its first noted decision, by turn
         self.recorded = False
         self.describer = _Describer(md)
         self.lock = threading.RLock()
@@ -232,6 +241,7 @@ class Game:
             del self.steps[b.steps :]
             del self.notes[b.notes :]
             del self.log[b.log :]
+            del self.turn_values[b.turn_values :]
             self.sel = _core.Selection()
             self.picks = []
             return True
@@ -241,14 +251,19 @@ class Game:
             if not self.human_to_move:
                 raise ValueError("you can resign on your own turn")
             self.cancel()
-            self.resigned = self.human
-            self.log.append({"m": self.human, "d": int(self.state.day), "t": "resigns", "k": [], "path": []})
-            self._finish()
+            self._resign(self.human)
+
+    def _resign(self, player: int) -> dict[str, Any]:
+        self.resigned = player
+        entry = {"m": player, "d": int(self.state.day), "t": "resigns", "k": [], "path": []}
+        self.log.append(entry)
+        self._finish()
+        return entry
 
     def think(self) -> dict[str, Any] | None:
         """The agent's next action: it decides each step with a choice, forced
-        steps taken for it; the action as the log keeps it, or None if it isn't
-        the agent's turn."""
+        steps taken for it; the action as the log keeps it (or its
+        resignation), or None if it isn't the agent's turn."""
         with self.lock:
             if self.over or int(self.state.active) == self.human:
                 return None
@@ -259,6 +274,9 @@ class Game:
                 if len(legal) > 1:
                     (step,) = self.agent.choose([Decision(self.state, list(picks), legal)])
                     noted = getattr(self.agent, "notes", None)
+                    if noted and self._gives_up(noted[0].value):
+                        self.notes.append((len(self.steps), noted[0]))  # where it resigned, as self-play notes it
+                        return self._resign(int(self.state.active))
                     if noted:
                         self.notes.append((len(self.steps) + len(picks), noted[0]))
                 if _core.step_action(self.state, sel, step) is not None:
@@ -266,6 +284,15 @@ class Game:
                     return self._complete(picks, step)
                 _core.step(self.state, sel, step)
                 picks.append(step)
+
+    def _gives_up(self, value: float) -> bool:
+        """Whether the agent resigns at a decision it values at ``value``."""
+        turn = int(self.state.day) * 2 + int(self.state.active)
+        if self.resign_turns <= 0 or (self.turn_values and self.turn_values[-1][0] == turn):
+            return False
+        self.turn_values.append((turn, value))
+        last = self.turn_values[-self.resign_turns :]
+        return len(last) == self.resign_turns and all(v <= self.resign_value for _, v in last)
 
     def _complete(self, picks: list[int], step: int) -> dict[str, Any]:
         """Take the step that completes an action, after ``picks`` (taken on
@@ -280,7 +307,9 @@ class Game:
         if to is not None and slot is not None and slot >= 0:
             mp = _core.move_path(s, slot, tuple(to))
             path = mp[0][: mp[1] + 1] if mp else []
-        self.history.append(_Before(idle, len(self.steps), len(self.notes), len(self.log), mover))
+        self.history.append(
+            _Before(idle, len(self.steps), len(self.notes), len(self.log), len(self.turn_values), mover)
+        )
         status = _core.step(s, self.sel, step)
         if status not in (_core.OK, _core.TRAPPED):
             raise RuntimeError(f"step {step} was refused: {_core.status_name(status)}")

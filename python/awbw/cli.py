@@ -317,6 +317,15 @@ def main(argv: list[str] | None = None) -> int:
         "--sims", type=int, default=32, help="it searches each decision this much (default 32; 0: plays its prior)"
     )
     pl.add_argument("--considered", type=int, default=16, help="steps the search's root considers (default 16)")
+    pl.add_argument(
+        "--resign-value",
+        type=float,
+        default=-0.9,
+        help="a turn the network starts at or below this value counts toward resigning (default -0.9)",
+    )
+    pl.add_argument(
+        "--resign-turns", type=int, default=2, help="such turns in a row before it resigns; 0: never (default 2)"
+    )
     pl.add_argument("--map", type=int, help="an AWBW map id (default: a validation game's)")
     pl.add_argument("--cos", nargs=2, metavar=("P1", "P2"), help="the COs, by name or id (default: the game's)")
     pl.add_argument("--countries", nargs=2, metavar=("P1", "P2"), help="by name or code (default: the game's)")
@@ -1149,7 +1158,16 @@ def _play(args, http: Http) -> int:
         base = bases[int(rng.integers(len(bases)))]
         start = start_for(base, rng, setup.map_id, setup.cos, setup.countries)
         labels = ("human", label) if setup.human == 0 else (label, "human")
-        return Game(start, setup.human, agent, labels, on_over=record_to(record), info=info)
+        return Game(
+            start,
+            setup.human,
+            agent,
+            labels,
+            on_over=record_to(record),
+            info=info,
+            resign_value=args.resign_value,
+            resign_turns=args.resign_turns,
+        )
 
     server = serve(new_game({}), args.port, new_game)
     print(f"playing {label} at {server.url} (finished games go to {record}); Ctrl-C stops")

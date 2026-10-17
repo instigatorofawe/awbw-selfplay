@@ -1840,6 +1840,10 @@ rules exactly (two players, no fog, as everywhere in v1).
     picks decoded), `/api/unit?x&y` (any unit's ranges), and `POST`
     `/api/pick`, `cancel`, `undo`, `resign`, `think` (the network's next
     action, which the page animates) and `new`.
+  - The network resigns by self-play's rule (done): at its first decision
+    of a turn, when its value there was at most -0.9 in each of its last
+    two turns (`--resign-value`, `--resign-turns`; an undo forgets the
+    turns it undoes).
   - New game opens a form (done): the map (the cached two-player maps by
     name, any AWBW map id, fetched if new, or a real game's setup at
     random), each player's CO (Sonja aside, as in training) and army, and
