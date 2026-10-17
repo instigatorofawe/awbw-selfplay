@@ -441,7 +441,8 @@ def _crawl(args, http: Http) -> int:
     """Walk ``query`` back through date slices, fetching each slice's maps and replays.
 
     Each slice's index is saved as it is searched, so a rerun resumes without
-    searching again, and cached replays are never fetched twice.
+    searching again, and cached replays are never fetched twice. Maps come from
+    awbw.amarriner.com, at most one request a second whatever ``--rate``.
     """
     replays = args.dir or cache_dir() / "replays"
     indexes = replays / "index" if args.dir else cache_dir() / "index"
@@ -451,6 +452,7 @@ def _crawl(args, http: Http) -> int:
     before: str | None = args.before
     fetched = failed = 0
     start = time.monotonic()
+    maps_http = Http(min_interval=max(http.min_interval, 1.0))
     while before is not None and used < cap:
         out = indexes / f"{slug}_before_{before.replace('-', '')}.jsonl"
         if out.exists():
@@ -462,7 +464,7 @@ def _crawl(args, http: Http) -> int:
         print(f"slice before {before}: {len(entries)} games {dates[:1]}..{dates[-1:]} -> {out}", file=sys.stderr)
         for map_id in dict.fromkeys(e.map_id for e in entries):
             try:
-                fetch_map(map_id, http)
+                fetch_map(map_id, maps_http)
             except (HttpError, ValueError) as e:
                 print(f"map {map_id}: {e}", file=sys.stderr)
         todo = [e.game_id for e in entries if not replay_path(e.game_id, replays).exists()]
