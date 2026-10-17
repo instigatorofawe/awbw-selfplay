@@ -1228,7 +1228,9 @@ The 128×6 transformer on v1-full (171,791 games, about 192M training
 decisions per epoch) for 8 epochs, 1.54B decisions: 75 times the grid's
 length. `bigrun.sh` on the box, started 2026-10-15 after grid4; the log
 is `cache/logs/bigrun.log`, the runs `cache/runs/tf128-full` and
-`cache/runs/tf128-full-mid`.
+`cache/runs/tf128-full-mid`. Its value learned each group of shards'
+results, so it stopped after epoch 1 and goes on mixed, as `tf128-mix`
+(`bigrun2.sh`, below).
 
 - **Restart:** training began at 15:10 and stopped three times, at step
   13,400 each time, on a stored state that fails the engine's check: a
@@ -1275,6 +1277,51 @@ is `cache/logs/bigrun.log`, the runs `cache/runs/tf128-full` and
   plays the midway copy and `tf128-s1` the same way.
 - If the midway copy doesn't beat `tf128-s1` clearly, the rest of the
   run is in question: stop it and rethink, rather than spend 5 more days.
+- **Epoch 1: the value learned the games in hand.** Validation every 250k
+  steps:
+
+  | step | policy | value | ECE |
+  |---|---|---|---|
+  | 250k | 1.0923 | 0.5595 | 0.052 |
+  | 500k | 1.0898 | 0.5860 | 0.081 |
+  | 750k | 1.0857 | 1.0299 | 0.230 |
+
+  - At step 750k, 60% of validation positions were valued below 0.05 or
+    above 0.95; those sides won 29% and 74%. That is worse than a coin
+    flip (0.69) on every range of days.
+  - The training value loss was a sawtooth: about 0.40 at the start of
+    each group of shards, falling to 0.25 by its end, every 11k steps.
+    v1-full has 2,166 shards of about 80 games. Read 32 at a time, a
+    group holds about 2,500 games, and each game's ~1,100 decisions, ~55
+    of them valued, come within its 11k steps. The net learns those
+    games' results, then judges new games by them. The grid's runs took
+    7.7% of the decisions, about 4 valued per game per epoch, and didn't
+    show it.
+  - Checkpoints were saved only at groups' ends, where the sawtooth is
+    lowest, so none was earlier or healthier than epoch 1.
+  - The policy was unharmed (training and validation level). It was
+    stopped on 2026-10-16 at 23:34, at step 756k.
+- **Mixed: `tf128-mix`** (`bigrun2.sh`, from 2026-10-16 23:55), the same
+  schedule, pause and midway check, as `tf128-mix` and `tf128-mix-mid`:
+  - It starts from `tf128-full`'s epoch-1 checkpoint with a new value
+    head (`reset_value_head`: the head a new network starts with, its
+    optimizer moments dropped). The trunk and policy are kept.
+  - `--passes 16` reads each shard 16 times an epoch, a random 1/16 of its
+    actions each time (split by action, so a state is held once), 512
+    shards at a time. A group then holds as many decisions from about
+    40,000 games. Loading a shard takes 0.2–0.3 s, so a group's 512 load
+    in about 3 minutes in the read-ahead thread, against about 26 minutes
+    of training.
+  - `--value-fraction 0.01`: about 11 valued decisions per game per epoch,
+    under one per game in a group (55 before).
+  - Validation every 125k steps, each checkpoint kept
+    (`policy-stepNNNNNNN.pt`), and `best-value.pt` beside `best.pt`.
+  - The check: at the first validation (step 875k, about 5 h in), the
+    value should be back under about 0.56 with its ECE under about 0.05.
+    If not, restart from scratch with the same reading.
+  - Speed: 1,790 decisions/s, as before, so the read-ahead keeps up. The
+    box uses 26 of its 46 GB RAM and 11.2 GB of the GPU at 98%. Epoch 4
+    should land late on 2026-10-20, with the midway results on 2026-10-21.
 
 ### Later
 
